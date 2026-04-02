@@ -437,4 +437,4 @@ class Scanner:
             f"Up={ask_up:.3f} Down={ask_down:.3f} Sum={combined:.3f} "
             f"Net=+${net:.3f}"
         )
-        await asyncio.get_event_loop().run_in_executor(None, self.on_bracket, opp)
+        self.on_bracket(opp)

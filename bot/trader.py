@@ -152,7 +152,7 @@ class Trader:
 
     def on_bracket(self, opp: BracketOpportunity):
         """Called by scanner when a bracket opportunity is found."""
-        asyncio.get_event_loop().create_task(self._handle_opportunity(opp))
+        asyncio.get_running_loop().create_task(self._handle_opportunity(opp))
 
     async def _handle_opportunity(self, opp: BracketOpportunity):
         self.stats["brackets_attempted"] += 1
@@ -200,7 +200,7 @@ class Trader:
             self.stats["brackets_opened"] += 1
             self.state.add_bracket(bracket)
             # Schedule cancel task for unfilled orders
-            task = asyncio.get_event_loop().create_task(
+            task = asyncio.get_running_loop().create_task(
                 self._auto_cancel(bracket)
             )
             self._cancel_tasks[bracket.id] = task
@@ -237,7 +237,7 @@ class Trader:
                     order_type=OrderType.GTC,
                 ),
             ]
-            resp = await asyncio.get_event_loop().run_in_executor(
+            resp = await asyncio.get_running_loop().run_in_executor(
                 None, self._client.create_and_post_orders, orders
             )
             if resp and len(resp) >= 2:
@@ -278,7 +278,7 @@ class Trader:
 
         # Simulate resolution after window closes (random 15-900s)
         resolution_delay = random.uniform(15, 120)
-        asyncio.get_event_loop().create_task(
+        asyncio.get_running_loop().create_task(
             self._sim_resolve(b, resolution_delay)
         )
         log.info(f"[SIM][{b.id}] Both legs filled | resolves in {resolution_delay:.0f}s")
@@ -326,7 +326,7 @@ class Trader:
             for leg in [b.leg_up, b.leg_down]:
                 if leg.order_id and leg.status == OrderStatus.PENDING:
                     try:
-                        await asyncio.get_event_loop().run_in_executor(
+                        await asyncio.get_running_loop().run_in_executor(
                             None, self._client.cancel, leg.order_id
                         )
                     except Exception as e:
