@@ -107,7 +107,9 @@ class Scanner:
                             markets.append(info)
                     if markets:
                         break
-                    log.warning(f"tag_slug=up-or-down returned 0 matching markets, retrying without tag filter")
+                    sample_titles = [m.get("question") or m.get("title", "") for m in data[:10]]
+                    log.warning(f"0 matching markets from API ({len(data)} total). Sample titles: {sample_titles}")
+                    log.warning("Retrying without tag filter" if params.get("tag_slug") else "Both fetches exhausted")
         except Exception as e:
             log.error(f"Market fetch failed: {e}")
         return markets
