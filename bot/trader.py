@@ -396,6 +396,8 @@ class Trader:
                     f"dn: ask={b.leg_down.price:.3f} lim={limit_down:.3f} sh={shares_down:.4f} | "
                     f"age={b.age_ms:.0f}ms. Initiating emergency exit."
                 )
+                b.status = "partial_fill"
+                self._log_trade(b, "partial_fill")
                 await self._emergency_exit(b)
                 return False
 
@@ -467,7 +469,7 @@ class Trader:
                     )
                     self.stats["emergency_exits_succeeded"] += 1
                     b.actual_net_usdc = -realised_loss
-                    await self._cancel_bracket(b)
+                    # Caller (_handle_opportunity else branch) handles risk.close + cleanup
                     return
                 else:
                     log.warning(
@@ -497,11 +499,7 @@ class Trader:
         b.status = "stranded"
         b.closed_at = time.time()
         self._log_trade(b, "stranded")
-        self.risk.close(b.market_condition_id, STRATEGY.position_size_usdc * 2)
-        self._open_brackets.pop(b.id, None)
-
-        # Exit succeeded — clean up via normal cancel path (handles risk + state)
-        await self._cancel_bracket(b)
+        # Caller (_handle_opportunity else branch) handles risk.close + _open_brackets cleanup
 
     async def _sim_place(self, b: Bracket) -> bool:
         """Simulate order placement with realistic latency and fill probability."""

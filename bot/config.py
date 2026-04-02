@@ -39,7 +39,7 @@ class StrategyConfig:
     bracket_threshold: float = 0.97
 
     # Position sizing
-    position_size_usdc: float = 10.0   # USDC per leg (both legs = 2x this)
+    position_size_usdc: float = 5.0    # USDC per leg; total deployed per bracket = 2x this
     max_position_size_usdc: float = 50.0
     min_position_size_usdc: float = 5.0
 
