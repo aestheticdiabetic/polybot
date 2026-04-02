@@ -35,14 +35,33 @@ def _clob_valid_shares(target: float, price: float) -> float:
     The required share granularity depends on the price fraction.  Treating
     price as a 0.001-tick value (covers 0.01 and 0.1 tick too), the valid
     step is 1000 / gcd(round(price×1000), 1000) share-hundredths.
+
+    Accounts for float representation: py_clob_client computes floor(shares*100)
+    internally. Due to IEEE 754, shares like 10.2 are stored as 10.199999...,
+    causing floor(shares*100) to give 1019 instead of 1020. This function ensures
+    the value py_clob_client ACTUALLY computes still yields a valid maker amount.
     """
     p_int = round(price * 1000)
     step  = 1000 // math.gcd(p_int, 1000)   # divisor for s = floor(shares×100)
-    max_s = math.floor(target * 100)
+    max_s = math.floor(target * 100 + 1e-9)  # epsilon for target float imprecision
     valid_s = (max_s // step) * step
     if valid_s <= 0:
         valid_s = step   # ensure at least one step
-    return valid_s / 100.0
+
+    # Predict what py_clob_client will compute (floor of float representation)
+    # and verify the resulting maker amount is valid (≤ 2 decimal places).
+    p_int_100 = round(price * 100)  # price in cents
+    while valid_s > 0:
+        shares = valid_s / 100.0
+        # What py_clob_client actually computes: floor(shares * 100)
+        # Due to float imprecision, this may be valid_s - 1.
+        actual_taker = math.floor(shares * 100)
+        # Verify maker amount precision: (actual_taker / 100) * price must have ≤ 2dp
+        # Check using integer math: actual_taker * p_int_100 must be divisible by 100
+        if (actual_taker * p_int_100) % 100 == 0:
+            return shares
+        valid_s -= step
+    return step / 100.0
 
 
 class OrderStatus(Enum):
@@ -89,6 +108,8 @@ class Bracket:
     bid_down: float = 0.0
     limit_up: float = 0.0   # FOK limit price for UP leg (max profitable price)
     limit_down: float = 0.0 # FOK limit price for DOWN leg
+    submitted_shares_up: float = 0.0     # actual shares submitted in order (after revalidation)
+    submitted_shares_down: float = 0.0   # actual shares submitted in order (after revalidation)
 
 
 class RiskGuard:
@@ -524,6 +545,12 @@ class Trader:
                     ),
                 )
 
+            # Track actual submitted shares (after limit price revalidation)
+            # for use in emergency exit. These may differ from b.leg_up/down.shares
+            # if the limit prices differ from ask prices.
+            b.submitted_shares_up = shares_up
+            b.submitted_shares_down = shares_down
+
             # Submit both in a single HTTP request.
             # DOWN goes in slot 0: if the CLOB processes batch entries sequentially,
             # DOWN lands first and competes before other bots' DOWN orders.
@@ -642,7 +669,12 @@ class Trader:
 
         exit_price = round(bid_price * (1.0 - STRATEGY.emergency_exit_slippage_pct), 2)
         exit_price = max(exit_price, 0.01)
-        exit_shares = _clob_valid_shares(filled_leg.shares, exit_price)
+        # Use the ACTUAL submitted shares (after limit revalidation in _live_place),
+        # not the original bracket shares which may differ.
+        # Revalidating here with a lower (exit) price could compute a larger share
+        # count than was actually filled, causing "not enough balance" errors.
+        submitted_shares = b.submitted_shares_up if filled_leg is b.leg_up else b.submitted_shares_down
+        exit_shares = submitted_shares if submitted_shares > 0 else _clob_valid_shares(filled_leg.shares, exit_price)
 
         from py_clob_client.clob_types import OrderArgs, OrderType
         loop = asyncio.get_running_loop()
