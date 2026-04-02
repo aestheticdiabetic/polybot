@@ -164,6 +164,16 @@ class Trader:
             return
 
         size = STRATEGY.position_size_usdc
+        # Equal-shares sizing: buy the same number of shares on each leg so
+        # payout is identical regardless of which side wins.
+        # total_budget = 2*size; n_shares = total_budget / combined
+        # size_up = n_shares * ask_up; size_down = n_shares * ask_down
+        combined = opp.ask_up + opp.ask_down
+        total_budget = size * 2
+        n_shares = round(total_budget / combined, 4)
+        size_up   = round(n_shares * opp.ask_up,   4)
+        size_down = round(n_shares * opp.ask_down, 4)
+
         bracket = Bracket(
             id=str(uuid.uuid4())[:8],
             market_condition_id=opp.market.condition_id,
@@ -174,22 +184,22 @@ class Trader:
                 token_id=opp.market.token_id_up,
                 side="UP",
                 price=opp.ask_up,
-                size_usdc=size,
-                shares=round(size / opp.ask_up, 2),
+                size_usdc=size_up,
+                shares=n_shares,
             ),
             leg_down=Leg(
                 token_id=opp.market.token_id_down,
                 side="DOWN",
                 price=opp.ask_down,
-                size_usdc=size,
-                shares=round(size / opp.ask_down, 2),
+                size_usdc=size_down,
+                shares=n_shares,
             ),
             detected_spread=opp.spread,
             expected_net_usdc=opp.net_profit_usdc,
             sim_mode=SIM.enabled,
         )
 
-        self.risk.open(opp.market.condition_id, size * 2)
+        self.risk.open(opp.market.condition_id, total_budget)
         self._open_brackets[bracket.id] = bracket
 
         t0 = time.time()
@@ -287,24 +297,22 @@ class Trader:
     async def _sim_resolve(self, b: Bracket, delay: float):
         """Simulate market resolution."""
         await asyncio.sleep(delay)
-        # One leg wins, one loses — always net positive if bracket was valid
-        winning_side = random.choice(["UP", "DOWN"])
-        size = STRATEGY.position_size_usdc
-        winning_shares = b.leg_up.shares if winning_side == "UP" else b.leg_down.shares
-        gross_return = winning_shares * 1.0  # $1 per share at resolution
-        fee = size * 2 * STRATEGY.taker_fee_pct
-        gas = SIM.gas_fee_usdc_per_redemption if SIM.include_gas_fees else 0
-        net = gross_return - (size * b.leg_up.price + size * b.leg_down.price) / 1 - fee - gas
-        # Simplified: net = size*(1 - combined_ask) - fees
-        net = size * b.detected_spread - fee - gas
+        # With equal-shares sizing both legs hold the same number of shares,
+        # so payout is identical regardless of which side wins.
+        total_cost = b.leg_up.size_usdc + b.leg_down.size_usdc
+        gross = b.leg_up.shares - total_cost   # $1/share payout minus cost
+        fee   = total_cost * STRATEGY.taker_fee_pct
+        gas   = SIM.gas_fee_usdc_per_redemption if SIM.include_gas_fees else 0
+        net   = gross - fee - gas
 
         b.actual_net_usdc = net
         b.status = "won" if net > 0 else "lost"
         b.closed_at = time.time()
 
         self.stats["brackets_won" if net > 0 else "brackets_lost"] += 1
-        self.stats["total_gross_usdc"] += size * b.detected_spread
-        self.stats["total_fees_usdc"]  += fee + gas
+        self.stats["total_gross_usdc"] += gross
+        self.stats["total_fees_usdc"]  += fee
+        self.stats["total_gas_usdc"]   += gas
         self.stats["total_net_usdc"]   += net
 
         self.risk.close(b.market_condition_id, size * 2)

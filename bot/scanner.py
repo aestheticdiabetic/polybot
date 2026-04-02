@@ -434,10 +434,14 @@ class Scanner:
         self._recent_brackets[m.condition_id] = time.time()
         self.stats["brackets_detected"] += 1
 
-        size = STRATEGY.position_size_usdc
-        gross = size * (1.0 - combined)
-        fee   = size * 2 * STRATEGY.taker_fee_pct
-        net   = gross - fee
+        # Equal-shares sizing: total spend = 2*size, shares = 2*size/combined
+        # Payout = shares × $1 = 2*size/combined (guaranteed regardless of outcome)
+        size         = STRATEGY.position_size_usdc
+        total_spend  = size * 2
+        n_shares     = total_spend / combined
+        gross        = n_shares - total_spend
+        fee          = total_spend * STRATEGY.taker_fee_pct
+        net          = gross - fee
 
         opp = BracketOpportunity(
             market=m,
