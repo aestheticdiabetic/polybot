@@ -7,6 +7,7 @@ import logging
 import os
 import time
 import base64
+import secrets
 from pathlib import Path
 
 from aiohttp import web
@@ -17,8 +18,18 @@ log = logging.getLogger("dashboard")
 
 DASHBOARD_DIR = Path(__file__).parent
 
+# One-time session token generated at startup.
+# The HTML page sets this as a cookie on first load (after Basic Auth).
+# All subsequent API fetch() calls send the cookie automatically,
+# avoiding 401 round-trips that cause Chrome's native auth dialog to flash.
+_SESSION_TOKEN = secrets.token_hex(32)
+
 
 def _check_auth(request: web.Request) -> bool:
+    # Fast path: session cookie (used by all JS fetch() calls after page load)
+    if request.cookies.get("polybotSession") == _SESSION_TOKEN:
+        return True
+    # Slow path: Basic Auth (used on initial page load)
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Basic "):
         return False
@@ -131,7 +142,16 @@ async def create_app(state):
                 text="Unauthorised",
             )
         html_path = DASHBOARD_DIR / "index.html"
-        return web.FileResponse(html_path)
+        # Serve HTML and set session cookie so subsequent API fetch() calls
+        # are authenticated via cookie (no more 401/WWW-Authenticate cycles
+        # that trigger Chrome's native auth dialog flash).
+        content = html_path.read_bytes()
+        resp = web.Response(body=content, content_type="text/html")
+        resp.set_cookie(
+            "polybotSession", _SESSION_TOKEN,
+            httponly=True, samesite="Strict", path="/"
+        )
+        return resp
 
     app.router.add_get("/",           dashboard_html)
     app.router.add_get("/api/status", api_status)
