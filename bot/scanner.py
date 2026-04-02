@@ -85,6 +85,37 @@ class Scanner:
     def tracked_market_count(self) -> int:
         return len(self._markets)
 
+    def get_markets_snapshot(self) -> list:
+        """Return current price state for all tracked markets (for dashboard)."""
+        now = time.time()
+        result = []
+        for cid, m in self._markets.items():
+            ps_up   = self._prices.get(m.token_id_up)
+            ps_down = self._prices.get(m.token_id_down)
+            ask_up   = ps_up.ask_up   if ps_up   else None
+            ask_down = ps_down.ask_down if ps_down else None
+            combined = round(ask_up + ask_down, 4) if (ask_up and ask_down) else None
+            stale = (
+                not ps_up or not ps_down or
+                now - ps_up.last_update > 30 or
+                now - ps_down.last_update > 30
+            )
+            time_left = round(m.end_time - now) if m.end_time else None
+            result.append({
+                "condition_id": cid[:10] + "…",
+                "asset": m.asset,
+                "window": m.window,
+                "title": m.title,
+                "ask_up": round(ask_up, 4) if ask_up else None,
+                "ask_down": round(ask_down, 4) if ask_down else None,
+                "combined": combined,
+                "spread_pct": round((1.0 - combined) * 100, 3) if combined else None,
+                "time_left_s": time_left if time_left and time_left > 0 else None,
+                "stale": stale,
+            })
+        result.sort(key=lambda x: (x["asset"], x["window"]))
+        return result
+
     # ── Market discovery ─────────────────────────────────────────
 
     # Full name → ticker mapping for Polymarket event titles
@@ -261,7 +292,13 @@ class Scanner:
                     await self._subscribe_all(ws)
                     log.info("WebSocket connected, subscribed to price feeds")
                     async for msg in ws:
-                        await self._handle_message(json.loads(msg))
+                        if not msg:
+                            continue
+                        try:
+                            parsed = json.loads(msg)
+                        except (json.JSONDecodeError, ValueError):
+                            continue
+                        await self._handle_message(parsed)
             except Exception as e:
                 self.stats["ws_reconnects"] += 1
                 log.warning(f"WebSocket error ({e}), reconnect in {backoff}s")

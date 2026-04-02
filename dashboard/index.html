@@ -80,6 +80,17 @@
   .log-opened { color: var(--blue); }
   .log-cancelled { color: var(--amber); }
 
+  /* Markets panel */
+  .markets-filters { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+  .markets-filters input, .markets-filters select { font-size: 11px; padding: 5px 8px; }
+  #markets-table { font-size: 11px; }
+  #markets-table td { padding: 5px 8px; }
+  #markets-table th { font-size: 9px; }
+  .spread-hot { color: var(--green); font-weight: 700; }
+  .spread-warm { color: var(--amber); }
+  .stale-row td { opacity: 0.4; }
+  .markets-count { font-size: 11px; color: var(--muted); margin-left: auto; }
+
   /* Sim panel */
   .sim-panel { background: #f59e0b0a; border: 1px solid #f59e0b33; border-radius: 8px; padding: 14px; margin-bottom: 16px; }
   .sim-panel h3 { font-size: 11px; color: #f59e0b; letter-spacing: 2px; margin-bottom: 10px; }
@@ -218,12 +229,44 @@
     <div id="log-output"></div>
   </div>
 
+  <!-- Markets debug panel -->
+  <div class="section">
+    <div style="display:flex;align-items:center;margin-bottom:14px;">
+      <span class="section-title" style="margin-bottom:0;">Tracked Markets (debug)</span>
+      <span class="markets-count" id="markets-count"></span>
+    </div>
+    <div class="markets-filters">
+      <input type="text" id="mkt-search" placeholder="filter asset or title…" style="width:200px;" oninput="renderMarkets()">
+      <select id="mkt-window" onchange="renderMarkets()">
+        <option value="">all windows</option>
+        <option value="5M">5M</option>
+        <option value="1H">1H</option>
+        <option value="24H">24H</option>
+      </select>
+      <select id="mkt-sort" onchange="renderMarkets()">
+        <option value="spread">sort: spread ↓</option>
+        <option value="asset">sort: asset</option>
+        <option value="time">sort: time left ↑</option>
+      </select>
+    </div>
+    <div style="max-height:400px;overflow-y:auto;">
+      <table id="markets-table" width="100%">
+        <thead><tr>
+          <th>ASSET</th><th>WIN</th><th>ASK UP</th><th>ASK DN</th>
+          <th>COMBINED</th><th>SPREAD</th><th>TIME LEFT</th><th>TITLE</th>
+        </tr></thead>
+        <tbody id="markets-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
 </main>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script>
 const POLL_MS = 5000;
 let mode = 'sim';
+let marketsData = [];
 let pnlData = [], pnlLabels = [];
 let spreadBuckets = new Array(20).fill(0);
 let latencyBuckets = new Array(20).fill(0);
@@ -438,6 +481,65 @@ function initCharts() {
   });
 }
 
+function fmtTimeLeft(s) {
+  if (s == null) return '—';
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+}
+
+async function loadMarkets() {
+  const data = await apiFetch('/api/markets');
+  marketsData = data;
+  renderMarkets();
+}
+
+function renderMarkets() {
+  const search  = (document.getElementById('mkt-search').value || '').toLowerCase();
+  const winFilt = document.getElementById('mkt-window').value;
+  const sortBy  = document.getElementById('mkt-sort').value;
+  const threshold = 0.97; // mirror STRATEGY.bracket_threshold
+
+  let rows = marketsData.filter(m => {
+    if (winFilt && m.window !== winFilt) return false;
+    if (search && !m.asset.toLowerCase().includes(search) && !m.title.toLowerCase().includes(search)) return false;
+    return true;
+  });
+
+  if (sortBy === 'spread') {
+    rows.sort((a, b) => (b.spread_pct ?? -999) - (a.spread_pct ?? -999));
+  } else if (sortBy === 'asset') {
+    rows.sort((a, b) => a.asset.localeCompare(b.asset) || a.window.localeCompare(b.window));
+  } else if (sortBy === 'time') {
+    rows.sort((a, b) => (a.time_left_s ?? 999999) - (b.time_left_s ?? 999999));
+  }
+
+  document.getElementById('markets-count').textContent =
+    rows.length + ' / ' + marketsData.length + ' markets';
+
+  const tbody = document.getElementById('markets-tbody');
+  tbody.innerHTML = '';
+  rows.forEach(m => {
+    const spreadCls = m.combined != null && m.combined < threshold
+      ? 'spread-hot'
+      : m.combined != null && m.combined < threshold + 0.02
+        ? 'spread-warm' : '';
+    const tr = document.createElement('tr');
+    if (m.stale) tr.className = 'stale-row';
+    tr.innerHTML = `
+      <td><strong>${m.asset}</strong></td>
+      <td style="color:var(--muted)">${m.window}</td>
+      <td>${m.ask_up != null ? m.ask_up.toFixed(4) : '—'}</td>
+      <td>${m.ask_down != null ? m.ask_down.toFixed(4) : '—'}</td>
+      <td>${m.combined != null ? m.combined.toFixed(4) : '—'}</td>
+      <td class="${spreadCls}">${m.spread_pct != null ? m.spread_pct.toFixed(3) + '%' : '—'}</td>
+      <td style="color:var(--muted)">${fmtTimeLeft(m.time_left_s)}</td>
+      <td style="color:var(--muted);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${m.title}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
 // Poll loop
 async function poll() {
   try {
@@ -446,6 +548,7 @@ async function poll() {
     updateTrades(d);
   } catch (e) { console.error('Poll error:', e); }
   try { await loadLogs(); } catch(e) {}
+  try { await loadMarkets(); } catch(e) {}
 }
 
 document.addEventListener('DOMContentLoaded', async () => {

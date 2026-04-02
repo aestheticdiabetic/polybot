@@ -119,6 +119,10 @@ async def create_app(state):
         return web.json_response(d["recent_trades"])
 
     @_auth_required
+    async def api_markets(request):
+        return web.json_response(state.get_markets())
+
+    @_auth_required
     async def api_logs(request):
         """Return last N lines of trade log."""
         n = int(request.rel_url.query.get("n", 100))
@@ -158,8 +162,9 @@ async def create_app(state):
     app.router.add_post("/api/stop",  api_stop)
     app.router.add_get("/api/config", api_config)
     app.router.add_post("/api/config", api_update_config)
-    app.router.add_get("/api/trades", api_trades)
-    app.router.add_get("/api/logs",   api_logs)
+    app.router.add_get("/api/trades",   api_trades)
+    app.router.add_get("/api/markets",  api_markets)
+    app.router.add_get("/api/logs",     api_logs)
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()

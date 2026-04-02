@@ -54,6 +54,7 @@ async def run_bot(state: StateManager):
             state.update_scanner_stats(scanner.stats)
             state.update_trader_stats(trader.stats)
             state.update_redeemer_stats(redeemer.stats)
+            state.update_markets(scanner.get_markets_snapshot())
             await asyncio.sleep(2)
 
     asyncio.get_event_loop().create_task(sync_stats())
