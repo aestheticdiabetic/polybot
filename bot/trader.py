@@ -297,10 +297,21 @@ class Trader:
             # Parse response — index 0 = UP, index 1 = DOWN
             resp_up = results[0] if results and len(results) > 0 else {}
             resp_dn = results[1] if results and len(results) > 1 else {}
-            up_id     = (resp_up.get("orderID") or "") if isinstance(resp_up, dict) else ""
-            dn_id     = (resp_dn.get("orderID") or "") if isinstance(resp_dn, dict) else ""
-            up_status = (resp_up.get("status") or "").lower() if isinstance(resp_up, dict) else ""
-            dn_status = (resp_dn.get("status") or "").lower() if isinstance(resp_dn, dict) else ""
+
+            log.debug(f"[{b.id}] raw batch response: {results!r}")
+
+            def _parse(resp):
+                if not isinstance(resp, dict):
+                    return "", "", "", ""
+                return (
+                    (resp.get("orderID") or ""),
+                    (resp.get("status") or "").lower(),
+                    (resp.get("errorCode") or resp.get("error_code") or ""),
+                    (resp.get("message") or resp.get("errorMsg") or ""),
+                )
+
+            up_id,  up_status,  up_err,  up_msg  = _parse(resp_up)
+            dn_id,  dn_status,  dn_err,  dn_msg  = _parse(resp_dn)
 
             up_filled = up_status == "matched"
             dn_filled = dn_status == "matched"
@@ -322,22 +333,37 @@ class Trader:
             if up_filled and dn_filled:
                 log.info(
                     f"[{b.id}] Both legs filled (FOK) | "
-                    f"Up={up_id} Down={dn_id}"
+                    f"Up={up_id} Down={dn_id} | "
+                    f"ask_up={b.leg_up.price} ask_dn={b.leg_down.price} "
+                    f"shares={b.leg_up.shares:.4f}"
                 )
                 await self._live_resolve(b)
                 return True
 
             if up_filled or dn_filled:
                 filled_side = "UP" if up_filled else "DOWN"
+                missed_side = "DOWN" if up_filled else "UP"
+                missed_err  = dn_err  if up_filled else up_err
+                missed_msg  = dn_msg  if up_filled else up_msg
                 log.warning(
-                    f"[{b.id}] Partial fill — {filled_side} filled, other cancelled. "
+                    f"[{b.id}] Partial fill — {filled_side} filled, {missed_side} cancelled "
+                    f"[err={missed_err or 'none'} msg={missed_msg or 'none'}] | "
+                    f"ask_up={b.leg_up.price} ask_dn={b.leg_down.price} "
+                    f"shares={b.leg_up.shares:.4f} age={b.age_ms:.0f}ms. "
                     f"Initiating emergency exit."
                 )
                 await self._emergency_exit(b)
                 return False
 
             # Neither filled — clean miss, no exposure
-            log.info(f"[{b.id}] Both legs cancelled (FOK) — no fill")
+            log.info(
+                f"[{b.id}] Both legs cancelled (FOK) — no fill | "
+                f"up: status={up_status!r} err={up_err!r} msg={up_msg!r} | "
+                f"dn: status={dn_status!r} err={dn_err!r} msg={dn_msg!r} | "
+                f"asked up={b.leg_up.price:.3f}×{b.leg_up.shares:.4f}sh "
+                f"dn={b.leg_down.price:.3f}×{b.leg_down.shares:.4f}sh "
+                f"spread={b.detected_spread:.4f} age={b.age_ms:.0f}ms"
+            )
             return False
 
         except Exception as e:
