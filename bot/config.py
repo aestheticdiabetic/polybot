@@ -38,6 +38,11 @@ class StrategyConfig:
     # 0.97 → 3% spread → ~1% net margin after fees.
     bracket_threshold: float = 0.97
 
+    # Near-bracket threshold — when combined ask crosses this value (heading down
+    # toward bracket_threshold), the trader pre-warms the CLOB metadata cache and
+    # pre-signs both orders so the critical path at actual threshold is just one POST.
+    near_bracket_threshold: float = 0.985
+
     # Position sizing
     position_size_usdc: float = 5.0    # USDC per leg; total deployed per bracket = 2x this
     max_position_size_usdc: float = 50.0

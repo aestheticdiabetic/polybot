@@ -136,6 +136,9 @@ class Trader:
         self._client = None
         self._open_brackets: Dict[str, Bracket] = {}
         self._cancel_tasks: Dict[str, asyncio.Task] = {}
+        # Pre-signed orders keyed by condition_id.  Populated by _presign_orders when
+        # the scanner fires on_near_bracket; consumed (and cleared) by _live_place.
+        self._presigned: Dict[str, dict] = {}
         self.stats = {
             "brackets_attempted": 0,
             "brackets_stale_skipped": 0,
@@ -185,6 +188,87 @@ class Trader:
     def on_bracket(self, opp: BracketOpportunity):
         """Called by scanner when a bracket opportunity is found."""
         asyncio.get_running_loop().create_task(self._handle_opportunity(opp))
+
+    def on_near_bracket(self, opp: BracketOpportunity):
+        """Called by scanner when combined ask is within near_bracket_threshold.
+
+        Fires a background task that warms the CLOB metadata cache and pre-signs
+        both orders so the critical path at actual threshold is just one POST call.
+        """
+        if not SIM.enabled and self._client is not None:
+            asyncio.get_running_loop().create_task(self._presign_orders(opp))
+
+    async def _presign_orders(self, opp: BracketOpportunity) -> None:
+        """Warm cache + pre-sign both legs for a near-threshold opportunity.
+
+        Pre-signed orders are stored in _presigned[condition_id] and consumed by
+        _live_place when the real threshold is crossed.  They expire after 15s to
+        avoid submitting stale orders if the opportunity dissolves and re-appears.
+
+        Limit prices are set 1 tick above the near-threshold ask so the signed
+        orders remain valid even if prices drift slightly upward before the actual
+        threshold crossing.  FOK still executes at the real market price (≤ limit).
+        """
+        cid = opp.market.condition_id
+
+        # Don't re-sign if we already have a fresh pre-sign for this market
+        existing = self._presigned.get(cid)
+        if existing and time.time() - existing["ts"] < 10.0:
+            return
+
+        # Warm cache first (no-op if already warm within TTL)
+        await self._warm_token_cache(opp.market.token_id_up, opp.market.token_id_down)
+
+        # Limits: 1 tick above near-threshold ask gives headroom for asymmetric moves.
+        # FOK executes at market price (≤ limit), so profitability is determined by
+        # the actual ask at submission time, not these limits.
+        tick = 0.01
+        limit_up   = round(opp.ask_up   + tick, 2)
+        limit_down = round(opp.ask_down + tick, 2)
+
+        combined   = opp.ask_up + opp.ask_down
+        n_shares   = (STRATEGY.position_size_usdc * 2) / combined
+        shares_up  = _clob_valid_shares(n_shares, limit_up)
+        shares_dn  = _clob_valid_shares(n_shares, limit_down)
+
+        try:
+            from py_clob_client.clob_types import OrderArgs
+            loop = asyncio.get_running_loop()
+            signed_up, signed_dn = await asyncio.gather(
+                loop.run_in_executor(
+                    None, self._client.create_order,
+                    OrderArgs(token_id=opp.market.token_id_up,
+                              price=limit_up, size=shares_up, side="BUY"),
+                ),
+                loop.run_in_executor(
+                    None, self._client.create_order,
+                    OrderArgs(token_id=opp.market.token_id_down,
+                              price=limit_down, size=shares_dn, side="BUY"),
+                ),
+                return_exceptions=True,
+            )
+            if isinstance(signed_up, Exception) or isinstance(signed_dn, Exception):
+                log.debug(f"[PRESIGN] {opp.market.asset} {opp.market.window} failed: "
+                          f"{signed_up if isinstance(signed_up, Exception) else signed_dn}")
+                return
+
+            self._presigned[cid] = {
+                "signed_up":  signed_up,
+                "signed_dn":  signed_dn,
+                "limit_up":   limit_up,
+                "limit_down": limit_down,
+                "shares_up":  shares_up,
+                "shares_dn":  shares_dn,
+                "ask_up":     opp.ask_up,
+                "ask_dn":     opp.ask_down,
+                "ts":         time.time(),
+            }
+            log.debug(
+                f"[PRESIGN] {opp.market.asset} {opp.market.window} ready | "
+                f"lim_up={limit_up:.3f} lim_dn={limit_down:.3f} sh={shares_up}/{shares_dn}"
+            )
+        except Exception as e:
+            log.debug(f"[PRESIGN] {opp.market.asset} {opp.market.window} error: {e}")
 
     async def _warm_token_cache(self, token_id_up: str, token_id_down: str) -> None:
         """Pre-populate ClobClient's tick-size / neg-risk / fee-rate caches for both
@@ -355,19 +439,47 @@ class Trader:
             shares_up   = _clob_valid_shares(b.leg_up.shares,   limit_up)
             shares_down = _clob_valid_shares(b.leg_down.shares, limit_down)
 
-            # Sign both orders concurrently (ECDSA crypto, pure CPU, no I/O)
-            signed_up, signed_dn = await asyncio.gather(
-                loop.run_in_executor(
-                    None, self._client.create_order,
-                    OrderArgs(token_id=b.leg_up.token_id, price=limit_up,
-                              size=shares_up, side="BUY"),
-                ),
-                loop.run_in_executor(
-                    None, self._client.create_order,
-                    OrderArgs(token_id=b.leg_down.token_id, price=limit_down,
-                              size=shares_down, side="BUY"),
-                ),
-            )
+            # Use pre-signed orders if available, fresh (< 15s), and still valid
+            # (current ask hasn't risen above the pre-signed limit on either leg).
+            # This skips ~12ms of signing and, crucially, avoids any thread-pool
+            # contention — the critical path becomes a single POST call.
+            presigned = self._presigned.pop(b.market_condition_id, None)
+            used_presigned = False
+            if (presigned is not None
+                    and time.time() - presigned["ts"] < 15.0
+                    and b.leg_up.price   <= presigned["limit_up"]
+                    and b.leg_down.price <= presigned["limit_down"]):
+                signed_up   = presigned["signed_up"]
+                signed_dn   = presigned["signed_dn"]
+                limit_up    = presigned["limit_up"]
+                limit_down  = presigned["limit_down"]
+                shares_up   = presigned["shares_up"]
+                shares_down = presigned["shares_dn"]
+                used_presigned = True
+                log.debug(f"[{b.id}] Using pre-signed orders "
+                          f"(age={(time.time()-presigned['ts'])*1000:.0f}ms)")
+            else:
+                if presigned is not None:
+                    log.debug(
+                        f"[{b.id}] Pre-signed stale/invalid "
+                        f"(age={(time.time()-presigned['ts'])*1000:.0f}ms "
+                        f"ask_up={b.leg_up.price:.3f}>lim={presigned['limit_up']:.3f}? "
+                        f"ask_dn={b.leg_down.price:.3f}>lim={presigned['limit_down']:.3f}?) "
+                        f"— signing fresh"
+                    )
+                # Sign both orders concurrently (ECDSA crypto, pure CPU, no I/O)
+                signed_up, signed_dn = await asyncio.gather(
+                    loop.run_in_executor(
+                        None, self._client.create_order,
+                        OrderArgs(token_id=b.leg_up.token_id, price=limit_up,
+                                  size=shares_up, side="BUY"),
+                    ),
+                    loop.run_in_executor(
+                        None, self._client.create_order,
+                        OrderArgs(token_id=b.leg_down.token_id, price=limit_down,
+                                  size=shares_down, side="BUY"),
+                    ),
+                )
 
             # Submit both in a single HTTP request
             results = await loop.run_in_executor(
@@ -416,7 +528,7 @@ class Trader:
 
             if up_filled and dn_filled:
                 log.info(
-                    f"[{b.id}] Both legs filled (FOK) | "
+                    f"[{b.id}] Both legs filled (FOK){'[presigned]' if used_presigned else ''} | "
                     f"Up={up_id} Down={dn_id} | "
                     f"ask={b.leg_up.price}/lim={limit_up} "
                     f"ask={b.leg_down.price}/lim={limit_down} "

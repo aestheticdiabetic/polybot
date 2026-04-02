@@ -63,11 +63,17 @@ class BracketOpportunity:
 
 
 class Scanner:
-    def __init__(self, on_bracket: Callable[[BracketOpportunity], None]):
+    def __init__(
+        self,
+        on_bracket: Callable[[BracketOpportunity], None],
+        on_near_bracket: Optional[Callable[[BracketOpportunity], None]] = None,
+    ):
         self.on_bracket = on_bracket
+        self.on_near_bracket = on_near_bracket
         self._markets: Dict[str, MarketInfo] = {}       # condition_id → MarketInfo
         self._prices:  Dict[str, PriceState] = {}       # token_id → PriceState
-        self._recent_brackets: Dict[str, float] = {}   # condition_id → last bracket ts
+        self._recent_brackets: Dict[str, float] = {}    # condition_id → last bracket ts
+        self._recent_near_brackets: Dict[str, float] = {}  # condition_id → last near-bracket ts
         self._running = False
         self._ws = None
         self._last_ws_msg_at: float = 0.0
@@ -76,6 +82,7 @@ class Scanner:
             "price_updates": 0,
             "brackets_detected": 0,
             "brackets_throttled": 0,
+            "near_brackets_detected": 0,
             "ws_reconnects": 0,
         }
 
@@ -461,6 +468,36 @@ class Scanner:
             return
 
         combined = ask_up + ask_down
+
+        # Near-bracket hook: when combined is between near_threshold and bracket_threshold,
+        # fire on_near_bracket so the trader can pre-warm the cache and pre-sign orders
+        # while prices are still moving toward the entry threshold.  Throttled to once
+        # per 5s per market so we don't flood the thread pool.
+        if (self.on_near_bracket is not None and
+                STRATEGY.bracket_threshold <= combined < STRATEGY.near_bracket_threshold):
+            last_near = self._recent_near_brackets.get(m.condition_id, 0)
+            if time.time() - last_near > 5.0:
+                self._recent_near_brackets[m.condition_id] = time.time()
+                self.stats["near_brackets_detected"] += 1
+                near_opp = BracketOpportunity(
+                    market=m,
+                    ask_up=ask_up,
+                    ask_down=ask_down,
+                    combined_ask=combined,
+                    spread=1.0 - combined,
+                    gross_profit_usdc=0.0,
+                    net_profit_usdc=0.0,
+                    detected_at=time.time(),
+                    depth_up=ps_up.ask_size,
+                    depth_down=ps_down.ask_size,
+                    bid_up=ps_up.bid,
+                    bid_down=ps_down.bid,
+                    limit_up=0.0,
+                    limit_down=0.0,
+                    sim_mode=SIM.enabled,
+                )
+                self.on_near_bracket(near_opp)
+
         if combined >= STRATEGY.bracket_threshold:
             return
 
