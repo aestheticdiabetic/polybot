@@ -315,7 +315,7 @@ class Trader:
         self.stats["total_gas_usdc"]   += gas
         self.stats["total_net_usdc"]   += net
 
-        self.risk.close(b.market_condition_id, size * 2)
+        self.risk.close(b.market_condition_id, total_cost)
         self.state.update_balance(net)
         self.state.close_bracket(b.id, net)
         self._log_trade(b, "resolved")
