@@ -356,14 +356,14 @@ class Scanner:
         # asks are sorted ascending — asks[0] is the best (lowest) ask.
         if event.get("asks"):
             try:
-                if ps.last_update == 0:  # first event for this token — log raw data
-                    log.debug(f"BOOK_RAW asset={asset_id[:12]} asks={event['asks'][:3]} bids={event.get('bids', [])[:3]}")
-                ps.ask = float(event["asks"][0]["price"])
+                # Asks are sorted descending (0.99 → best); asks[-1] = lowest = best ask for buyer
+                ps.ask = float(event["asks"][-1]["price"])
             except Exception:
                 pass
         if event.get("bids"):
             try:
-                ps.bid = float(event["bids"][0]["price"])
+                # Bids are sorted ascending (0.01 → worst); bids[-1] = highest = best bid
+                ps.bid = float(event["bids"][-1]["price"])
             except Exception:
                 pass
 
