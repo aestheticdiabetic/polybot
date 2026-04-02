@@ -268,8 +268,11 @@ class Trader:
                 self._cancel_tasks[bracket.id] = task
             self._log_trade(bracket, "opened")
         else:
+            # _emergency_exit may have already closed risk and removed the bracket;
+            # use safe pop to avoid KeyError and let RiskGuard's max(0,…) clamp handle
+            # any double-close.
             self.risk.close(opp.market.condition_id, size * 2)
-            del self._open_brackets[bracket.id]
+            self._open_brackets.pop(bracket.id, None)
 
     # ── Order placement ──────────────────────────────────────────
 
@@ -399,70 +402,90 @@ class Trader:
             return False
 
     async def _emergency_exit(self, b: Bracket):
-        """One leg filled, the other was FOK-cancelled.  Sell the filled leg
-        immediately at bid minus slippage buffer to exit the one-sided position.
+        """One leg filled, the other was FOK-cancelled.  Sell the filled leg at
+        bid minus slippage buffer to exit the one-sided position.
+
+        Polymarket batches on-chain CTF token delivery, so a SELL placed in the
+        same millisecond as the fill will see balance=0.  Retry up to 4 times
+        with 3-second waits (≤ 12s total) to allow the token settlement to land.
         """
         self.stats["emergency_exits_attempted"] += 1
 
         filled_leg = b.leg_up if b.leg_up.status == OrderStatus.FILLED else b.leg_down
         bid_price  = b.bid_up  if filled_leg is b.leg_up else b.bid_down
 
-        # Round to 2 decimal places (coarsest Polymarket tick) to avoid price-valid errors
         exit_price = round(bid_price * (1.0 - STRATEGY.emergency_exit_slippage_pct), 2)
-        exit_price = max(exit_price, 0.01)  # floor at minimum tick
+        exit_price = max(exit_price, 0.01)
+        # Apply same share-precision constraint as buy orders
+        exit_shares = _clob_valid_shares(filled_leg.shares, exit_price)
 
-        try:
-            from py_clob_client.clob_types import OrderArgs, OrderType
-            loop = asyncio.get_running_loop()
+        from py_clob_client.clob_types import OrderArgs, OrderType
+        loop = asyncio.get_running_loop()
 
-            signed_exit = await loop.run_in_executor(
-                None, self._client.create_order,
-                OrderArgs(
-                    token_id=filled_leg.token_id,
-                    price=exit_price,
-                    size=filled_leg.shares,
-                    side="SELL",
-                ),
-            )
-            resp = await loop.run_in_executor(
-                None, self._client.post_order,
-                signed_exit, OrderType.FOK,
-            )
+        _RETRY_DELAYS = [3.0, 5.0, 8.0, 12.0]   # seconds between attempts
+        last_exc: Optional[Exception] = None
 
-            status = (resp.get("status") or "").lower() if isinstance(resp, dict) else ""
-            if status == "matched":
-                realised_loss = (filled_leg.price - exit_price) * filled_leg.shares
-                log.info(
-                    f"[{b.id}] Emergency exit filled @ {exit_price:.2f} | "
-                    f"loss=${realised_loss:.4f}"
+        for attempt, delay in enumerate([0.0] + _RETRY_DELAYS, start=1):
+            if delay:
+                log.info(f"[{b.id}] Emergency exit retry {attempt} in {delay:.0f}s "
+                         f"(waiting for token settlement)")
+                await asyncio.sleep(delay)
+
+            try:
+                signed_exit = await loop.run_in_executor(
+                    None, self._client.create_order,
+                    OrderArgs(
+                        token_id=filled_leg.token_id,
+                        price=exit_price,
+                        size=exit_shares,
+                        side="SELL",
+                    ),
                 )
-                self.stats["emergency_exits_succeeded"] += 1
-                b.actual_net_usdc = -realised_loss
-            else:
-                log.error(
-                    f"[{b.id}] EMERGENCY EXIT FAILED — stranded {filled_leg.side} position "
-                    f"({filled_leg.shares:.2f} shares @ {filled_leg.price:.3f}). "
-                    f"Manual intervention required."
+                resp = await loop.run_in_executor(
+                    None, self._client.post_order,
+                    signed_exit, OrderType.FOK,
                 )
-                self.stats["emergency_exits_failed"] += 1
-                b.status = "stranded"
-                b.closed_at = time.time()
-                self._log_trade(b, "stranded")
-                self.risk.close(b.market_condition_id, STRATEGY.position_size_usdc * 2)
-                if b.id in self._open_brackets:
-                    del self._open_brackets[b.id]
-                return
+                status = (resp.get("status") or "").lower() if isinstance(resp, dict) else ""
+                if status == "matched":
+                    realised_loss = (filled_leg.price - exit_price) * exit_shares
+                    log.info(
+                        f"[{b.id}] Emergency exit filled @ {exit_price:.2f} "
+                        f"(attempt {attempt}) | loss=${realised_loss:.4f}"
+                    )
+                    self.stats["emergency_exits_succeeded"] += 1
+                    b.actual_net_usdc = -realised_loss
+                    await self._cancel_bracket(b)
+                    return
+                else:
+                    log.warning(
+                        f"[{b.id}] Emergency exit attempt {attempt} not matched "
+                        f"(status={status!r})"
+                    )
+                    last_exc = None
+            except Exception as e:
+                log.warning(f"[{b.id}] Emergency exit attempt {attempt} failed: {e}")
+                last_exc = e
 
-        except Exception as e:
-            log.error(f"[{b.id}] Emergency exit exception: {e}")
-            self.stats["emergency_exits_failed"] += 1
-            b.status = "stranded"
-            b.closed_at = time.time()
-            self._log_trade(b, "stranded")
-            self.risk.close(b.market_condition_id, STRATEGY.position_size_usdc * 2)
-            if b.id in self._open_brackets:
-                del self._open_brackets[b.id]
-            return
+        # All attempts exhausted
+        if last_exc:
+            log.error(
+                f"[{b.id}] EMERGENCY EXIT FAILED after {len(_RETRY_DELAYS)+1} attempts "
+                f"(last error: {last_exc}) — stranded {filled_leg.side} position "
+                f"({exit_shares:.2f} shares @ {filled_leg.price:.3f}). "
+                f"Will resolve at market close."
+            )
+        else:
+            log.error(
+                f"[{b.id}] EMERGENCY EXIT FAILED — no FOK match after "
+                f"{len(_RETRY_DELAYS)+1} attempts — stranded {filled_leg.side} position. "
+                f"Will resolve at market close."
+            )
+        self.stats["emergency_exits_failed"] += 1
+        b.status = "stranded"
+        b.closed_at = time.time()
+        self._log_trade(b, "stranded")
+        self.risk.close(b.market_condition_id, STRATEGY.position_size_usdc * 2)
+        self._open_brackets.pop(b.id, None)
 
         # Exit succeeded — clean up via normal cancel path (handles risk + state)
         await self._cancel_bracket(b)
