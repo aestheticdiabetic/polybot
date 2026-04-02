@@ -88,48 +88,66 @@ class Scanner:
     # ── Market discovery ─────────────────────────────────────────
 
     async def _fetch_active_markets(self) -> List[MarketInfo]:
-        """Fetch all active Up/Down markets from Gamma API."""
-        markets = []
+        """Fetch all active Up/Down markets from Gamma API by searching per asset."""
+        markets: List[MarketInfo] = []
+        seen: set = set()
         url = "https://gamma-api.polymarket.com/markets"
-        # Try tag-filtered fetch first; fall back to unfiltered if it returns nothing
-        param_sets = [
-            {"active": "true", "closed": "false", "tag_slug": "up-or-down", "limit": 500},
-            {"active": "true", "closed": "false", "limit": 500},
-        ]
+        base_params = {"active": "true", "closed": "false", "limit": 100}
         try:
             async with aiohttp.ClientSession() as session:
-                for params in param_sets:
+                for asset in STRATEGY.target_assets:
+                    params = {**base_params, "search": asset}
                     async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as r:
                         data = await r.json()
                     for m in data:
+                        cid = m.get("condition_id", "")
+                        if cid in seen:
+                            continue
                         info = self._parse_market(m)
                         if info:
+                            seen.add(cid)
                             markets.append(info)
-                    if markets:
-                        break
-                    sample_titles = [m.get("question") or m.get("title", "") for m in data[:10]]
-                    log.warning(f"0 matching markets from API ({len(data)} total). Sample titles: {sample_titles}")
-                    log.warning("Retrying without tag filter" if params.get("tag_slug") else "Both fetches exhausted")
         except Exception as e:
             log.error(f"Market fetch failed: {e}")
+        log.info(f"Market fetch complete: {len(markets)} up/down markets found across {len(STRATEGY.target_assets)} assets")
         return markets
+
+    # Map various title phrases to canonical window keys
+    _WINDOW_PATTERNS = [
+        ("15M",  [r"\b15[\s-]?min", r"\b15m\b"]),
+        ("1H",   [r"\b1[\s-]?hour", r"\b60[\s-]?min", r"\b1h\b"]),
+        ("24H",  [r"\b24[\s-]?hour", r"\b1[\s-]?day", r"\b24h\b"]),
+    ]
 
     def _parse_market(self, m: dict) -> Optional[MarketInfo]:
         """Extract relevant fields from a Gamma API market object."""
         try:
             title = m.get("question", "") or m.get("title", "")
-            # Detect window size from title
+            title_up = title.upper()
+
+            # Must be an up/down style market
+            if not any(kw in title_up for kw in ("UP OR DOWN", "HIGHER OR LOWER", "HIGHER OR LOWER", "UP/DOWN")):
+                return None
+
+            # Detect window size — try configured keys first, then regex patterns
             window = None
             for w in STRATEGY.target_windows:
-                if w in title.upper():
+                if w in title_up:
                     window = w
                     break
             if not window:
+                for key, patterns in self._WINDOW_PATTERNS:
+                    if key in STRATEGY.target_windows:
+                        if any(re.search(p, title, re.IGNORECASE) for p in patterns):
+                            window = key
+                            break
+            if not window:
                 return None
+
             # Detect asset
             asset = None
             for a in STRATEGY.target_assets:
-                if a.upper() in title.upper():
+                if a.upper() in title_up:
                     asset = a
                     break
             if not asset:
