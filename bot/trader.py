@@ -309,15 +309,17 @@ class Trader:
         )
 
     async def _handle_opportunity(self, opp: BracketOpportunity):
-        # Fire cache warm immediately so it runs concurrently with the checks below.
-        # By the time we reach _live_place() the 6 metadata lookups are already cached
-        # and create_order() makes zero HTTP calls (pure ECDSA signing only).
+        # Fire cache warm immediately, then yield so the warm task actually starts
+        # running before we spend time on synchronous checks below.  Without the
+        # yield the task is scheduled but stays queued until the first I/O await,
+        # which is `await _warm` — meaning the warm doesn't overlap with the checks.
         if not SIM.enabled and self._client is not None:
             _warm = asyncio.get_running_loop().create_task(
                 self._warm_token_cache(
                     opp.market.token_id_up, opp.market.token_id_down
                 )
             )
+            await asyncio.sleep(0)   # yield → warm GETs start immediately
         else:
             _warm = None
 
@@ -479,12 +481,16 @@ class Trader:
                          f"(age={(time.time()-presigned['ts'])*1000:.0f}ms)")
             else:
                 if presigned is not None:
-                    log.debug(
-                        f"[{b.id}] Pre-signed stale/invalid "
+                    log.info(
+                        f"[{b.id}] Pre-signed stale/invalid — signing fresh "
                         f"(age={(time.time()-presigned['ts'])*1000:.0f}ms "
                         f"ask_up={b.leg_up.price:.3f}>lim={presigned['limit_up']:.3f}? "
-                        f"ask_dn={b.leg_down.price:.3f}>lim={presigned['limit_down']:.3f}?) "
-                        f"— signing fresh"
+                        f"ask_dn={b.leg_down.price:.3f}>lim={presigned['limit_down']:.3f}?)"
+                    )
+                else:
+                    log.debug(
+                        f"[{b.id}] No presign for this condition — signing fresh "
+                        f"(near-bracket fired on a different {b.asset} {b.window} window)"
                     )
                 # Sign both orders concurrently (ECDSA crypto, pure CPU, no I/O)
                 signed_up, signed_dn = await asyncio.gather(
