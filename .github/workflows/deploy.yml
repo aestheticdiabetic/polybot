@@ -15,7 +15,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.DEPLOYCOPYBOT }}
           script: |
-            cd /home/angus/polybot
+            cd ~/polybot
             git reset --hard HEAD
             git pull
             docker compose up -d --build
