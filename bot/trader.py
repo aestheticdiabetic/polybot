@@ -231,30 +231,26 @@ class Trader:
         """Place real orders via CLOB API."""
         try:
             from py_clob_client.clob_types import OrderArgs
-            orders = [
-                OrderArgs(
-                    token_id=b.leg_up.token_id,
-                    price=b.leg_up.price,
-                    size=b.leg_up.shares,
-                    side="BUY",
-                ),
-                OrderArgs(
-                    token_id=b.leg_down.token_id,
-                    price=b.leg_down.price,
-                    size=b.leg_down.shares,
-                    side="BUY",
-                ),
-            ]
-            resp = await asyncio.get_running_loop().run_in_executor(
-                None, self._client.create_and_post_orders, orders
+            loop = asyncio.get_running_loop()
+
+            resp_up = await loop.run_in_executor(
+                None, self._client.create_and_post_order,
+                OrderArgs(token_id=b.leg_up.token_id, price=b.leg_up.price,
+                          size=b.leg_up.shares, side="BUY"),
             )
-            if resp and len(resp) >= 2:
-                b.leg_up.order_id   = resp[0].get("orderID")
-                b.leg_down.order_id = resp[1].get("orderID")
+            resp_dn = await loop.run_in_executor(
+                None, self._client.create_and_post_order,
+                OrderArgs(token_id=b.leg_down.token_id, price=b.leg_down.price,
+                          size=b.leg_down.shares, side="BUY"),
+            )
+
+            if resp_up and resp_dn:
+                b.leg_up.order_id    = resp_up.get("orderID")
+                b.leg_down.order_id  = resp_dn.get("orderID")
                 b.leg_up.placed_at   = time.time()
                 b.leg_down.placed_at = time.time()
-                b.leg_up.status   = OrderStatus.PENDING
-                b.leg_down.status = OrderStatus.PENDING
+                b.leg_up.status      = OrderStatus.PENDING
+                b.leg_down.status    = OrderStatus.PENDING
                 log.info(f"[{b.id}] Orders placed | Up={b.leg_up.order_id} Down={b.leg_down.order_id}")
                 return True
             return False
