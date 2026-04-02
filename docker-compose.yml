@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  polybot:
+    build: .
+    container_name: polybot
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:8080:8080"   # Dashboard — only on localhost, access via SSH tunnel
+      - "127.0.0.1:8082:8082"   # Alchemy webhook receiver
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/status", "--user", ":${DASHBOARD_SECRET:-changeme}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
