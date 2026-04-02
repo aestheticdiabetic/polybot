@@ -66,6 +66,11 @@ class StrategyConfig:
     # filled leg at bid minus this slippage buffer to exit cleanly.
     emergency_exit_slippage_pct: float = 0.02   # accept up to 2% below bid
 
+    # After a partial fill (one leg filled, other cancelled), block re-entry on
+    # that market for this many seconds — covers the full emergency exit window
+    # plus a safety margin so we don't compound losses on a broken book.
+    partial_fill_cooldown_s: int = 90
+
 STRATEGY = StrategyConfig()
 
 # ─── Simulation parameters ────────────────────────────────────────

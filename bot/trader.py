@@ -98,6 +98,8 @@ class RiskGuard:
         self._open_by_market: Dict[str, int] = {}
         self._total_open: int = 0
         self._deployed_usdc: float = 0.0
+        # Markets cooling down after a partial fill — maps condition_id → unblock timestamp
+        self._partial_fill_cooldown: Dict[str, float] = {}
 
     def can_open(self, condition_id: str, wallet_balance: float) -> tuple[bool, str]:
         if self._total_open >= STRATEGY.max_concurrent_brackets:
@@ -105,6 +107,12 @@ class RiskGuard:
 
         if self._open_by_market.get(condition_id, 0) >= STRATEGY.max_brackets_per_market:
             return False, f"Already have bracket open on this market"
+
+        # Block re-entry after a partial fill until the cooldown expires
+        unblock_at = self._partial_fill_cooldown.get(condition_id, 0)
+        if time.time() < unblock_at:
+            remaining = unblock_at - time.time()
+            return False, f"Partial fill cooldown: {remaining:.0f}s remaining on this market"
 
         max_deploy = wallet_balance * STRATEGY.max_wallet_exposure_pct
         cost = STRATEGY.position_size_usdc * 2
@@ -122,6 +130,12 @@ class RiskGuard:
         self._open_by_market[condition_id] = max(0, self._open_by_market.get(condition_id, 0) - 1)
         self._total_open = max(0, self._total_open - 1)
         self._deployed_usdc = max(0.0, self._deployed_usdc - cost_usdc)
+
+    def mark_partial_fill(self, condition_id: str):
+        """Block this market from re-entry for partial_fill_cooldown_s seconds."""
+        self._partial_fill_cooldown[condition_id] = (
+            time.time() + STRATEGY.partial_fill_cooldown_s
+        )
 
     @property
     def total_open(self): return self._total_open
@@ -263,7 +277,7 @@ class Trader:
                 "ask_dn":     opp.ask_down,
                 "ts":         time.time(),
             }
-            log.debug(
+            log.info(
                 f"[PRESIGN] {opp.market.asset} {opp.market.window} ready | "
                 f"lim_up={limit_up:.3f} lim_dn={limit_down:.3f} sh={shares_up}/{shares_dn}"
             )
@@ -397,11 +411,15 @@ class Trader:
                 self._cancel_tasks[bracket.id] = task
             self._log_trade(bracket, "opened")
         else:
-            # _emergency_exit may have already closed risk and removed the bracket;
-            # use safe pop to avoid KeyError and let RiskGuard's max(0,…) clamp handle
-            # any double-close.
-            self.risk.close(opp.market.condition_id, size * 2)
-            self._open_brackets.pop(bracket.id, None)
+            if bracket.status == "partial_fill":
+                # Emergency exit is running as a background task and owns cleanup.
+                # Don't close risk here — the cooldown is already set and risk will
+                # be released when _emergency_exit finishes.
+                pass
+            else:
+                # Both legs cancelled — no exposure, release risk immediately.
+                self.risk.close(opp.market.condition_id, size * 2)
+                self._open_brackets.pop(bracket.id, None)
 
     # ── Order placement ──────────────────────────────────────────
 
@@ -439,14 +457,15 @@ class Trader:
             shares_up   = _clob_valid_shares(b.leg_up.shares,   limit_up)
             shares_down = _clob_valid_shares(b.leg_down.shares, limit_down)
 
-            # Use pre-signed orders if available, fresh (< 15s), and still valid
+            # Use pre-signed orders if available, fresh (< 55s), and still valid
             # (current ask hasn't risen above the pre-signed limit on either leg).
+            # 55s TTL covers the typical gap between near-bracket and real bracket.
             # This skips ~12ms of signing and, crucially, avoids any thread-pool
             # contention — the critical path becomes a single POST call.
             presigned = self._presigned.pop(b.market_condition_id, None)
             used_presigned = False
             if (presigned is not None
-                    and time.time() - presigned["ts"] < 15.0
+                    and time.time() - presigned["ts"] < 55.0
                     and b.leg_up.price   <= presigned["limit_up"]
                     and b.leg_down.price <= presigned["limit_down"]):
                 signed_up   = presigned["signed_up"]
@@ -456,8 +475,8 @@ class Trader:
                 shares_up   = presigned["shares_up"]
                 shares_down = presigned["shares_dn"]
                 used_presigned = True
-                log.debug(f"[{b.id}] Using pre-signed orders "
-                          f"(age={(time.time()-presigned['ts'])*1000:.0f}ms)")
+                log.info(f"[{b.id}] Using pre-signed orders "
+                         f"(age={(time.time()-presigned['ts'])*1000:.0f}ms)")
             else:
                 if presigned is not None:
                     log.debug(
@@ -551,7 +570,14 @@ class Trader:
                 )
                 b.status = "partial_fill"
                 self._log_trade(b, "partial_fill")
-                await self._emergency_exit(b)
+                # Mark cooldown immediately so the market is blocked during the full
+                # emergency exit window (up to ~28s of retries), not just until the
+                # 10s placement timeout fires.
+                self.risk.mark_partial_fill(b.market_condition_id)
+                # Fire emergency exit as a background task so it runs outside the
+                # 10s wait_for timeout in _handle_opportunity.  _emergency_exit owns
+                # its own risk.close() + _open_brackets cleanup.
+                asyncio.get_running_loop().create_task(self._emergency_exit(b))
                 return False
 
             # Neither filled — clean miss, no exposure
@@ -573,9 +599,13 @@ class Trader:
         """One leg filled, the other was FOK-cancelled.  Sell the filled leg at
         bid minus slippage buffer to exit the one-sided position.
 
+        Runs as a background task (not awaited by _handle_opportunity) so it is
+        not subject to the 10s placement timeout.  Owns all cleanup: risk.close,
+        _open_brackets removal, and trade log entry on final outcome.
+
         Polymarket batches on-chain CTF token delivery, so a SELL placed in the
         same millisecond as the fill will see balance=0.  Retry up to 4 times
-        with 3-second waits (≤ 12s total) to allow the token settlement to land.
+        with increasing waits to allow the token settlement to land.
         """
         self.stats["emergency_exits_attempted"] += 1
 
@@ -584,13 +614,12 @@ class Trader:
 
         exit_price = round(bid_price * (1.0 - STRATEGY.emergency_exit_slippage_pct), 2)
         exit_price = max(exit_price, 0.01)
-        # Apply same share-precision constraint as buy orders
         exit_shares = _clob_valid_shares(filled_leg.shares, exit_price)
 
         from py_clob_client.clob_types import OrderArgs, OrderType
         loop = asyncio.get_running_loop()
 
-        _RETRY_DELAYS = [3.0, 5.0, 8.0, 12.0]   # seconds between attempts
+        _RETRY_DELAYS = [3.0, 5.0, 8.0, 12.0]
         last_exc: Optional[Exception] = None
 
         for attempt, delay in enumerate([0.0] + _RETRY_DELAYS, start=1):
@@ -622,7 +651,11 @@ class Trader:
                     )
                     self.stats["emergency_exits_succeeded"] += 1
                     b.actual_net_usdc = -realised_loss
-                    # Caller (_handle_opportunity else branch) handles risk.close + cleanup
+                    b.status = "emergency_exited"
+                    b.closed_at = time.time()
+                    self._log_trade(b, "emergency_exited")
+                    self.risk.close(b.market_condition_id, STRATEGY.position_size_usdc * 2)
+                    self._open_brackets.pop(b.id, None)
                     return
                 else:
                     log.warning(
@@ -634,7 +667,7 @@ class Trader:
                 log.warning(f"[{b.id}] Emergency exit attempt {attempt} failed: {e}")
                 last_exc = e
 
-        # All attempts exhausted
+        # All attempts exhausted — position is stranded until market resolution
         if last_exc:
             log.error(
                 f"[{b.id}] EMERGENCY EXIT FAILED after {len(_RETRY_DELAYS)+1} attempts "
@@ -652,7 +685,10 @@ class Trader:
         b.status = "stranded"
         b.closed_at = time.time()
         self._log_trade(b, "stranded")
-        # Caller (_handle_opportunity else branch) handles risk.close + _open_brackets cleanup
+        # Release risk so the guard doesn't stay permanently blocked.
+        # The cooldown already prevents re-entry for partial_fill_cooldown_s.
+        self.risk.close(b.market_condition_id, STRATEGY.position_size_usdc * 2)
+        self._open_brackets.pop(b.id, None)
 
     async def _sim_place(self, b: Bracket) -> bool:
         """Simulate order placement with realistic latency and fill probability."""
