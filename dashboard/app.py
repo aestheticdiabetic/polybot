@@ -45,9 +45,8 @@ async def _fetch_live_balance() -> float | None:
                 params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
             )
         )
-        if isinstance(result, dict):
-            return float(result.get("balance", 0))
-        return float(result.balance)
+        raw = float(result.get("balance", 0)) if isinstance(result, dict) else float(result.balance)
+        return raw / 1e6  # USDC on Polygon uses 6 decimal places
     except Exception as e:
         log.warning(f"Live balance fetch failed: {e}")
         return None
