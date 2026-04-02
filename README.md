@@ -127,6 +127,10 @@ docker compose logs -f
 The dashboard runs on port 8080 but is **only bound to localhost** for security.
 Access it via SSH tunnel from your local machine:
 
+### ssh -i C:\Users\Angus\.ssh\polymarket_deploy -L 8080:localhost:8080 angus@95.216.211.236 -N
+
+###
+
 ```bash
 # On your local machine (not the VPS):
 ssh -L 8080:localhost:8080 user@your-vps-ip -N

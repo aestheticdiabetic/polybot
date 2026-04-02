@@ -2,6 +2,7 @@
 dashboard/app.py — aiohttp web dashboard with basic auth.
 Accessible over SSH tunnel: ssh -L 8080:localhost:8080 user@vps
 """
+import asyncio
 import json
 import logging
 import os
@@ -17,6 +18,40 @@ from config import DASHBOARD_SECRET, SIM, STRATEGY
 log = logging.getLogger("dashboard")
 
 DASHBOARD_DIR = Path(__file__).parent
+
+
+async def _fetch_live_balance() -> float | None:
+    """Fetch spendable USDC balance from Polymarket CLOB API."""
+    from config import API_KEY, API_SECRET, API_PASSPHRASE, PRIVATE_KEY, FUNDER_ADDRESS, CLOB_HOST
+    if not API_KEY or not PRIVATE_KEY:
+        log.warning("No CLOB credentials configured — cannot fetch live balance")
+        return None
+    try:
+        from py_clob_client.client import ClobClient
+        from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
+        creds = ApiCreds(api_key=API_KEY, api_secret=API_SECRET, api_passphrase=API_PASSPHRASE)
+        client = ClobClient(
+            host=CLOB_HOST,
+            chain_id=137,
+            key=PRIVATE_KEY,
+            creds=creds,
+            signature_type=2,
+            funder=FUNDER_ADDRESS,
+        )
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: client.get_balance_allowance(
+                params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            )
+        )
+        if isinstance(result, dict):
+            return float(result.get("balance", 0))
+        return float(result.balance)
+    except Exception as e:
+        log.warning(f"Live balance fetch failed: {e}")
+        return None
+
 
 # One-time session token generated at startup.
 # The HTML page sets this as a cookie on first load (after Basic Auth).
@@ -72,6 +107,13 @@ async def create_app(state):
         if mode == "sim" and "balance" in data:
             state.set_balance(float(data["balance"]))
             SIM.starting_balance_usdc = float(data["balance"])
+        elif mode == "live":
+            balance = await _fetch_live_balance()
+            if balance is not None:
+                state.set_balance(balance)
+                log.info(f"Live balance set: ${balance:.4f} USDC")
+            else:
+                log.warning("Could not fetch live balance — balance will show $0")
         SIM.enabled = (mode == "sim")
         state.set_running(True)
         log.info(f"Bot START requested via dashboard — mode={mode}")
@@ -112,6 +154,15 @@ async def create_app(state):
                 updated[k] = v
         log.info(f"Config updated: {updated}")
         return web.json_response({"ok": True, "updated": updated})
+
+    @_auth_required
+    async def api_live_balance(request):
+        """Fetch current spendable USDC balance from Polymarket."""
+        balance = await _fetch_live_balance()
+        if balance is not None:
+            state.set_balance(balance)
+            return web.json_response({"ok": True, "balance": balance})
+        return web.json_response({"ok": False, "balance": state.get_balance()})
 
     @_auth_required
     async def api_trades(request):
@@ -162,6 +213,7 @@ async def create_app(state):
     app.router.add_post("/api/stop",  api_stop)
     app.router.add_get("/api/config", api_config)
     app.router.add_post("/api/config", api_update_config)
+    app.router.add_get("/api/live-balance", api_live_balance)
     app.router.add_get("/api/trades",   api_trades)
     app.router.add_get("/api/markets",  api_markets)
     app.router.add_get("/api/logs",     api_logs)

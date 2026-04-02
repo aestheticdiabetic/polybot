@@ -129,7 +129,7 @@
   <!-- Metrics -->
   <div class="metric-grid">
     <div class="metric">
-      <div class="metric-label">Balance</div>
+      <div class="metric-label">Balance <span id="balance-refresh-btn" onclick="refreshLiveBalance()" style="display:none;cursor:pointer;font-size:10px;color:#3b82f6;margin-left:4px;" title="Refresh from Polymarket">↺</span></div>
       <div class="metric-value blue" id="m-balance">$0.00</div>
       <div class="metric-sub" id="m-balance-delta">—</div>
     </div>
@@ -302,10 +302,20 @@ async function apiFetch(url, opts={}) {
 
 async function startBot() {
   const balance = parseFloat(document.getElementById('sim-balance').value) || 1000;
-  await apiFetch('/api/start', {
-    method: 'POST',
-    body: JSON.stringify({ mode, balance })
-  });
+  const btn = document.getElementById('btn-start');
+  btn.disabled = true;
+  btn.textContent = '⏳ STARTING...';
+  try {
+    await apiFetch('/api/start', {
+      method: 'POST',
+      body: JSON.stringify({ mode, balance })
+    });
+    await poll();
+  } catch(e) {
+    console.error('Start failed:', e);
+    btn.disabled = false;
+  }
+  btn.textContent = '▶ START';
 }
 async function stopBot() {
   await apiFetch('/api/stop', { method: 'POST' });
@@ -315,6 +325,20 @@ function setMode(m) {
   document.getElementById('sim-panel').style.display = m === 'sim' ? 'block' : 'none';
   document.getElementById('mode-badge').textContent = m.toUpperCase();
   document.getElementById('mode-badge').className = 'mode-badge mode-' + m;
+  document.getElementById('balance-refresh-btn').style.display = m === 'live' ? 'inline' : 'none';
+}
+
+async function refreshLiveBalance() {
+  const btn = document.getElementById('balance-refresh-btn');
+  btn.textContent = '…';
+  try {
+    const r = await apiFetch('/api/live-balance');
+    if (r.ok) {
+      document.getElementById('m-balance').textContent = '$' + parseFloat(r.balance).toFixed(2);
+    }
+  } finally {
+    btn.textContent = '↺';
+  }
 }
 
 function updateMetrics(d) {
