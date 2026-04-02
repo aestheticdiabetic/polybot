@@ -230,21 +230,19 @@ class Trader:
     async def _live_place(self, b: Bracket) -> bool:
         """Place real orders via CLOB API."""
         try:
-            from py_clob_client.clob_types import OrderArgs, OrderType
+            from py_clob_client.clob_types import OrderArgs
             orders = [
                 OrderArgs(
                     token_id=b.leg_up.token_id,
                     price=b.leg_up.price,
                     size=b.leg_up.shares,
                     side="BUY",
-                    order_type=OrderType.GTC,
                 ),
                 OrderArgs(
                     token_id=b.leg_down.token_id,
                     price=b.leg_down.price,
                     size=b.leg_down.shares,
                     side="BUY",
-                    order_type=OrderType.GTC,
                 ),
             ]
             resp = await asyncio.get_running_loop().run_in_executor(
