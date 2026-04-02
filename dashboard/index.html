@@ -55,6 +55,7 @@
   /* Charts */
   .chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
   @media (max-width: 700px) { .chart-row { grid-template-columns: 1fr; } }
+  .chart-wrap { position: relative; height: 160px; }
   canvas { width: 100% !important; }
 
   /* Trades table */
@@ -162,21 +163,21 @@
   <div class="chart-row">
     <div class="section">
       <div class="section-title">Cumulative PnL</div>
-      <canvas id="chart-pnl" height="160"></canvas>
+      <div class="chart-wrap"><canvas id="chart-pnl"></canvas></div>
     </div>
     <div class="section">
       <div class="section-title">Brackets per hour</div>
-      <canvas id="chart-volume" height="160"></canvas>
+      <div class="chart-wrap"><canvas id="chart-volume"></canvas></div>
     </div>
   </div>
   <div class="chart-row">
     <div class="section">
       <div class="section-title">Spread distribution</div>
-      <canvas id="chart-spread" height="160"></canvas>
+      <div class="chart-wrap"><canvas id="chart-spread"></canvas></div>
     </div>
     <div class="section">
       <div class="section-title">Latency distribution (ms)</div>
-      <canvas id="chart-latency" height="160"></canvas>
+      <div class="chart-wrap"><canvas id="chart-latency"></canvas></div>
     </div>
   </div>
 

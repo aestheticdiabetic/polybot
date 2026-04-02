@@ -44,11 +44,10 @@ def _check_auth(request: web.Request) -> bool:
 def _auth_required(handler):
     async def wrapper(request):
         if not _check_auth(request):
-            return web.Response(
-                status=401,
-                headers={"WWW-Authenticate": 'Basic realm="PolyBot"'},
-                text="Unauthorised",
-            )
+            # No WWW-Authenticate header on API endpoints — that header triggers
+            # Chrome's native auth dialog on every failed fetch(), causing the
+            # entire browser UI to flash. Only the HTML page needs that header.
+            return web.Response(status=401, text="Unauthorised")
         return await handler(request)
     return wrapper
 
