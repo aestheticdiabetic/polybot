@@ -48,14 +48,18 @@ class StrategyConfig:
     max_wallet_exposure_pct: float = 0.60    # never deploy >60% of wallet
     cancel_unfilled_after_s: int = 30        # cancel stale orders after 30s
     max_brackets_per_market: int = 1         # one bracket per market at a time
-    pause_if_bracket_hz: float = 5.0         # pause if >5 brackets/min on same market
+    pause_if_bracket_hz: float = 10.0        # min gap between brackets on same market = 60/hz seconds
 
     # Fees (Polymarket taker fee)
     taker_fee_pct: float = 0.01   # 1%
     polygon_gas_gwei: float = 30  # estimated gas for redemption tx
 
-    # Order type
-    order_type: str = "GTC"   # Good Till Cancelled limit orders
+    # Order type for live entry orders
+    order_type: str = "FOK"   # Fill-Or-Kill: fills immediately or auto-cancels
+
+    # Emergency exit: if one FOK leg fills but the other cancels, sell the
+    # filled leg at bid minus this slippage buffer to exit cleanly.
+    emergency_exit_slippage_pct: float = 0.02   # accept up to 2% below bid
 
 STRATEGY = StrategyConfig()
 

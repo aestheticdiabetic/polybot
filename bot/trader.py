@@ -58,9 +58,12 @@ class Bracket:
     actual_net_usdc: Optional[float] = None
     opened_at: float = field(default_factory=time.time)
     closed_at: Optional[float] = None
-    status: str = "open"    # open, won, lost, cancelled, partial
+    status: str = "open"    # open, won, lost, cancelled, partial, stranded
     sim_mode: bool = False
-    latency_ms: Optional[float] = None
+    latency_ms: Optional[float] = None   # time for HTTP order placement
+    age_ms: Optional[float] = None       # time from scanner detection to submission
+    bid_up: float = 0.0     # bid at detection time, for emergency exit pricing
+    bid_down: float = 0.0
 
 
 class RiskGuard:
@@ -115,6 +118,9 @@ class Trader:
             "brackets_won": 0,
             "brackets_lost": 0,
             "brackets_cancelled": 0,
+            "emergency_exits_attempted": 0,
+            "emergency_exits_succeeded": 0,
+            "emergency_exits_failed": 0,
             "total_gross_usdc": 0.0,
             "total_fees_usdc": 0.0,
             "total_net_usdc": 0.0,
@@ -205,20 +211,29 @@ class Trader:
             detected_spread=opp.spread,
             expected_net_usdc=opp.net_profit_usdc,
             sim_mode=SIM.enabled,
+            bid_up=opp.bid_up,
+            bid_down=opp.bid_down,
         )
 
+        bracket.age_ms = age_ms
         self.risk.open(opp.market.condition_id, total_budget)
         self._open_brackets[bracket.id] = bracket
 
         t0 = time.time()
-        success = await self._place_bracket(bracket)
+        try:
+            success = await asyncio.wait_for(self._place_bracket(bracket), timeout=10.0)
+        except asyncio.TimeoutError:
+            log.warning(f"[{bracket.id}] Order placement timed out after 10s")
+            self.risk.close(opp.market.condition_id, total_budget)
+            del self._open_brackets[bracket.id]
+            return
         bracket.latency_ms = (time.time() - t0) * 1000
 
         if success:
             self.stats["brackets_opened"] += 1
             self.state.add_bracket(bracket)
-            if not SIM.enabled:
-                # Poll CLOB for fills; cancel legs if unfilled after timeout
+            if not SIM.enabled and STRATEGY.order_type == "GTC":
+                # GTC only: poll for fills; FOK results are resolved inline in _live_place
                 task = asyncio.get_running_loop().create_task(
                     self._poll_fills(bracket)
                 )
@@ -237,37 +252,166 @@ class Trader:
         return await self._live_place(b)
 
     async def _live_place(self, b: Bracket) -> bool:
-        """Place both legs concurrently via CLOB API."""
+        """Place both legs as FOK via a single batch HTTP call.
+
+        Both orders are signed locally (fast, CPU-bound) then submitted together
+        in one post_orders() request to minimise the time delta between them
+        landing on the matching engine.  FOK means each order either fills
+        completely in the same millisecond or is auto-cancelled — no 30-second
+        GTC exposure window.
+
+        Returns True only if BOTH legs filled.  Partial fills trigger an
+        emergency exit before returning False.
+        """
         try:
-            from py_clob_client.clob_types import OrderArgs
+            from py_clob_client.clob_types import OrderArgs, OrderType, PostOrdersArgs
             loop = asyncio.get_running_loop()
 
-            resp_up, resp_dn = await asyncio.gather(
+            order_type = (
+                OrderType.FOK if STRATEGY.order_type == "FOK" else OrderType.GTC
+            )
+
+            # Sign both orders concurrently (ECDSA crypto, pure CPU, no I/O)
+            signed_up, signed_dn = await asyncio.gather(
                 loop.run_in_executor(
-                    None, self._client.create_and_post_order,
+                    None, self._client.create_order,
                     OrderArgs(token_id=b.leg_up.token_id, price=b.leg_up.price,
                               size=b.leg_up.shares, side="BUY"),
                 ),
                 loop.run_in_executor(
-                    None, self._client.create_and_post_order,
+                    None, self._client.create_order,
                     OrderArgs(token_id=b.leg_down.token_id, price=b.leg_down.price,
                               size=b.leg_down.shares, side="BUY"),
                 ),
             )
 
-            if resp_up and resp_dn:
-                b.leg_up.order_id    = resp_up.get("orderID")
-                b.leg_down.order_id  = resp_dn.get("orderID")
-                b.leg_up.placed_at   = time.time()
-                b.leg_down.placed_at = time.time()
-                b.leg_up.status      = OrderStatus.PENDING
-                b.leg_down.status    = OrderStatus.PENDING
-                log.info(f"[{b.id}] Orders placed | Up={b.leg_up.order_id} Down={b.leg_down.order_id}")
+            # Submit both in a single HTTP request
+            results = await loop.run_in_executor(
+                None, self._client.post_orders,
+                [
+                    PostOrdersArgs(order=signed_up, orderType=order_type),
+                    PostOrdersArgs(order=signed_dn, orderType=order_type),
+                ],
+            )
+
+            # Parse response — index 0 = UP, index 1 = DOWN
+            resp_up = results[0] if results and len(results) > 0 else {}
+            resp_dn = results[1] if results and len(results) > 1 else {}
+            up_id     = (resp_up.get("orderID") or "") if isinstance(resp_up, dict) else ""
+            dn_id     = (resp_dn.get("orderID") or "") if isinstance(resp_dn, dict) else ""
+            up_status = (resp_up.get("status") or "").lower() if isinstance(resp_up, dict) else ""
+            dn_status = (resp_dn.get("status") or "").lower() if isinstance(resp_dn, dict) else ""
+
+            up_filled = up_status == "matched"
+            dn_filled = dn_status == "matched"
+
+            now = time.time()
+            for leg, oid, filled in (
+                (b.leg_up,   up_id, up_filled),
+                (b.leg_down, dn_id, dn_filled),
+            ):
+                leg.order_id = oid or None
+                leg.placed_at = now
+                if filled:
+                    leg.status     = OrderStatus.FILLED
+                    leg.filled_at  = now
+                    leg.fill_price = leg.price
+                else:
+                    leg.status = OrderStatus.CANCELLED
+
+            if up_filled and dn_filled:
+                log.info(
+                    f"[{b.id}] Both legs filled (FOK) | "
+                    f"Up={up_id} Down={dn_id}"
+                )
+                await self._live_resolve(b)
                 return True
+
+            if up_filled or dn_filled:
+                filled_side = "UP" if up_filled else "DOWN"
+                log.warning(
+                    f"[{b.id}] Partial fill — {filled_side} filled, other cancelled. "
+                    f"Initiating emergency exit."
+                )
+                await self._emergency_exit(b)
+                return False
+
+            # Neither filled — clean miss, no exposure
+            log.info(f"[{b.id}] Both legs cancelled (FOK) — no fill")
             return False
+
         except Exception as e:
             log.error(f"[{b.id}] Order placement failed: {e}")
             return False
+
+    async def _emergency_exit(self, b: Bracket):
+        """One leg filled, the other was FOK-cancelled.  Sell the filled leg
+        immediately at bid minus slippage buffer to exit the one-sided position.
+        """
+        self.stats["emergency_exits_attempted"] += 1
+
+        filled_leg = b.leg_up if b.leg_up.status == OrderStatus.FILLED else b.leg_down
+        bid_price  = b.bid_up  if filled_leg is b.leg_up else b.bid_down
+
+        # Round to 2 decimal places (coarsest Polymarket tick) to avoid price-valid errors
+        exit_price = round(bid_price * (1.0 - STRATEGY.emergency_exit_slippage_pct), 2)
+        exit_price = max(exit_price, 0.01)  # floor at minimum tick
+
+        try:
+            from py_clob_client.clob_types import OrderArgs, OrderType
+            loop = asyncio.get_running_loop()
+
+            signed_exit = await loop.run_in_executor(
+                None, self._client.create_order,
+                OrderArgs(
+                    token_id=filled_leg.token_id,
+                    price=exit_price,
+                    size=filled_leg.shares,
+                    side="SELL",
+                ),
+            )
+            resp = await loop.run_in_executor(
+                None, self._client.post_order,
+                signed_exit, OrderType.FOK,
+            )
+
+            status = (resp.get("status") or "").lower() if isinstance(resp, dict) else ""
+            if status == "matched":
+                realised_loss = (filled_leg.price - exit_price) * filled_leg.shares
+                log.info(
+                    f"[{b.id}] Emergency exit filled @ {exit_price:.2f} | "
+                    f"loss=${realised_loss:.4f}"
+                )
+                self.stats["emergency_exits_succeeded"] += 1
+                b.actual_net_usdc = -realised_loss
+            else:
+                log.error(
+                    f"[{b.id}] EMERGENCY EXIT FAILED — stranded {filled_leg.side} position "
+                    f"({filled_leg.shares:.2f} shares @ {filled_leg.price:.3f}). "
+                    f"Manual intervention required."
+                )
+                self.stats["emergency_exits_failed"] += 1
+                b.status = "stranded"
+                b.closed_at = time.time()
+                self._log_trade(b, "stranded")
+                self.risk.close(b.market_condition_id, STRATEGY.position_size_usdc * 2)
+                if b.id in self._open_brackets:
+                    del self._open_brackets[b.id]
+                return
+
+        except Exception as e:
+            log.error(f"[{b.id}] Emergency exit exception: {e}")
+            self.stats["emergency_exits_failed"] += 1
+            b.status = "stranded"
+            b.closed_at = time.time()
+            self._log_trade(b, "stranded")
+            self.risk.close(b.market_condition_id, STRATEGY.position_size_usdc * 2)
+            if b.id in self._open_brackets:
+                del self._open_brackets[b.id]
+            return
+
+        # Exit succeeded — clean up via normal cancel path (handles risk + state)
+        await self._cancel_bracket(b)
 
     async def _sim_place(self, b: Bracket) -> bool:
         """Simulate order placement with realistic latency and fill probability."""
@@ -419,6 +563,7 @@ class Trader:
             "actual_net": b.actual_net_usdc,
             "status": b.status,
             "latency_ms": b.latency_ms,
+            "age_ms": b.age_ms,
             "sim": b.sim_mode,
         }
         try:

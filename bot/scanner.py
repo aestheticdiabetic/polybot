@@ -50,6 +50,8 @@ class BracketOpportunity:
     detected_at: float      # unix timestamp
     depth_up: float = 0.0   # shares available at ask_up
     depth_down: float = 0.0 # shares available at ask_down
+    bid_up: float = 0.0     # best bid on UP token at detection time (emergency exit)
+    bid_down: float = 0.0   # best bid on DOWN token at detection time (emergency exit)
     sim_mode: bool = False
 
 
@@ -505,6 +507,8 @@ class Scanner:
             detected_at=time.time(),
             depth_up=depth_up,
             depth_down=depth_down,
+            bid_up=ps_up.bid,
+            bid_down=ps_down.bid,
             sim_mode=SIM.enabled,
         )
 
