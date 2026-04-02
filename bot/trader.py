@@ -181,12 +181,19 @@ class Trader:
         # Equal-shares sizing: buy the same number of shares on each leg so
         # payout is identical regardless of which side wins.
         # total_budget = 2*size; n_shares = total_budget / combined
-        # size_up = n_shares * ask_up; size_down = n_shares * ask_down
         combined = opp.ask_up + opp.ask_down
         total_budget = size * 2
         n_shares = round(total_budget / combined, 4)
-        size_up   = round(n_shares * opp.ask_up,   4)
-        size_down = round(n_shares * opp.ask_down, 4)
+
+        # CLOB requires maker amount (price × shares, i.e. USDC cost) to have
+        # ≤ 2 decimal places, and taker amount (shares) ≤ 4 decimal places.
+        # Round USDC cost to 2dp then back-derive shares for each leg so the
+        # product is exact.  The two legs get slightly different share counts
+        # but the difference is sub-cent and equal-payout holds approximately.
+        size_up   = round(n_shares * opp.ask_up,   2)
+        size_down = round(n_shares * opp.ask_down, 2)
+        shares_up   = round(size_up   / opp.ask_up,   4)
+        shares_down = round(size_down / opp.ask_down, 4)
 
         bracket = Bracket(
             id=str(uuid.uuid4())[:8],
@@ -199,14 +206,14 @@ class Trader:
                 side="UP",
                 price=opp.ask_up,
                 size_usdc=size_up,
-                shares=n_shares,
+                shares=shares_up,
             ),
             leg_down=Leg(
                 token_id=opp.market.token_id_down,
                 side="DOWN",
                 price=opp.ask_down,
                 size_usdc=size_down,
-                shares=n_shares,
+                shares=shares_down,
             ),
             detected_spread=opp.spread,
             expected_net_usdc=opp.net_profit_usdc,
@@ -540,8 +547,10 @@ class Trader:
     async def _live_resolve(self, b: Bracket):
         """Both legs confirmed filled — hand off to redeemer for on-chain resolution."""
         total_cost = b.leg_up.size_usdc + b.leg_down.size_usdc
-        # Gross profit is deterministic with equal-shares sizing: payout = shares × $1
-        gross = b.leg_up.shares - total_cost
+        # Gross profit: winning leg pays out shares × $1.  With nearly-equal sizing
+        # the two share counts differ by <0.001 shares; use the average as an estimate.
+        avg_shares = (b.leg_up.shares + b.leg_down.shares) / 2
+        gross = avg_shares - total_cost
         fee   = total_cost * STRATEGY.taker_fee_pct
         net   = gross - fee
         b.actual_net_usdc = net
