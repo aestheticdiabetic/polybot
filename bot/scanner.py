@@ -34,6 +34,7 @@ class PriceState:
     """Price state for a single token (one side of a bracket)."""
     ask: float = 1.0
     bid: float = 0.0
+    ask_size: float = 0.0   # shares available at best ask
     last_update: float = 0.0
 
 
@@ -47,6 +48,8 @@ class BracketOpportunity:
     gross_profit_usdc: float
     net_profit_usdc: float
     detected_at: float      # unix timestamp
+    depth_up: float = 0.0   # shares available at ask_up
+    depth_down: float = 0.0 # shares available at ask_down
     sim_mode: bool = False
 
 
@@ -402,7 +405,9 @@ class Scanner:
         if event.get("asks"):
             try:
                 # Asks are sorted descending (0.99 → best); asks[-1] = lowest = best ask for buyer
-                ps.ask = float(event["asks"][-1]["price"])
+                best = event["asks"][-1]
+                ps.ask      = float(best["price"])
+                ps.ask_size = float(best.get("size", 0.0))
             except Exception:
                 pass
         if event.get("bids"):
@@ -450,6 +455,31 @@ class Scanner:
         if combined >= STRATEGY.bracket_threshold:
             return
 
+        # Equal-shares sizing: total spend = 2*size, shares = 2*size/combined
+        # Payout = shares × $1 = 2*size/combined (guaranteed regardless of outcome)
+        size         = STRATEGY.position_size_usdc
+        total_spend  = size * 2
+        n_shares     = total_spend / combined
+
+        # Reject if either side of the book lacks the depth to fill our order.
+        # ask_size=0 means we haven't received a book snapshot yet — skip.
+        depth_up   = ps_up.ask_size
+        depth_down = ps_down.ask_size
+        if depth_up > 0 and depth_up < n_shares:
+            log.debug(
+                f"DEPTH SKIP {m.asset} {m.window} | "
+                f"need {n_shares:.2f} shares, UP only has {depth_up:.2f}"
+            )
+            self.stats["brackets_depth_skipped"] = self.stats.get("brackets_depth_skipped", 0) + 1
+            return
+        if depth_down > 0 and depth_down < n_shares:
+            log.debug(
+                f"DEPTH SKIP {m.asset} {m.window} | "
+                f"need {n_shares:.2f} shares, DOWN only has {depth_down:.2f}"
+            )
+            self.stats["brackets_depth_skipped"] = self.stats.get("brackets_depth_skipped", 0) + 1
+            return
+
         # Throttle: skip if we detected a bracket on this market recently
         last = self._recent_brackets.get(m.condition_id, 0)
         throttle_window = 60.0 / STRATEGY.pause_if_bracket_hz
@@ -460,14 +490,9 @@ class Scanner:
         self._recent_brackets[m.condition_id] = time.time()
         self.stats["brackets_detected"] += 1
 
-        # Equal-shares sizing: total spend = 2*size, shares = 2*size/combined
-        # Payout = shares × $1 = 2*size/combined (guaranteed regardless of outcome)
-        size         = STRATEGY.position_size_usdc
-        total_spend  = size * 2
-        n_shares     = total_spend / combined
-        gross        = n_shares - total_spend
-        fee          = total_spend * STRATEGY.taker_fee_pct
-        net          = gross - fee
+        gross = n_shares - total_spend
+        fee   = total_spend * STRATEGY.taker_fee_pct
+        net   = gross - fee
 
         opp = BracketOpportunity(
             market=m,
@@ -478,12 +503,14 @@ class Scanner:
             gross_profit_usdc=gross,
             net_profit_usdc=net,
             detected_at=time.time(),
+            depth_up=depth_up,
+            depth_down=depth_down,
             sim_mode=SIM.enabled,
         )
 
         log.info(
             f"BRACKET {m.asset} {m.window} | "
-            f"Up={ask_up:.3f} Down={ask_down:.3f} Sum={combined:.3f} "
-            f"Net=+${net:.3f}"
+            f"Up={ask_up:.3f}({depth_up:.1f}) Down={ask_down:.3f}({depth_down:.1f}) "
+            f"Sum={combined:.3f} Need={n_shares:.2f}sh Net=+${net:.3f}"
         )
         self.on_bracket(opp)

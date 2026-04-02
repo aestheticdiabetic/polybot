@@ -110,6 +110,7 @@ class Trader:
         self._cancel_tasks: Dict[str, asyncio.Task] = {}
         self.stats = {
             "brackets_attempted": 0,
+            "brackets_stale_skipped": 0,
             "brackets_opened": 0,
             "brackets_won": 0,
             "brackets_lost": 0,
@@ -156,6 +157,13 @@ class Trader:
 
     async def _handle_opportunity(self, opp: BracketOpportunity):
         self.stats["brackets_attempted"] += 1
+
+        # Reject if opportunity is stale — prices may have moved since detection
+        age_ms = (time.time() - opp.detected_at) * 1000
+        if age_ms > 500:
+            log.debug(f"Stale opportunity: {age_ms:.0f}ms old, skipping")
+            self.stats["brackets_stale_skipped"] += 1
+            return
 
         balance = self.state.get_balance()
         ok, reason = self.risk.can_open(opp.market.condition_id, balance)
@@ -209,11 +217,12 @@ class Trader:
         if success:
             self.stats["brackets_opened"] += 1
             self.state.add_bracket(bracket)
-            # Schedule cancel task for unfilled orders
-            task = asyncio.get_running_loop().create_task(
-                self._auto_cancel(bracket)
-            )
-            self._cancel_tasks[bracket.id] = task
+            if not SIM.enabled:
+                # Poll CLOB for fills; cancel legs if unfilled after timeout
+                task = asyncio.get_running_loop().create_task(
+                    self._poll_fills(bracket)
+                )
+                self._cancel_tasks[bracket.id] = task
             self._log_trade(bracket, "opened")
         else:
             self.risk.close(opp.market.condition_id, size * 2)
@@ -228,20 +237,22 @@ class Trader:
         return await self._live_place(b)
 
     async def _live_place(self, b: Bracket) -> bool:
-        """Place real orders via CLOB API."""
+        """Place both legs concurrently via CLOB API."""
         try:
             from py_clob_client.clob_types import OrderArgs
             loop = asyncio.get_running_loop()
 
-            resp_up = await loop.run_in_executor(
-                None, self._client.create_and_post_order,
-                OrderArgs(token_id=b.leg_up.token_id, price=b.leg_up.price,
-                          size=b.leg_up.shares, side="BUY"),
-            )
-            resp_dn = await loop.run_in_executor(
-                None, self._client.create_and_post_order,
-                OrderArgs(token_id=b.leg_down.token_id, price=b.leg_down.price,
-                          size=b.leg_down.shares, side="BUY"),
+            resp_up, resp_dn = await asyncio.gather(
+                loop.run_in_executor(
+                    None, self._client.create_and_post_order,
+                    OrderArgs(token_id=b.leg_up.token_id, price=b.leg_up.price,
+                              size=b.leg_up.shares, side="BUY"),
+                ),
+                loop.run_in_executor(
+                    None, self._client.create_and_post_order,
+                    OrderArgs(token_id=b.leg_down.token_id, price=b.leg_down.price,
+                              size=b.leg_down.shares, side="BUY"),
+                ),
             )
 
             if resp_up and resp_dn:
@@ -315,13 +326,63 @@ class Trader:
         self._log_trade(b, "resolved")
         log.info(f"[SIM][{b.id}] Resolved {b.status} | net=${net:.4f}")
 
-    # ── Auto-cancel stale orders ─────────────────────────────────
+    # ── Fill tracking ────────────────────────────────────────────
 
-    async def _auto_cancel(self, b: Bracket):
-        await asyncio.sleep(STRATEGY.cancel_unfilled_after_s)
+    async def _poll_fills(self, b: Bracket):
+        """Poll CLOB every 3s until both legs fill or the timeout expires."""
+        deadline = time.time() + STRATEGY.cancel_unfilled_after_s
+        loop = asyncio.get_running_loop()
+
+        while time.time() < deadline:
+            await asyncio.sleep(3.0)
+
+            if b.id not in self._open_brackets:
+                return  # already cancelled or resolved by another path
+
+            for leg in (b.leg_up, b.leg_down):
+                if leg.order_id and leg.status == OrderStatus.PENDING:
+                    try:
+                        order = await loop.run_in_executor(
+                            None, self._client.get_order, leg.order_id
+                        )
+                        status = (order.get("status") or "").lower() if order else ""
+                        if status == "matched":
+                            leg.status     = OrderStatus.FILLED
+                            leg.filled_at  = time.time()
+                            leg.fill_price = float(order.get("price", leg.price))
+                            log.info(f"[{b.id}] {leg.side} leg filled @ {leg.fill_price}")
+                        elif status in ("cancelled", "unmatched"):
+                            leg.status = OrderStatus.CANCELLED
+                    except Exception as e:
+                        log.warning(f"[{b.id}] Fill poll error ({leg.side}): {e}")
+
+            if (b.leg_up.status  == OrderStatus.FILLED and
+                    b.leg_down.status == OrderStatus.FILLED):
+                await self._live_resolve(b)
+                return
+
+        # Timeout — cancel any legs still pending
         if b.id in self._open_brackets:
-            if b.leg_up.status == OrderStatus.PENDING or b.leg_down.status == OrderStatus.PENDING:
+            if (b.leg_up.status  == OrderStatus.PENDING or
+                    b.leg_down.status == OrderStatus.PENDING):
                 await self._cancel_bracket(b)
+
+    async def _live_resolve(self, b: Bracket):
+        """Both legs confirmed filled — hand off to redeemer for on-chain resolution."""
+        total_cost = b.leg_up.size_usdc + b.leg_down.size_usdc
+        # Gross profit is deterministic with equal-shares sizing: payout = shares × $1
+        gross = b.leg_up.shares - total_cost
+        fee   = total_cost * STRATEGY.taker_fee_pct
+        net   = gross - fee
+        b.actual_net_usdc = net
+        b.status = "filled"   # redeemer will close it as won/lost after on-chain settlement
+        self.risk.close(b.market_condition_id, total_cost)
+        if b.id in self._cancel_tasks:
+            self._cancel_tasks.pop(b.id).cancel()
+        if b.id in self._open_brackets:
+            del self._open_brackets[b.id]
+        self._log_trade(b, "filled")
+        log.info(f"[{b.id}] Both legs filled — expected net=${net:.4f}, awaiting on-chain resolution")
 
     async def _cancel_bracket(self, b: Bracket):
         if not SIM.enabled and self._client:
