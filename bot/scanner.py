@@ -99,6 +99,9 @@ class Scanner:
                     params = {**base_params, "search": asset}
                     async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as r:
                         data = await r.json()
+                    if asset == STRATEGY.target_assets[0] and not markets:
+                        sample = [m.get("question") or m.get("title", "") for m in data[:5]]
+                        log.info(f"Sample titles for '{asset}': {sample}")
                     for m in data:
                         cid = m.get("condition_id", "")
                         if cid in seen:
