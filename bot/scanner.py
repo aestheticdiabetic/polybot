@@ -307,6 +307,7 @@ class Scanner:
                     CLOB_WS,
                     ping_interval=20,
                     ping_timeout=10,
+                    max_size=10 * 1024 * 1024,  # 10 MB — default 1 MB is too small for full book snapshots
                 ) as ws:
                     self._ws = ws
                     backoff = 1
