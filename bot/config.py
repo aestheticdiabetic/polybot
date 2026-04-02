@@ -24,8 +24,8 @@ ALCHEMY_RPC      = f"https://polygon-mainnet.g.alchemy.com/v2/{os.getenv('ALCHEM
 # ─── Strategy parameters ──────────────────────────────────────────
 @dataclass
 class StrategyConfig:
-    # Markets to watch — Polymarket uses "15M", "1H", "24H" in titles
-    target_windows: list = field(default_factory=lambda: ["15M", "1H", "24H"])
+    # Markets to watch — Polymarket tags use "5M", "1H", "24H"
+    target_windows: list = field(default_factory=lambda: ["5M", "1H", "24H"])
     # All major crypto assets tracked by Polymarket up/down markets
     target_assets:  list = field(default_factory=lambda: [
         "BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "AVAX", "DOGE",

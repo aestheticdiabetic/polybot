@@ -87,105 +87,113 @@ class Scanner:
 
     # ── Market discovery ─────────────────────────────────────────
 
+    # Full name → ticker mapping for Polymarket event titles
+    _ASSET_NAME_MAP = {
+        "BITCOIN": "BTC", "ETHEREUM": "ETH", "SOLANA": "SOL",
+        "BNB": "BNB", "XRP": "XRP", "RIPPLE": "XRP",
+        "CARDANO": "ADA", "AVALANCHE": "AVAX", "DOGECOIN": "DOGE",
+        "POLYGON": "MATIC", "POL": "POL", "CHAINLINK": "LINK",
+        "POLKADOT": "DOT", "UNISWAP": "UNI", "LITECOIN": "LTC",
+        "COSMOS": "ATOM",
+    }
+
     async def _fetch_active_markets(self) -> List[MarketInfo]:
-        """Fetch all active Up/Down markets from Gamma API by searching per asset."""
+        """Fetch all active Up/Down markets from the Gamma events API."""
         markets: List[MarketInfo] = []
         seen: set = set()
-        url = "https://gamma-api.polymarket.com/markets"
-        base_params = {"active": "true", "closed": "false", "limit": 100}
+        url = "https://gamma-api.polymarket.com/events"
+        params = {
+            "active": "true",
+            "closed": "false",
+            "tag_slug": "up-or-down",
+            "limit": 500,
+        }
         try:
             async with aiohttp.ClientSession() as session:
-                for asset in STRATEGY.target_assets:
-                    params = {**base_params, "search": asset}
-                    async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                        data = await r.json()
-                    if asset == STRATEGY.target_assets[0] and not markets:
-                        sample = [m.get("question") or m.get("title", "") for m in data[:5]]
-                        log.info(f"Sample titles for '{asset}': {sample}")
-                    for m in data:
-                        cid = m.get("condition_id", "")
-                        if cid in seen:
-                            continue
-                        info = self._parse_market(m)
-                        if info:
-                            seen.add(cid)
-                            markets.append(info)
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                    events = await r.json()
+
+            for event in events:
+                for market in event.get("markets", []):
+                    cid = market.get("conditionId") or market.get("condition_id", "")
+                    if not cid or cid in seen:
+                        continue
+                    info = self._parse_event_market(event, market)
+                    if info:
+                        seen.add(cid)
+                        markets.append(info)
         except Exception as e:
             log.error(f"Market fetch failed: {e}")
-        log.info(f"Market fetch complete: {len(markets)} up/down markets found across {len(STRATEGY.target_assets)} assets")
+
+        log.info(f"Market fetch complete: {len(markets)} up/down markets found")
         return markets
 
-    # Map various title phrases to canonical window keys
-    _WINDOW_PATTERNS = [
-        ("15M",  [r"\b15[\s-]?min", r"\b15m\b"]),
-        ("1H",   [r"\b1[\s-]?hour", r"\b60[\s-]?min", r"\b1h\b"]),
-        ("24H",  [r"\b24[\s-]?hour", r"\b1[\s-]?day", r"\b24h\b"]),
-    ]
-
-    def _parse_market(self, m: dict) -> Optional[MarketInfo]:
-        """Extract relevant fields from a Gamma API market object."""
+    def _parse_event_market(self, event: dict, market: dict) -> Optional[MarketInfo]:
+        """Parse a market nested inside a Gamma API event."""
         try:
-            title = m.get("question", "") or m.get("title", "")
+            title = event.get("title", "")
             title_up = title.upper()
 
-            # Must be an up/down style market
-            if not any(kw in title_up for kw in ("UP OR DOWN", "HIGHER OR LOWER", "HIGHER OR LOWER", "UP/DOWN")):
-                return None
-
-            # Detect window size — try configured keys first, then regex patterns
+            # Detect window from event tags (e.g. ["5M", "Crypto Prices", ...])
+            tags = [t.upper() if isinstance(t, str) else t.get("slug", "").upper()
+                    for t in event.get("tags", [])]
             window = None
             for w in STRATEGY.target_windows:
-                if w in title_up:
+                if w.upper() in tags:
                     window = w
                     break
             if not window:
-                for key, patterns in self._WINDOW_PATTERNS:
-                    if key in STRATEGY.target_windows:
-                        if any(re.search(p, title, re.IGNORECASE) for p in patterns):
-                            window = key
-                            break
-            if not window:
                 return None
 
-            # Detect asset
+            # Detect asset — check full names first, then ticker symbols
             asset = None
-            for a in STRATEGY.target_assets:
-                if a.upper() in title_up:
-                    asset = a
+            for name, ticker in self._ASSET_NAME_MAP.items():
+                if name in title_up and ticker in STRATEGY.target_assets:
+                    asset = ticker
                     break
+            if not asset:
+                for a in STRATEGY.target_assets:
+                    if a.upper() in title_up:
+                        asset = a
+                        break
             if not asset:
                 return None
 
-            tokens = m.get("tokens", [])
+            # Extract token IDs
+            tokens = market.get("tokens", [])
             if len(tokens) < 2:
                 return None
 
-            # Identify Up/Down tokens
             token_up = token_down = None
             for t in tokens:
                 outcome = t.get("outcome", "").lower()
                 if outcome == "up":
-                    token_up = t["token_id"]
+                    token_up = t.get("token_id") or t.get("tokenId")
                 elif outcome == "down":
-                    token_down = t["token_id"]
+                    token_down = t.get("token_id") or t.get("tokenId")
 
             if not token_up or not token_down:
                 return None
 
+            # Parse end time
             end_time = 0
-            if m.get("end_date_iso"):
-                from datetime import datetime, timezone
-                try:
-                    end_time = datetime.fromisoformat(
-                        m["end_date_iso"].replace("Z", "+00:00")
-                    ).timestamp()
-                except Exception:
-                    pass
+            for field in ("endDate", "end_date_iso", "endDateIso"):
+                raw = market.get(field) or event.get(field)
+                if raw:
+                    try:
+                        from datetime import datetime
+                        end_time = datetime.fromisoformat(
+                            raw.replace("Z", "+00:00")
+                        ).timestamp()
+                    except Exception:
+                        pass
+                    break
 
+            cid = market.get("conditionId") or market.get("condition_id", "")
             return MarketInfo(
                 token_id_up=token_up,
                 token_id_down=token_down,
-                condition_id=m.get("condition_id", ""),
+                condition_id=cid,
                 title=title,
                 window=window,
                 asset=asset,
