@@ -129,13 +129,24 @@ class Scanner:
         return markets
 
     def _parse_event_market(self, event: dict, market: dict) -> Optional[MarketInfo]:
-        """Parse a market nested inside a Gamma API event."""
+        """Parse a market nested inside a Gamma API event.
+
+        Gamma API field notes (verified against live API 2026-04):
+        - tags: array of objects with 'slug' field (e.g. {"slug": "5M", ...})
+        - conditionId: camelCase only — no condition_id variant exists
+        - clobTokenIds: JSON-encoded string of token ID array (positionally
+          aligned with the 'outcomes' JSON string)
+        - outcomes: JSON-encoded string e.g. '["Up", "Down"]'
+        - endDate: camelCase on both event and market — no end_date variant
+        """
         try:
             title = event.get("title", "")
             title_up = title.upper()
 
-            # Detect window from event tags (e.g. ["5M", "Crypto Prices", ...])
-            tags = [t.upper() if isinstance(t, str) else t.get("slug", "").upper()
+            # Tags are objects with a 'slug' field — never plain strings.
+            # Slugs are mixed-case (e.g. "5M", "up-or-down"), so compare
+            # case-insensitively.
+            tags = [t.get("slug", "").upper() if isinstance(t, dict) else t.upper()
                     for t in event.get("tags", [])]
             window = None
             for w in STRATEGY.target_windows:
@@ -159,37 +170,46 @@ class Scanner:
             if not asset:
                 return None
 
-            # Extract token IDs
-            tokens = market.get("tokens", [])
-            if len(tokens) < 2:
+            # Extract token IDs from clobTokenIds (JSON string) and outcomes
+            # (JSON string). Positions are aligned: clobTokenIds[i] belongs to
+            # outcomes[i].
+            raw_clob = market.get("clobTokenIds")
+            raw_outcomes = market.get("outcomes")
+            if not raw_clob or not raw_outcomes:
+                return None
+
+            clob_ids = json.loads(raw_clob) if isinstance(raw_clob, str) else raw_clob
+            outcomes = json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
+
+            if len(clob_ids) < 2 or len(outcomes) < 2:
                 return None
 
             token_up = token_down = None
-            for t in tokens:
-                outcome = t.get("outcome", "").lower()
-                if outcome == "up":
-                    token_up = t.get("token_id") or t.get("tokenId")
-                elif outcome == "down":
-                    token_down = t.get("token_id") or t.get("tokenId")
+            for i, outcome in enumerate(outcomes):
+                if outcome.lower() == "up":
+                    token_up = clob_ids[i]
+                elif outcome.lower() == "down":
+                    token_down = clob_ids[i]
 
             if not token_up or not token_down:
                 return None
 
-            # Parse end time
+            # Parse end time — endDate is camelCase on both event and market
             end_time = 0
-            for field in ("endDate", "end_date_iso", "endDateIso"):
-                raw = market.get(field) or event.get(field)
-                if raw:
-                    try:
-                        from datetime import datetime
-                        end_time = datetime.fromisoformat(
-                            raw.replace("Z", "+00:00")
-                        ).timestamp()
-                    except Exception:
-                        pass
-                    break
+            raw_end = market.get("endDate") or event.get("endDate", "")
+            if raw_end:
+                try:
+                    from datetime import datetime
+                    end_time = datetime.fromisoformat(
+                        raw_end.replace("Z", "+00:00")
+                    ).timestamp()
+                except Exception:
+                    pass
 
-            cid = market.get("conditionId") or market.get("condition_id", "")
+            cid = market.get("conditionId", "")
+            if not cid:
+                return None
+
             return MarketInfo(
                 token_id_up=token_up,
                 token_id_down=token_down,
