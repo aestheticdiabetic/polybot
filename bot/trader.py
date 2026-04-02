@@ -87,6 +87,8 @@ class Bracket:
     age_ms: Optional[float] = None       # time from scanner detection to submission
     bid_up: float = 0.0     # bid at detection time, for emergency exit pricing
     bid_down: float = 0.0
+    limit_up: float = 0.0   # FOK limit price for UP leg (max profitable price)
+    limit_down: float = 0.0 # FOK limit price for DOWN leg
 
 
 class RiskGuard:
@@ -241,6 +243,8 @@ class Trader:
             sim_mode=SIM.enabled,
             bid_up=opp.bid_up,
             bid_down=opp.bid_down,
+            limit_up=opp.limit_up,
+            limit_down=opp.limit_down,
         )
 
         bracket.age_ms = age_ms
@@ -302,17 +306,25 @@ class Trader:
                 OrderType.FOK if STRATEGY.order_type == "FOK" else OrderType.GTC
             )
 
+            # Use limit prices (not just best ask) so the FOK can sweep through
+            # multiple price levels up to the max profitable price.
+            # Shares are re-derived for each limit price to satisfy CLOB precision.
+            limit_up   = b.limit_up   or b.leg_up.price
+            limit_down = b.limit_down or b.leg_down.price
+            shares_up   = _clob_valid_shares(b.leg_up.shares,   limit_up)
+            shares_down = _clob_valid_shares(b.leg_down.shares, limit_down)
+
             # Sign both orders concurrently (ECDSA crypto, pure CPU, no I/O)
             signed_up, signed_dn = await asyncio.gather(
                 loop.run_in_executor(
                     None, self._client.create_order,
-                    OrderArgs(token_id=b.leg_up.token_id, price=b.leg_up.price,
-                              size=b.leg_up.shares, side="BUY"),
+                    OrderArgs(token_id=b.leg_up.token_id, price=limit_up,
+                              size=shares_up, side="BUY"),
                 ),
                 loop.run_in_executor(
                     None, self._client.create_order,
-                    OrderArgs(token_id=b.leg_down.token_id, price=b.leg_down.price,
-                              size=b.leg_down.shares, side="BUY"),
+                    OrderArgs(token_id=b.leg_down.token_id, price=limit_down,
+                              size=shares_down, side="BUY"),
                 ),
             )
 
@@ -365,8 +377,9 @@ class Trader:
                 log.info(
                     f"[{b.id}] Both legs filled (FOK) | "
                     f"Up={up_id} Down={dn_id} | "
-                    f"ask_up={b.leg_up.price} ask_dn={b.leg_down.price} "
-                    f"shares={b.leg_up.shares:.4f}"
+                    f"ask={b.leg_up.price}/lim={limit_up} "
+                    f"ask={b.leg_down.price}/lim={limit_down} "
+                    f"shares_up={shares_up} shares_dn={shares_down}"
                 )
                 await self._live_resolve(b)
                 return True

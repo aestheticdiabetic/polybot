@@ -48,10 +48,17 @@ class BracketOpportunity:
     gross_profit_usdc: float
     net_profit_usdc: float
     detected_at: float      # unix timestamp
-    depth_up: float = 0.0   # shares available at ask_up
-    depth_down: float = 0.0 # shares available at ask_down
+    depth_up: float = 0.0   # shares visible at ask_up (single level — may be partial)
+    depth_down: float = 0.0 # shares visible at ask_down
     bid_up: float = 0.0     # best bid on UP token at detection time (emergency exit)
     bid_down: float = 0.0   # best bid on DOWN token at detection time (emergency exit)
+    # FOK limit prices — set to max price we'd pay while remaining profitable.
+    # Splitting available margin evenly lets the FOK sweep through price levels
+    # above best ask (e.g. 2 @ 0.53 + 20 @ 0.54) instead of cancelling on thin
+    # depth at a single level.  Worst case: both legs fill at their limits →
+    # limit_up + limit_down = bracket_threshold → still profitable.
+    limit_up: float = 0.0
+    limit_down: float = 0.0
     sim_mode: bool = False
 
 
@@ -463,21 +470,31 @@ class Scanner:
         total_spend  = size * 2
         n_shares     = total_spend / combined
 
-        # Reject if either side of the book lacks the depth to fill our order.
-        # ask_size=0 means we haven't received a book snapshot yet — skip.
         depth_up   = ps_up.ask_size
         depth_down = ps_down.ask_size
-        if depth_up > 0 and depth_up < n_shares:
+
+        # FOK limit prices: split the available profit margin evenly between legs.
+        # This lets the FOK sweep through price levels above best ask up to the limit.
+        # Worst case (both fill at limit): combined = bracket_threshold → still profitable.
+        margin     = STRATEGY.bracket_threshold - combined
+        limit_up   = round(ask_up   + margin / 2, 2)
+        limit_down = round(ask_down + margin / 2, 2)
+
+        # Only skip if we have book data AND best-ask depth is well below our need.
+        # With limit-price sweeping the actual fillable depth extends above best ask,
+        # so a single-level depth reading is only useful as a "book looks empty" guard.
+        # Threshold: skip if visible depth < 25% of required shares.
+        if depth_up > 0 and depth_up < n_shares * 0.25:
             log.debug(
                 f"DEPTH SKIP {m.asset} {m.window} | "
-                f"need {n_shares:.2f} shares, UP only has {depth_up:.2f}"
+                f"need {n_shares:.2f}sh, UP only has {depth_up:.2f} at best ask"
             )
             self.stats["brackets_depth_skipped"] = self.stats.get("brackets_depth_skipped", 0) + 1
             return
-        if depth_down > 0 and depth_down < n_shares:
+        if depth_down > 0 and depth_down < n_shares * 0.25:
             log.debug(
                 f"DEPTH SKIP {m.asset} {m.window} | "
-                f"need {n_shares:.2f} shares, DOWN only has {depth_down:.2f}"
+                f"need {n_shares:.2f}sh, DOWN only has {depth_down:.2f} at best ask"
             )
             self.stats["brackets_depth_skipped"] = self.stats.get("brackets_depth_skipped", 0) + 1
             return
@@ -509,12 +526,15 @@ class Scanner:
             depth_down=depth_down,
             bid_up=ps_up.bid,
             bid_down=ps_down.bid,
+            limit_up=limit_up,
+            limit_down=limit_down,
             sim_mode=SIM.enabled,
         )
 
         log.info(
             f"BRACKET {m.asset} {m.window} | "
-            f"Up={ask_up:.3f}({depth_up:.1f}) Down={ask_down:.3f}({depth_down:.1f}) "
+            f"Up={ask_up:.3f}({depth_up:.1f}) lim={limit_up:.3f} "
+            f"Down={ask_down:.3f}({depth_down:.1f}) lim={limit_down:.3f} "
             f"Sum={combined:.3f} Need={n_shares:.2f}sh Net=+${net:.3f}"
         )
         self.on_bracket(opp)
