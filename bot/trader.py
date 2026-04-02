@@ -392,9 +392,9 @@ class Trader:
                 log.warning(
                     f"[{b.id}] Partial fill — {filled_side} filled, {missed_side} cancelled "
                     f"[err={missed_err or 'none'} msg={missed_msg or 'none'}] | "
-                    f"ask_up={b.leg_up.price} ask_dn={b.leg_down.price} "
-                    f"shares={b.leg_up.shares:.4f} age={b.age_ms:.0f}ms. "
-                    f"Initiating emergency exit."
+                    f"up: ask={b.leg_up.price:.3f} lim={limit_up:.3f} sh={shares_up:.4f} | "
+                    f"dn: ask={b.leg_down.price:.3f} lim={limit_down:.3f} sh={shares_down:.4f} | "
+                    f"age={b.age_ms:.0f}ms. Initiating emergency exit."
                 )
                 await self._emergency_exit(b)
                 return False
@@ -402,10 +402,10 @@ class Trader:
             # Neither filled — clean miss, no exposure
             log.info(
                 f"[{b.id}] Both legs cancelled (FOK) — no fill | "
-                f"up: status={up_status!r} err={up_err!r} msg={up_msg!r} | "
-                f"dn: status={dn_status!r} err={dn_err!r} msg={dn_msg!r} | "
-                f"asked up={b.leg_up.price:.3f}×{b.leg_up.shares:.4f}sh "
-                f"dn={b.leg_down.price:.3f}×{b.leg_down.shares:.4f}sh "
+                f"up: status={up_status!r} err={up_err!r} msg={up_msg!r} "
+                f"ask={b.leg_up.price:.3f} lim={limit_up:.3f} sh={shares_up:.4f} | "
+                f"dn: status={dn_status!r} err={dn_err!r} msg={dn_msg!r} "
+                f"ask={b.leg_down.price:.3f} lim={limit_down:.3f} sh={shares_down:.4f} | "
                 f"spread={b.detected_spread:.4f} age={b.age_ms:.0f}ms"
             )
             return False
