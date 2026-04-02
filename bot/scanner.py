@@ -70,15 +70,17 @@ class Scanner:
     ):
         self.on_bracket = on_bracket
         self.on_near_bracket = on_near_bracket
-        self._markets: Dict[str, MarketInfo] = {}       # condition_id → MarketInfo
-        self._prices:  Dict[str, PriceState] = {}       # token_id → PriceState
-        self._recent_brackets: Dict[str, float] = {}    # condition_id → last bracket ts
+        self._markets: Dict[str, MarketInfo] = {}          # condition_id → MarketInfo
+        self._prices:  Dict[str, PriceState] = {}          # token_id → PriceState
+        self._market_added_at: Dict[str, float] = {}       # condition_id → unix ts added
+        self._recent_brackets: Dict[str, float] = {}       # condition_id → last bracket ts
         self._recent_near_brackets: Dict[str, float] = {}  # condition_id → last near-bracket ts
         self._running = False
         self._ws = None
         self._last_ws_msg_at: float = 0.0
         self.stats = {
             "markets_tracked": 0,
+            "markets_active": 0,   # subset with live WS price data on both sides
             "price_updates": 0,
             "brackets_detected": 0,
             "brackets_throttled": 0,
@@ -308,22 +310,58 @@ class Scanner:
                 m = self._markets.pop(cid)
                 self._prices.pop(m.token_id_up, None)
                 self._prices.pop(m.token_id_down, None)
+                self._market_added_at.pop(cid, None)
             if expired:
                 log.info(f"Markets: pruned {len(expired)} expired, {len(self._markets)} remaining")
+
+            # Prune markets that have never received a WS price event after the
+            # grace period.  These are markets listed by the Gamma API that are not
+            # yet open or have no active order book — subscribing to them wastes WS
+            # bandwidth and subscription slots.
+            _INACTIVE_GRACE_S = 120
+            inactive = [
+                cid for cid, m in self._markets.items()
+                if cid not in expired
+                and now - self._market_added_at.get(cid, now) > _INACTIVE_GRACE_S
+                and self._prices.get(m.token_id_up,   PriceState()).last_update == 0
+                and self._prices.get(m.token_id_down, PriceState()).last_update == 0
+            ]
+            for cid in inactive:
+                m = self._markets.pop(cid)
+                self._prices.pop(m.token_id_up, None)
+                self._prices.pop(m.token_id_down, None)
+                self._market_added_at.pop(cid, None)
+            if inactive:
+                log.info(
+                    f"Markets: pruned {len(inactive)} inactive (no price data after "
+                    f"{_INACTIVE_GRACE_S}s), {len(self._markets)} remaining"
+                )
 
             new_count = 0
             for m in markets:
                 if m.condition_id not in self._markets:
                     self._markets[m.condition_id] = m
+                    self._market_added_at[m.condition_id] = now
                     if m.token_id_up not in self._prices:
                         self._prices[m.token_id_up] = PriceState()
                     if m.token_id_down not in self._prices:
                         self._prices[m.token_id_down] = PriceState()
                     new_count += 1
 
+            # Count markets with live price data on both sides
+            active_count = sum(
+                1 for cid, m in self._markets.items()
+                if self._prices.get(m.token_id_up,   PriceState()).last_update > 0
+                and self._prices.get(m.token_id_down, PriceState()).last_update > 0
+            )
             self.stats["markets_tracked"] = len(self._markets)
+            self.stats["markets_active"]  = active_count
+
+            needs_resub = new_count > 0 or bool(inactive)
             if new_count:
-                log.info(f"Markets: +{new_count} new, {len(self._markets)} total tracked")
+                log.info(f"Markets: +{new_count} new, {len(self._markets)} tracked "
+                         f"({active_count} active)")
+            if needs_resub:
                 await self._resubscribe()
 
             # Stale WS watchdog: if we have markets but no price updates for 90s,
@@ -461,6 +499,11 @@ class Scanner:
 
         # Skip stale prices
         if time.time() - ps_up.last_update > 30 or time.time() - ps_down.last_update > 30:
+            return
+
+        # Skip if either side has no active sellers (empty order book).
+        # ask defaults to 1.0 on init; a live market with real offers will be < 1.0.
+        if ps_up.ask >= 1.0 or ps_down.ask >= 1.0:
             return
 
         # Skip near-expiry markets (< 3 minutes to close)
