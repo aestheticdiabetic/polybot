@@ -24,13 +24,19 @@ ALCHEMY_RPC      = f"https://polygon-mainnet.g.alchemy.com/v2/{os.getenv('ALCHEM
 # ─── Strategy parameters ──────────────────────────────────────────
 @dataclass
 class StrategyConfig:
-    # Markets to watch — "5M", "15M", "1H"
-    target_windows: list = field(default_factory=lambda: ["15M", "1H"])
-    target_assets:  list = field(default_factory=lambda: ["ETH", "BTC"])
+    # Markets to watch — Polymarket uses "15M", "1H", "24H" in titles
+    target_windows: list = field(default_factory=lambda: ["15M", "1H", "24H"])
+    # All major crypto assets tracked by Polymarket up/down markets
+    target_assets:  list = field(default_factory=lambda: [
+        "BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "AVAX", "DOGE",
+        "MATIC", "POL", "LINK", "DOT", "UNI", "LTC", "ATOM",
+    ])
 
     # Bracket detection threshold
     # Buy bracket when: ask(Up) + ask(Down) < bracket_threshold
-    bracket_threshold: float = 0.985   # leaves ~1.5% buffer above fees
+    # Fees = 1% taker × 2 legs = 2% total. Break-even = 0.98.
+    # 0.97 → 3% spread → ~1% net margin after fees.
+    bracket_threshold: float = 0.97
 
     # Position sizing
     position_size_usdc: float = 10.0   # USDC per leg (both legs = 2x this)
