@@ -356,6 +356,8 @@ class Scanner:
         # asks are sorted ascending — asks[0] is the best (lowest) ask.
         if event.get("asks"):
             try:
+                if ps.last_update == 0:  # first event for this token — log raw data
+                    log.debug(f"BOOK_RAW asset={asset_id[:12]} asks={event['asks'][:3]} bids={event.get('bids', [])[:3]}")
                 ps.ask = float(event["asks"][0]["price"])
             except Exception:
                 pass
