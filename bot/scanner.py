@@ -285,8 +285,11 @@ class Scanner:
 
     async def _resubscribe(self):
         """Re-subscribe after market list update."""
-        if self._ws and not self._ws.closed:
-            await self._subscribe_all(self._ws)
+        if self._ws:
+            try:
+                await self._subscribe_all(self._ws)
+            except Exception:
+                pass
 
     async def _handle_message(self, msg):
         """Process incoming WebSocket message."""
