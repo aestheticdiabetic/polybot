@@ -308,8 +308,9 @@ function updateMetrics(d) {
   document.getElementById('btn-stop').disabled = !d.running;
   document.getElementById('uptime-display').textContent = 'uptime: ' + fmtUptime(d.uptime_s);
 
-  // Mode badge
-  setMode(d.mode || mode);
+  // Mode badge — only sync from server while bot is running;
+  // when stopped the user's local selection should be preserved.
+  if (d.running) setMode(d.mode || mode);
 
   // PnL chart data
   const now = new Date().toLocaleTimeString();
