@@ -244,6 +244,10 @@ class Scanner:
             if not cid:
                 return None
 
+            # Reject markets that have already ended
+            if end_time and end_time < time.time():
+                return None
+
             return MarketInfo(
                 token_id_up=token_up,
                 token_id_down=token_down,
@@ -258,9 +262,23 @@ class Scanner:
             return None
 
     async def _market_refresh_loop(self):
-        """Refresh market list every 60s, re-subscribe new markets."""
+        """Refresh market list every 60s, add new markets, prune expired ones."""
         while self._running:
             markets = await self._fetch_active_markets()
+            now = time.time()
+
+            # Prune markets that have expired
+            expired = [
+                cid for cid, m in self._markets.items()
+                if m.end_time and m.end_time < now
+            ]
+            for cid in expired:
+                m = self._markets.pop(cid)
+                self._prices.pop(m.token_id_up, None)
+                self._prices.pop(m.token_id_down, None)
+            if expired:
+                log.info(f"Markets: pruned {len(expired)} expired, {len(self._markets)} remaining")
+
             new_count = 0
             for m in markets:
                 if m.condition_id not in self._markets:
