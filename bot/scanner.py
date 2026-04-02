@@ -58,6 +58,7 @@ class Scanner:
         self._recent_brackets: Dict[str, float] = {}   # condition_id → last bracket ts
         self._running = False
         self._ws = None
+        self._last_ws_msg_at: float = 0.0
         self.stats = {
             "markets_tracked": 0,
             "price_updates": 0,
@@ -248,6 +249,18 @@ class Scanner:
             if end_time and end_time < time.time():
                 return None
 
+            # Reject markets that haven't started yet (allow 60s grace)
+            raw_start = market.get("startDate") or event.get("startDate", "")
+            if raw_start:
+                try:
+                    start_time = datetime.fromisoformat(
+                        raw_start.replace("Z", "+00:00")
+                    ).timestamp()
+                    if start_time > time.time() + 60:
+                        return None
+                except Exception:
+                    pass
+
             return MarketInfo(
                 token_id_up=token_up,
                 token_id_down=token_down,
@@ -293,6 +306,18 @@ class Scanner:
             if new_count:
                 log.info(f"Markets: +{new_count} new, {len(self._markets)} total tracked")
                 await self._resubscribe()
+
+            # Stale WS watchdog: if we have markets but no price updates for 90s,
+            # force-close the WS connection to trigger a fresh reconnect + resubscribe.
+            if (self._markets and self._last_ws_msg_at > 0
+                    and time.time() - self._last_ws_msg_at > 90):
+                log.warning("WS stale: no price updates for 90s — forcing reconnect")
+                if self._ws:
+                    try:
+                        await self._ws.close()
+                    except Exception:
+                        pass
+                self._last_ws_msg_at = time.time()  # reset to avoid tight reconnect loops
 
             await asyncio.sleep(60)
 
@@ -353,6 +378,7 @@ class Scanner:
     async def _handle_message(self, msg):
         """Process incoming WebSocket message."""
         self.stats["price_updates"] += 1
+        self._last_ws_msg_at = time.time()
 
         if isinstance(msg, list):
             for item in msg:

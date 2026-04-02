@@ -240,6 +240,7 @@
       <select id="mkt-window" onchange="renderMarkets()">
         <option value="">all windows</option>
         <option value="5M">5M</option>
+        <option value="15M">15M</option>
         <option value="1H">1H</option>
         <option value="24H">24H</option>
       </select>
@@ -368,7 +369,52 @@ function updateMetrics(d) {
   }
 }
 
+function updateCharts(d) {
+  const allBrackets = (d.open_brackets || []).concat(d.recent_trades || []);
+
+  // Spread distribution: 10 buckets × 0.5% each (covers 0–5%)
+  const sBuckets = new Array(10).fill(0);
+  allBrackets.forEach(b => {
+    if (b.spread != null) {
+      const idx = Math.min(Math.floor(b.spread * 200), 9); // spread*100/%  / 0.5 = *200
+      sBuckets[idx]++;
+    }
+  });
+  if (spreadChart) {
+    spreadChart.data.datasets[0].data = sBuckets;
+    spreadChart.update('none');
+  }
+
+  // Latency distribution: 10 buckets × 10ms each (covers 0–100ms)
+  const lBuckets = new Array(10).fill(0);
+  allBrackets.forEach(b => {
+    if (b.latency_ms != null) {
+      const idx = Math.min(Math.floor(b.latency_ms / 10), 9);
+      lBuckets[idx]++;
+    }
+  });
+  if (latencyChart) {
+    latencyChart.data.datasets[0].data = lBuckets;
+    latencyChart.update('none');
+  }
+
+  // Brackets per hour: 12 buckets, index 0 = current hour, 11 = 11h ago
+  const now = Date.now() / 1000;
+  const hVol = new Array(12).fill(0);
+  allBrackets.forEach(b => {
+    const hoursAgo = Math.floor((now - (b.opened_at || 0)) / 3600);
+    if (hoursAgo >= 0 && hoursAgo < 12) hVol[hoursAgo]++;
+  });
+  if (volChart) {
+    // Reverse so oldest is leftmost (time flows left → right)
+    volChart.data.datasets[0].data = [...hVol].reverse();
+    volChart.update('none');
+  }
+}
+
 function updateTrades(d) {
+  updateCharts(d);
+
   // Open brackets
   const openTbody = document.getElementById('open-tbody');
   openTbody.innerHTML = '';
@@ -464,7 +510,7 @@ function initCharts() {
 
   volChart = new Chart(document.getElementById('chart-volume'), {
     type: 'bar',
-    data: { labels: Array(12).fill('').map((_,i)=>i+'h ago'), datasets: [{ data: Array(12).fill(0), backgroundColor: '#3b82f633', borderColor: '#3b82f6', borderWidth: 1 }] },
+    data: { labels: Array(12).fill('').map((_,i)=>(11-i)+'h ago'), datasets: [{ data: Array(12).fill(0), backgroundColor: '#3b82f633', borderColor: '#3b82f6', borderWidth: 1 }] },
     options: opts
   });
 

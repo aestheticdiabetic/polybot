@@ -57,7 +57,7 @@ async def run_bot(state: StateManager):
             state.update_markets(scanner.get_markets_snapshot())
             await asyncio.sleep(2)
 
-    asyncio.get_event_loop().create_task(sync_stats())
+    asyncio.get_running_loop().create_task(sync_stats())
 
     # Start scanner (blocks until stopped)
     try:
@@ -84,7 +84,7 @@ async def main():
     log.info(f"Dashboard running on http://0.0.0.0:{os.getenv('DASHBOARD_PORT', '8080')}")
 
     # Handle graceful shutdown
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     bot_task = None
 
     def handle_stop():
@@ -97,7 +97,7 @@ async def main():
 
     # Start bot if AUTO_START env var is set
     if os.getenv("AUTO_START", "false").lower() == "true":
-        bot_task = asyncio.get_event_loop().create_task(run_bot(state))
+        bot_task = loop.create_task(run_bot(state))
 
     # Keep running — dashboard controls bot start/stop
     try:
@@ -105,7 +105,7 @@ async def main():
             await asyncio.sleep(1)
             # Check if dashboard requested bot start
             if state.is_running() and (bot_task is None or bot_task.done()):
-                bot_task = asyncio.get_event_loop().create_task(run_bot(state))
+                bot_task = loop.create_task(run_bot(state))
             elif not state.is_running() and bot_task and not bot_task.done():
                 bot_task.cancel()
     except asyncio.CancelledError:
