@@ -31,10 +31,9 @@ class MarketInfo:
 
 @dataclass
 class PriceState:
-    ask_up: float   = 1.0
-    ask_down: float = 1.0
-    bid_up: float   = 0.0
-    bid_down: float = 0.0
+    """Price state for a single token (one side of a bracket)."""
+    ask: float = 1.0
+    bid: float = 0.0
     last_update: float = 0.0
 
 
@@ -92,11 +91,15 @@ class Scanner:
         for cid, m in self._markets.items():
             ps_up   = self._prices.get(m.token_id_up)
             ps_down = self._prices.get(m.token_id_down)
-            ask_up   = ps_up.ask_up   if ps_up   else None
-            ask_down = ps_down.ask_down if ps_down else None
+            ask_up   = ps_up.ask   if ps_up   else None
+            ask_down = ps_down.ask if ps_down else None
             combined = round(ask_up + ask_down, 4) if (ask_up and ask_down) else None
-            stale = (
+            # "no_data" means we've never received a price event for this token
+            no_data = (
                 not ps_up or not ps_down or
+                ps_up.last_update == 0 or ps_down.last_update == 0
+            )
+            stale = no_data or (
                 now - ps_up.last_update > 30 or
                 now - ps_down.last_update > 30
             )
@@ -349,26 +352,24 @@ class Scanner:
 
         ps = self._prices[asset_id]
 
-        # Update ask/bid from orderbook snapshot or price change
-        if "asks" in event and event["asks"]:
+        # Book snapshot (sent immediately on subscribe and on orderbook changes).
+        # asks are sorted ascending — asks[0] is the best (lowest) ask.
+        if event.get("asks"):
             try:
-                ps.ask_up = float(event["asks"][0]["price"]) if asset_id.endswith("_up") else ps.ask_up
-                ps.ask_down = float(event["asks"][0]["price"]) if asset_id.endswith("_down") else ps.ask_down
+                ps.ask = float(event["asks"][0]["price"])
+            except Exception:
+                pass
+        if event.get("bids"):
+            try:
+                ps.bid = float(event["bids"][0]["price"])
             except Exception:
                 pass
 
-        if "best_ask" in event:
+        # price_change events carry a top-level "price" field.
+        # Use it as the ask if we haven't received a book snapshot yet.
+        if "price" in event and ps.ask == 1.0:
             try:
-                ps.ask_up   = float(event["best_ask"])
-            except Exception:
-                pass
-
-        # Simpler: use last_trade_price as proxy when ask not available
-        if "price" in event:
-            try:
-                price = float(event["price"])
-                if ps.ask_up == 1.0:
-                    ps.ask_up = price
+                ps.ask = float(event["price"])
             except Exception:
                 pass
 
@@ -387,8 +388,8 @@ class Scanner:
         if not ps_up or not ps_down:
             return
 
-        ask_up   = ps_up.ask_up
-        ask_down = ps_down.ask_down
+        ask_up   = ps_up.ask
+        ask_down = ps_down.ask
 
         # Skip stale prices
         if time.time() - ps_up.last_update > 30 or time.time() - ps_down.last_update > 30:
