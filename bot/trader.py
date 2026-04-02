@@ -5,6 +5,7 @@ Handles both live trading and simulation mode.
 import asyncio
 import json
 import logging
+import math
 import random
 import time
 import uuid
@@ -20,6 +21,28 @@ from config import (
 from scanner import BracketOpportunity
 
 log = logging.getLogger("trader")
+
+
+def _clob_valid_shares(target: float, price: float) -> float:
+    """Return the largest share count ≤ target such that the CLOB maker-amount
+    constraint is satisfied: floor(shares×100)/100 × price must have ≤ 2
+    decimal places (i.e. be a whole number of cents).
+
+    py_clob_client floors shares to 2 dp internally (raw_taker_amt), then
+    multiplies by price to get the USDC maker amount.  The Polymarket API
+    rejects orders where that product has more than 2 decimal places.
+
+    The required share granularity depends on the price fraction.  Treating
+    price as a 0.001-tick value (covers 0.01 and 0.1 tick too), the valid
+    step is 1000 / gcd(round(price×1000), 1000) share-hundredths.
+    """
+    p_int = round(price * 1000)
+    step  = 1000 // math.gcd(p_int, 1000)   # divisor for s = floor(shares×100)
+    max_s = math.floor(target * 100)
+    valid_s = (max_s // step) * step
+    if valid_s <= 0:
+        valid_s = step   # ensure at least one step
+    return valid_s / 100.0
 
 
 class OrderStatus(Enum):
@@ -183,17 +206,15 @@ class Trader:
         # total_budget = 2*size; n_shares = total_budget / combined
         combined = opp.ask_up + opp.ask_down
         total_budget = size * 2
-        n_shares = round(total_budget / combined, 4)
+        n_shares = total_budget / combined
 
-        # CLOB requires maker amount (price × shares, i.e. USDC cost) to have
-        # ≤ 2 decimal places, and taker amount (shares) ≤ 4 decimal places.
-        # Round USDC cost to 2dp then back-derive shares for each leg so the
-        # product is exact.  The two legs get slightly different share counts
-        # but the difference is sub-cent and equal-payout holds approximately.
-        size_up   = round(n_shares * opp.ask_up,   2)
-        size_down = round(n_shares * opp.ask_down, 2)
-        shares_up   = round(size_up   / opp.ask_up,   4)
-        shares_down = round(size_down / opp.ask_down, 4)
+        # CLOB constraint: floor(shares×100)/100 × price must have ≤ 2dp
+        # (the Polymarket API rejects maker amounts with > 2 decimal places).
+        # _clob_valid_shares() finds the largest valid share count ≤ n_shares.
+        shares_up   = _clob_valid_shares(n_shares, opp.ask_up)
+        shares_down = _clob_valid_shares(n_shares, opp.ask_down)
+        size_up   = round(shares_up   * opp.ask_up,   2)
+        size_down = round(shares_down * opp.ask_down, 2)
 
         bracket = Bracket(
             id=str(uuid.uuid4())[:8],
