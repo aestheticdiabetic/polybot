@@ -351,6 +351,24 @@ class Trader:
         total_budget = size * 2
         n_shares = total_budget / combined
 
+        # Depth-proportional sizing: if visible depth on either leg is less than
+        # 50% of the target, cap shares to that depth.  WS depth is single-level
+        # (best ask only), so we only apply this guard when the book looks genuinely
+        # thin — not just because depth is spread across levels above best ask.
+        # This prevents FOK attempts on markets where the book is clearly empty.
+        if opp.depth_up > 0 and opp.depth_up < n_shares * 0.5:
+            n_shares = min(n_shares, opp.depth_up)
+        if opp.depth_down > 0 and opp.depth_down < n_shares * 0.5:
+            n_shares = min(n_shares, opp.depth_down)
+        # Skip if the position is now too small to be worth the transaction cost.
+        # risk.open() hasn't been called yet so no cleanup needed — just return.
+        if n_shares * combined / 2 < STRATEGY.min_position_size_usdc:
+            log.debug(
+                f"SIZE SKIP after depth cap: effective=${n_shares * combined / 2:.2f} "
+                f"< min=${STRATEGY.min_position_size_usdc}"
+            )
+            return
+
         # CLOB constraint: floor(shares×100)/100 × price must have ≤ 2dp
         # (the Polymarket API rejects maker amounts with > 2 decimal places).
         # _clob_valid_shares() finds the largest valid share count ≤ n_shares.
@@ -506,18 +524,22 @@ class Trader:
                     ),
                 )
 
-            # Submit both in a single HTTP request
+            # Submit both in a single HTTP request.
+            # DOWN goes in slot 0: if the CLOB processes batch entries sequentially,
+            # DOWN lands first and competes before other bots' DOWN orders.
+            # UP books are deeper (underdog side has more sellers) so UP can afford
+            # the fractional delay of being in slot 1.
             results = await loop.run_in_executor(
                 None, self._client.post_orders,
                 [
-                    PostOrdersArgs(order=signed_up, orderType=order_type),
                     PostOrdersArgs(order=signed_dn, orderType=order_type),
+                    PostOrdersArgs(order=signed_up, orderType=order_type),
                 ],
             )
 
-            # Parse response — index 0 = UP, index 1 = DOWN
-            resp_up = results[0] if results and len(results) > 0 else {}
-            resp_dn = results[1] if results and len(results) > 1 else {}
+            # Parse response — index 0 = DOWN, index 1 = UP (batch order above)
+            resp_dn = results[0] if results and len(results) > 0 else {}
+            resp_up = results[1] if results and len(results) > 1 else {}
 
             log.debug(f"[{b.id}] raw batch response: {results!r}")
 

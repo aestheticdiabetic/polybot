@@ -71,6 +71,13 @@ class StrategyConfig:
     # plus a safety margin so we don't compound losses on a broken book.
     partial_fill_cooldown_s: int = 90
 
+    # Extra ticks of limit headroom given to the DOWN leg beyond the equal-split.
+    # DOWN books are structurally thinner than UP (consensus side has fewer sellers),
+    # so the FOK needs more room to sweep through additional price levels.
+    # Each tick = $0.01/share.  At 2 extra ticks the worst-case combined limit
+    # rises by 0.02 above bracket_threshold — still below 1.0, still profitable.
+    down_extra_ticks: int = 2
+
 STRATEGY = StrategyConfig()
 
 # ─── Simulation parameters ────────────────────────────────────────

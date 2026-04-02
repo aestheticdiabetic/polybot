@@ -553,12 +553,15 @@ class Scanner:
         depth_up   = ps_up.ask_size
         depth_down = ps_down.ask_size
 
-        # FOK limit prices: split the available profit margin evenly between legs.
-        # This lets the FOK sweep through price levels above best ask up to the limit.
-        # Worst case (both fill at limit): combined = bracket_threshold → still profitable.
+        # FOK limit prices: give UP exactly 1 tick of headroom; give DOWN all remaining
+        # margin plus extra ticks.  DOWN books are structurally thinner (consensus side,
+        # fewer sellers), so DOWN needs more room to sweep through additional price levels.
+        # Worst case: limit_up + limit_down = bracket_threshold + down_extra_ticks * 0.01
+        # which is still < 1.0 and therefore still profitable net of fees.
+        tick       = 0.01
         margin     = STRATEGY.bracket_threshold - combined
-        limit_up   = round(ask_up   + margin / 2, 2)
-        limit_down = round(ask_down + margin / 2, 2)
+        limit_up   = round(ask_up + tick, 2)
+        limit_down = round(ask_down + max(margin - tick, 0.0) + STRATEGY.down_extra_ticks * tick, 2)
 
         # Only skip if we have book data AND best-ask depth is well below our need.
         # With limit-price sweeping the actual fillable depth extends above best ask,
