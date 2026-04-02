@@ -190,7 +190,7 @@ class StateManager:
                 "total_fees_usdc": round(self._metrics.total_fees_usdc, 4),
                 "total_gas_usdc": round(self._metrics.total_gas_usdc, 4),
                 "avg_spread": round(sum(self._spreads[-100:]) / max(len(self._spreads[-100:]), 1) * 100, 3),
-                "avg_latency_ms": round(sum(self._latencies[-100:]) / max(len(self._latencies[-100:]), 1), 1),
+                "avg_latency_ms": round(sum(self._latencies[-100:]) / len(self._latencies[-100:]), 1) if self._latencies else None,
                 "brackets_last_1h": len(recent),
                 "net_last_1h": round(net_1h, 4),
             },

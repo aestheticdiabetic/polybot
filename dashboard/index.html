@@ -293,12 +293,12 @@ function updateMetrics(d) {
   document.getElementById('m-total').textContent = m.total_brackets;
   document.getElementById('m-open').textContent = m.open_brackets + ' open';
   document.getElementById('m-spread').textContent = m.avg_spread.toFixed(3) + '%';
-  document.getElementById('m-latency').textContent = m.avg_latency_ms.toFixed(0) + 'ms';
+  document.getElementById('m-latency').textContent = m.avg_latency_ms != null ? m.avg_latency_ms.toFixed(0) + 'ms' : '--';
   document.getElementById('m-fees').textContent = '-$' + m.total_fees_usdc.toFixed(4);
   document.getElementById('m-gas').textContent = 'gas: $' + m.total_gas_usdc.toFixed(4);
 
   if (d.scanner) {
-    document.getElementById('m-markets').textContent = d.scanner.markets_tracked || 0;
+    document.getElementById('m-markets').textContent = d.running ? (d.scanner.markets_tracked || 0) : '--';
     document.getElementById('m-reconnects').textContent = 'WS reconnects: ' + (d.scanner.ws_reconnects || 0);
   }
 

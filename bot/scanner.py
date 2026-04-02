@@ -90,22 +90,24 @@ class Scanner:
     async def _fetch_active_markets(self) -> List[MarketInfo]:
         """Fetch all active Up/Down markets from Gamma API."""
         markets = []
-        url = f"https://gamma-api.polymarket.com/markets"
-        params = {
-            "active": "true",
-            "closed": "false",
-            "tag_slug": "up-or-down",
-            "limit": 500,
-        }
+        url = "https://gamma-api.polymarket.com/markets"
+        # Try tag-filtered fetch first; fall back to unfiltered if it returns nothing
+        param_sets = [
+            {"active": "true", "closed": "false", "tag_slug": "up-or-down", "limit": 500},
+            {"active": "true", "closed": "false", "limit": 500},
+        ]
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                    data = await r.json()
-
-            for m in data:
-                info = self._parse_market(m)
-                if info:
-                    markets.append(info)
+                for params in param_sets:
+                    async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                        data = await r.json()
+                    for m in data:
+                        info = self._parse_market(m)
+                        if info:
+                            markets.append(info)
+                    if markets:
+                        break
+                    log.warning(f"tag_slug=up-or-down returned 0 matching markets, retrying without tag filter")
         except Exception as e:
             log.error(f"Market fetch failed: {e}")
         return markets
