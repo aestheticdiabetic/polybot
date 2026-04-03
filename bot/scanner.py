@@ -60,6 +60,7 @@ class BracketOpportunity:
     limit_up: float = 0.0
     limit_down: float = 0.0
     sim_mode: bool = False
+    metadata_age_ms: float = 0.0  # age of market metadata used in detection (cache vs. fresh)
 
 
 class Scanner:
@@ -78,6 +79,10 @@ class Scanner:
         self._running = False
         self._ws = None
         self._last_ws_msg_at: float = 0.0
+        self._metadata_cache: Optional[List[MarketInfo]] = None  # cache for market metadata
+        self._metadata_cache_time: float = 0.0  # timestamp of last fresh fetch
+        self._metadata_cache_ttl: float = 300.0  # cache valid for 5 minutes
+        self._last_http_fetch_at: float = 0.0  # timestamp of last HTTP call
         self.stats = {
             "markets_tracked": 0,
             "markets_active": 0,   # subset with live WS price data on both sides
@@ -86,6 +91,8 @@ class Scanner:
             "brackets_throttled": 0,
             "near_brackets_detected": 0,
             "ws_reconnects": 0,
+            "metadata_fetches_http": 0,
+            "metadata_fetches_cache": 0,
         }
 
     # ── Public API ────────────────────────────────────────────────
@@ -93,8 +100,9 @@ class Scanner:
     async def start(self):
         self._running = True
         await asyncio.gather(
-            self._market_refresh_loop(),
-            self._ws_loop(),
+            self._market_discovery_loop(),  # HTTP polling in background (Option 2)
+            self._ws_loop(),                 # WS price updates (real-time, high priority)
+            self._market_refresh_loop(),     # Market maintenance (add/remove from local cache)
         )
 
     async def stop(self):
@@ -153,8 +161,8 @@ class Scanner:
         "COSMOS": "ATOM",
     }
 
-    async def _fetch_active_markets(self) -> List[MarketInfo]:
-        """Fetch all active Up/Down markets from the Gamma events API."""
+    async def _fetch_active_markets_http(self) -> List[MarketInfo]:
+        """Fetch all active Up/Down markets from the Gamma events API via HTTP."""
         markets: List[MarketInfo] = []
         seen: set = set()
         url = "https://gamma-api.polymarket.com/events"
@@ -180,9 +188,37 @@ class Scanner:
                         markets.append(info)
         except Exception as e:
             log.error(f"Market fetch failed: {e}")
+            # Return cached data if HTTP fails
+            if self._metadata_cache is not None:
+                log.warning(f"Using cached market metadata ({len(self._metadata_cache)} markets)")
+                return self._metadata_cache
 
-        log.info(f"Market fetch complete: {len(markets)} up/down markets found")
+        now = time.time()
+        log.info(
+            f"Market fetch complete: {len(markets)} up/down markets found "
+            f"(fresh HTTP fetch)"
+        )
+        self._metadata_cache = markets
+        self._metadata_cache_time = now
+        self._last_http_fetch_at = now
+        self.stats["metadata_fetches_http"] += 1
         return markets
+
+    async def _fetch_active_markets(self) -> List[MarketInfo]:
+        """Fetch markets with TTL-based caching.
+
+        Returns cached metadata if available and fresh (< 5 minutes old).
+        Otherwise makes a fresh HTTP call and caches the result.
+        """
+        now = time.time()
+        # Use cache if it's fresh
+        if (self._metadata_cache is not None
+            and (now - self._metadata_cache_time) < self._metadata_cache_ttl):
+            self.stats["metadata_fetches_cache"] += 1
+            return self._metadata_cache
+
+        # Fetch fresh metadata from HTTP
+        return await self._fetch_active_markets_http()
 
     def _parse_event_market(self, event: dict, market: dict) -> Optional[MarketInfo]:
         """Parse a market nested inside a Gamma API event.
@@ -295,8 +331,29 @@ class Scanner:
             log.debug(f"Market parse error: {e}")
             return None
 
+    async def _market_discovery_loop(self):
+        """Background HTTP polling for market discovery (Option 2).
+
+        Runs independently from WS processing, so HTTP latency doesn't block
+        real-time price updates. Fetches every 60s (or uses cache if fresh).
+        Updates are processed by _market_refresh_loop, not here.
+        """
+        while self._running:
+            try:
+                # Fetch metadata (hits cache if fresh, makes HTTP call every 5 minutes)
+                await self._fetch_active_markets()
+            except Exception as e:
+                log.warning(f"Background market discovery error: {e}")
+
+            # Poll every 60s for market discovery (cache reduces actual HTTP to ~5 min)
+            await asyncio.sleep(60)
+
     async def _market_refresh_loop(self):
-        """Refresh market list every 60s, add new markets, prune expired ones."""
+        """Refresh market list every 10s, add new markets, prune expired ones.
+
+        With TTL-based caching, HTTP calls only happen every 5 minutes.
+        Cache hits (every 10s when < 5min old) are near-instant.
+        """
         while self._running:
             markets = await self._fetch_active_markets()
             now = time.time()
@@ -376,7 +433,9 @@ class Scanner:
                         pass
                 self._last_ws_msg_at = time.time()  # reset to avoid tight reconnect loops
 
-            await asyncio.sleep(60)
+            # Reduced polling interval: 10s for market list checks, caching reduces HTTP load
+            # With TTL cache (5 min), only ~1 HTTP call per 5 minutes instead of per 60s
+            await asyncio.sleep(10)
 
     # ── WebSocket ─────────────────────────────────────────────────
 
@@ -522,6 +581,7 @@ class Scanner:
             if time.time() - last_near > 5.0:
                 self._recent_near_brackets[m.condition_id] = time.time()
                 self.stats["near_brackets_detected"] += 1
+                metadata_age_ms = (time.time() - self._metadata_cache_time) * 1000
                 near_opp = BracketOpportunity(
                     market=m,
                     ask_up=ask_up,
@@ -538,6 +598,11 @@ class Scanner:
                     limit_up=0.0,
                     limit_down=0.0,
                     sim_mode=SIM.enabled,
+                    metadata_age_ms=metadata_age_ms,
+                )
+                log.debug(
+                    f"NEAR_BRACKET {m.asset} {m.window} | "
+                    f"combined={combined:.3f} | metadata_age={metadata_age_ms:.0f}ms"
                 )
                 self.on_near_bracket(near_opp)
 
@@ -595,6 +660,7 @@ class Scanner:
         gross = n_shares - total_spend
         fee   = total_spend * STRATEGY.taker_fee_pct
         net   = gross - fee
+        metadata_age_ms = (time.time() - self._metadata_cache_time) * 1000
 
         opp = BracketOpportunity(
             market=m,
@@ -612,12 +678,14 @@ class Scanner:
             limit_up=limit_up,
             limit_down=limit_down,
             sim_mode=SIM.enabled,
+            metadata_age_ms=metadata_age_ms,
         )
 
         log.info(
             f"BRACKET {m.asset} {m.window} | "
             f"Up={ask_up:.3f}({depth_up:.1f}) lim={limit_up:.3f} "
             f"Down={ask_down:.3f}({depth_down:.1f}) lim={limit_down:.3f} "
-            f"Sum={combined:.3f} Need={n_shares:.2f}sh Net=+${net:.3f}"
+            f"Sum={combined:.3f} Need={n_shares:.2f}sh Net=+${net:.3f} "
+            f"metadata_age={metadata_age_ms:.0f}ms"
         )
         self.on_bracket(opp)
