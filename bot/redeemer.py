@@ -148,6 +148,8 @@ class Redeemer:
                 self.stats["usdc_redeemed"] += amount
                 self.state.record_redemption(condition_id, amount)
                 log.info(f"Redeemed {condition_id} → ${amount:.4f} USDC")
+                # Wait before processing next redemption to avoid nonce collisions
+                await asyncio.sleep(2)
             else:
                 self.stats["redemptions_failed"] += 1
                 self._redeemed.discard(condition_id)  # allow retry
