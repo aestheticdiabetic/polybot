@@ -56,8 +56,11 @@ class StrategyConfig:
     pause_if_bracket_hz: float = 10.0        # min gap between brackets on same market = 60/hz seconds
 
     # Fees (Polymarket taker fee)
-    taker_fee_pct: float = 0.01   # 1%
+    taker_fee_pct: float = 0.01   # 1% — verify via get_fee_rate_bps; some markets use 2%
     polygon_gas_gwei: float = 30  # estimated gas for redemption tx
+    # Estimated gas cost per on-chain redemption (MATIC → USDC conversion).
+    # Polygon at 30 gwei, ~150k gas, MATIC ~$0.50: ≈ $0.002.  Used in live net estimate.
+    gas_fee_live_usdc: float = 0.002
 
     # Order type for live entry orders
     order_type: str = "FOK"   # Fill-Or-Kill: fills immediately or auto-cancels

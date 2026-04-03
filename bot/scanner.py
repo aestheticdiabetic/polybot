@@ -621,12 +621,19 @@ class Scanner:
         # FOK limit prices: give UP exactly 1 tick of headroom; give DOWN all remaining
         # margin plus extra ticks.  DOWN books are structurally thinner (consensus side,
         # fewer sellers), so DOWN needs more room to sweep through additional price levels.
-        # Worst case: limit_up + limit_down = bracket_threshold + down_extra_ticks * 0.01
-        # which is still < 1.0 and therefore still profitable net of fees.
+        # CRITICAL: limit_up + limit_down MUST remain below 1.0 - fee, otherwise a fill
+        # at both limit prices produces a guaranteed loss (you pay > $1/share to receive
+        # $1/share at resolution).  Cap limit_down so this invariant always holds.
         tick       = 0.01
         margin     = STRATEGY.bracket_threshold - combined
         limit_up   = round(ask_up + tick, 2)
         limit_down = round(ask_down + max(margin - tick, 0.0) + STRATEGY.down_extra_ticks * tick, 2)
+        # Profitability cap: worst-case (both legs fill at limit) must still be profitable.
+        # Reserve 1 tick above fees as a buffer so we never cross into loss territory.
+        max_limit_sum = round(1.0 - STRATEGY.taker_fee_pct - tick, 2)
+        if limit_up + limit_down > max_limit_sum:
+            limit_down = round(max_limit_sum - limit_up, 2)
+            limit_down = max(limit_down, ask_down)  # never below current ask
 
         # Only skip if we have book data AND best-ask depth is well below our need.
         # With limit-price sweeping the actual fillable depth extends above best ask,
@@ -659,7 +666,8 @@ class Scanner:
 
         gross = n_shares - total_spend
         fee   = total_spend * STRATEGY.taker_fee_pct
-        net   = gross - fee
+        gas   = STRATEGY.gas_fee_live_usdc
+        net   = gross - fee - gas
         metadata_age_ms = (time.time() - self._metadata_cache_time) * 1000
 
         opp = BracketOpportunity(

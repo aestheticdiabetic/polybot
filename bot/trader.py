@@ -266,6 +266,12 @@ class Trader:
         margin   = STRATEGY.bracket_threshold - combined   # may be ≤ 0 at near-threshold
         limit_up   = round(opp.ask_up   + tick, 2)
         limit_down = round(opp.ask_down + max(margin - tick, 0.0) + STRATEGY.down_extra_ticks * tick, 2)
+        # Profitability cap: must match scanner's invariant — limit_up + limit_down must
+        # stay below 1.0 - fee so a worst-case fill (both at limit) is still profitable.
+        max_limit_sum = round(1.0 - STRATEGY.taker_fee_pct - tick, 2)
+        if limit_up + limit_down > max_limit_sum:
+            limit_down = round(max_limit_sum - limit_up, 2)
+            limit_down = max(limit_down, opp.ask_down)
 
         n_shares   = (STRATEGY.position_size_usdc * 2) / combined
         shares_up  = _clob_valid_shares(n_shares, limit_up)
@@ -1047,13 +1053,22 @@ class Trader:
 
     async def _live_resolve(self, b: Bracket):
         """Both legs confirmed filled — hand off to redeemer for on-chain resolution."""
-        total_cost = b.leg_up.size_usdc + b.leg_down.size_usdc
-        # Gross profit: winning leg pays out shares × $1.  With nearly-equal sizing
-        # the two share counts differ by <0.001 shares; use the average as an estimate.
-        avg_shares = (b.leg_up.shares + b.leg_down.shares) / 2
+        # Use actual submitted shares (set in _live_place after limit-price revalidation
+        # and presign selection).  These may differ from b.leg_*.shares, which were
+        # computed at detection-time ask prices — presigned orders use limit-price
+        # quantization and can produce different valid share counts.
+        shares_up = b.submitted_shares_up or b.leg_up.shares
+        shares_dn = b.submitted_shares_down or b.leg_down.shares
+        price_up  = b.leg_up.fill_price  or b.leg_up.price
+        price_dn  = b.leg_down.fill_price or b.leg_down.price
+        total_cost = round(shares_up * price_up + shares_dn * price_dn, 4)
+        # Gross profit: winning leg pays out shares × $1 (whichever side wins).
+        # Use the average as a point estimate since we don't know which side wins yet.
+        avg_shares = (shares_up + shares_dn) / 2
         gross = avg_shares - total_cost
         fee   = total_cost * STRATEGY.taker_fee_pct
-        net   = gross - fee
+        gas   = STRATEGY.gas_fee_live_usdc
+        net   = gross - fee - gas
         b.actual_net_usdc = net
         b.status = "filled"   # redeemer will close it as won/lost after on-chain settlement
         self.risk.close(b.market_condition_id, total_cost)
