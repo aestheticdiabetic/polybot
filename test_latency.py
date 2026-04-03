@@ -20,7 +20,7 @@ async def test_metadata_cache():
     assert hasattr(scanner, '_metadata_cache')
     assert hasattr(scanner, '_metadata_cache_time')
     assert hasattr(scanner, '_metadata_cache_ttl')
-    assert scanner._metadata_cache_ttl == 300.0, "TTL should be 300s (5 min)"
+    assert scanner._metadata_cache_ttl == 30.0, "TTL should be 30s (was 300s, too long)"
     print("✓ Cache fields initialized correctly")
 
     # Verify stats

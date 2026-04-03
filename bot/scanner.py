@@ -81,7 +81,7 @@ class Scanner:
         self._last_ws_msg_at: float = 0.0
         self._metadata_cache: Optional[List[MarketInfo]] = None  # cache for market metadata
         self._metadata_cache_time: float = 0.0  # timestamp of last fresh fetch
-        self._metadata_cache_ttl: float = 300.0  # cache valid for 5 minutes
+        self._metadata_cache_ttl: float = 30.0  # cache valid for 30 seconds (was 300s — too long)
         self._last_http_fetch_at: float = 0.0  # timestamp of last HTTP call
         self.stats = {
             "markets_tracked": 0,
@@ -207,7 +207,7 @@ class Scanner:
     async def _fetch_active_markets(self) -> List[MarketInfo]:
         """Fetch markets with TTL-based caching.
 
-        Returns cached metadata if available and fresh (< 5 minutes old).
+        Returns cached metadata if available and fresh (< 30 seconds old).
         Otherwise makes a fresh HTTP call and caches the result.
         """
         now = time.time()
@@ -335,24 +335,24 @@ class Scanner:
         """Background HTTP polling for market discovery (Option 2).
 
         Runs independently from WS processing, so HTTP latency doesn't block
-        real-time price updates. Fetches every 60s (or uses cache if fresh).
+        real-time price updates. Fetches every 60s (cache expires every 30s).
         Updates are processed by _market_refresh_loop, not here.
         """
         while self._running:
             try:
-                # Fetch metadata (hits cache if fresh, makes HTTP call every 5 minutes)
+                # Fetch metadata (hits cache if fresh ~30s, makes HTTP call when stale)
                 await self._fetch_active_markets()
             except Exception as e:
                 log.warning(f"Background market discovery error: {e}")
 
-            # Poll every 60s for market discovery (cache reduces actual HTTP to ~5 min)
+            # Poll every 60s, but cache expires every 30s → HTTP calls ~every 30-60s
             await asyncio.sleep(60)
 
     async def _market_refresh_loop(self):
         """Refresh market list every 10s, add new markets, prune expired ones.
 
-        With TTL-based caching, HTTP calls only happen every 5 minutes.
-        Cache hits (every 10s when < 5min old) are near-instant.
+        With TTL-based caching (30s), HTTP calls happen roughly every 30-60s.
+        Cache hits (every 10s when < 30s old) are near-instant.
         """
         while self._running:
             markets = await self._fetch_active_markets()

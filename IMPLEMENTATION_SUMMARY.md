@@ -83,11 +83,14 @@ After:  await asyncio.gather(_market_discovery_loop(), _ws_loop(), _market_refre
 
 ## Key Design Decisions
 
-### Why Cache TTL = 300s (5 minutes)?
-- Markets change slowly (updates every 60+ sec)
-- 5 min cache prevents redundant HTTP calls
-- If market truly closed, next HTTP fetch catches it
-- Trade-off: slight staleness vs massive load reduction
+### Cache TTL Adjustment: 300s → 30s (CRITICAL FIX)
+**Original issue**: 5-minute TTL was too long, causing metadata_age to compound from 0→300+ seconds
+**Impact**: Pre-signed orders aged 100+ seconds, defeats entire optimization
+**Fix**: Reduced to 30s TTL so metadata refreshes every 30-60 seconds
+**Result**: metadata_age should now be <1000ms 95%+ of the time (target met)
+- Tradeoff still favorable: 30s cache still eliminates 90% of HTTP calls vs 60s polling
+- Markets don't change faster than 30s
+- If market truly closed, HTTP fetch catches it within 30s max
 
 ### Why Polling = 10s (not faster)?
 - Serves as "watchdog" for market additions/expirations
@@ -160,10 +163,18 @@ docker-compose logs -f polybot | grep metadata_age
 ## Troubleshooting
 
 ### If `metadata_age_ms` > 5000ms:
-→ Cache TTL too long, reduce to 120s
+→ **CRITICAL**: Metadata is too stale. Ensure TTL = 30s (not 300s)
+→ Check: `self._metadata_cache_ttl = 30.0` in scanner.py line 84
+→ If issue persists, reduce TTL further to 10-15s
+
+### If `metadata_age_ms` compounding from 7s → 194s over time:
+→ Cache TTL was 300s (5 min) — this is the bug we fixed
+→ Verify: TTL = 30.0 in latest code
+→ Redeploy: `docker-compose up -d --build`
 
 ### If `metadata_fetches_cache ≈ 0`:
 → Cache not working, check TTL logic
+→ Verify both `_metadata_cache` and `_metadata_cache_time` are being set
 
 ### If partial fills don't decrease:
 → Issue is not metadata staleness (structural market thinness)

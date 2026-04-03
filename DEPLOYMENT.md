@@ -146,15 +146,17 @@ docker-compose logs -f polybot | grep -c "Emergency exit"
 
 ### Issue: More `Pre-signed stale/invalid` messages?
 
-**Cause:** Cache hit for old market state, prices moved significantly
+**Cause:** Cache is too stale (TTL was 300s, now fixed to 30s)
 
 **Solution:** 
-1. Check `metadata_age_ms` in logs — if > 5000ms, cache TTL too long
-2. Reduce cache TTL from 300s to 120s:
+1. Verify cache TTL is 30 seconds: `self._metadata_cache_ttl = 30.0` (line 84 in scanner.py)
+2. If still seeing metadata_age > 5000ms, reduce further to 15-20s:
    ```python
-   self._metadata_cache_ttl = 120.0  # Line 79 in scanner.py
+   self._metadata_cache_ttl = 15.0  # Line 84 in scanner.py
    ```
 3. Rebuild: `docker-compose up -d --build`
+
+**Note**: The original 300s TTL was too aggressive — metadata aged 300+ seconds before refresh, defeating the optimization. 30s is the correct value.
 
 ### Issue: `markets_tracked` decreased?
 
