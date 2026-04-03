@@ -13,6 +13,10 @@ from state import StateManager
 from scanner import Scanner
 from trader import Trader
 from redeemer import Redeemer
+from config_override import load_overrides
+
+# Load persisted config overrides from dashboard before logging
+load_overrides()
 
 # ── Logging setup ────────────────────────────────────────────────
 

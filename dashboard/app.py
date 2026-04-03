@@ -151,6 +151,13 @@ async def create_app(state):
             if k in safe_keys:
                 setattr(STRATEGY, k, type(getattr(STRATEGY, k))(v))
                 updated[k] = v
+
+        # Persist overrides to .env file so they survive restarts
+        if updated:
+            from config_override import save_overrides
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, lambda: save_overrides(updated))
+
         log.info(f"Config updated: {updated}")
         return web.json_response({"ok": True, "updated": updated})
 
