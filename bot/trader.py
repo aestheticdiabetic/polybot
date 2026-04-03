@@ -300,7 +300,8 @@ class Trader:
             }
             log.info(
                 f"[PRESIGN] {opp.market.asset} {opp.market.window} ready | "
-                f"lim_up={limit_up:.3f} lim_dn={limit_down:.3f} sh={shares_up}/{shares_dn}"
+                f"lim_up={limit_up:.3f} lim_dn={limit_down:.3f} sh={shares_up}/{shares_dn} | "
+                f"metadata_age={opp.metadata_age_ms:.0f}ms"
             )
         except Exception as e:
             log.debug(f"[PRESIGN] {opp.market.asset} {opp.market.window} error: {e}")
