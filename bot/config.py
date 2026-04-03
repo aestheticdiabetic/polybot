@@ -74,9 +74,10 @@ class StrategyConfig:
     # Extra ticks of limit headroom given to the DOWN leg beyond the equal-split.
     # DOWN books are structurally thinner than UP (consensus side has fewer sellers),
     # so the FOK needs more room to sweep through additional price levels.
-    # Each tick = $0.01/share.  At 2 extra ticks the worst-case combined limit
-    # rises by 0.02 above bracket_threshold — still below 1.0, still profitable.
-    down_extra_ticks: int = 2
+    # Each tick = $0.01/share. Presigned orders age 10-15s by bracket time, so we need
+    # extra margin to handle price drift. At 5 ticks: worst-case combined = threshold + 0.05,
+    # still < 1.0 and profitable. Tradeoff: slightly wider limits > presigned order failures.
+    down_extra_ticks: int = 5
 
 STRATEGY = StrategyConfig()
 

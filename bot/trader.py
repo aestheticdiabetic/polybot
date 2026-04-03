@@ -237,8 +237,8 @@ class Trader:
         """Warm cache + pre-sign both legs for a near-threshold opportunity.
 
         Pre-signed orders are stored in _presigned[condition_id] and consumed by
-        _live_place when the real threshold is crossed.  They expire after 15s to
-        avoid submitting stale orders if the opportunity dissolves and re-appears.
+        _live_place when the real threshold is crossed.  They expire after 8s because
+        prices move significantly beyond that window, making precomputed limits invalid.
 
         Limit prices are set 1 tick above the near-threshold ask so the signed
         orders remain valid even if prices drift slightly upward before the actual
@@ -506,8 +506,10 @@ class Trader:
             # contention — the critical path becomes a single POST call.
             presigned = self._presigned.pop(b.market_condition_id, None)
             used_presigned = False
+            # Presigned orders expire after 8 seconds. Beyond that, prices have moved
+            # too much and the precomputed limits are invalid. Force fresh signing.
             if (presigned is not None
-                    and time.time() - presigned["ts"] < 55.0
+                    and time.time() - presigned["ts"] < 8.0
                     and b.leg_up.price   <= presigned["limit_up"]
                     and b.leg_down.price <= presigned["limit_down"]):
                 signed_up   = presigned["signed_up"]
