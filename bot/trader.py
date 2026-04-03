@@ -110,6 +110,8 @@ class Bracket:
     limit_down: float = 0.0 # FOK limit price for DOWN leg
     submitted_shares_up: float = 0.0     # actual shares submitted in order (after revalidation)
     submitted_shares_down: float = 0.0   # actual shares submitted in order (after revalidation)
+    depth_up: float = 0.0   # WS-observed depth at detection time (single best-ask level)
+    depth_down: float = 0.0 # WS-observed depth at detection time (single best-ask level)
 
 
 class RiskGuard:
@@ -255,14 +257,16 @@ class Trader:
         # Warm cache first (no-op if already warm within TTL)
         await self._warm_token_cache(opp.market.token_id_up, opp.market.token_id_down)
 
-        # Limits: 1 tick above near-threshold ask gives headroom for asymmetric moves.
-        # FOK executes at market price (≤ limit), so profitability is determined by
-        # the actual ask at submission time, not these limits.
-        tick = 0.01
+        # Limits: match the scanner's limit calculation so presigned orders have the
+        # same sweep room as freshly-signed ones.  Previously presigned DOWN was only
+        # +0.01 while the scanner computes +0.05 (down_extra_ticks=5) — that caused
+        # presigned FOK failures on thin books that fresh signing would have swept.
+        tick     = 0.01
+        combined = opp.ask_up + opp.ask_down
+        margin   = STRATEGY.bracket_threshold - combined   # may be ≤ 0 at near-threshold
         limit_up   = round(opp.ask_up   + tick, 2)
-        limit_down = round(opp.ask_down + tick, 2)
+        limit_down = round(opp.ask_down + max(margin - tick, 0.0) + STRATEGY.down_extra_ticks * tick, 2)
 
-        combined   = opp.ask_up + opp.ask_down
         n_shares   = (STRATEGY.position_size_usdc * 2) / combined
         shares_up  = _clob_valid_shares(n_shares, limit_up)
         shares_dn  = _clob_valid_shares(n_shares, limit_down)
@@ -435,6 +439,8 @@ class Trader:
         )
 
         bracket.age_ms = age_ms
+        bracket.depth_up   = opp.depth_up
+        bracket.depth_down = opp.depth_down
         self.risk.open(opp.market.condition_id, total_budget)
         self._open_brackets[bracket.id] = bracket
 
@@ -567,20 +573,6 @@ class Trader:
             b.submitted_shares_up = shares_up
             b.submitted_shares_down = shares_down
 
-            # Sequential DOWN-first execution (Option 2.1): eliminates most partial fills
-            # by guaranteeing DOWN fills before risking UP capital. If DOWN doesn't fill,
-            # we have zero exposure. If DOWN fills, UP books are deep (underdog side has
-            # many sellers) so UP fill is nearly guaranteed, even if price drifts 1-2 ticks
-            # in the 100-150ms gap between submissions.
-
-            # Post DOWN order alone
-            resp_dn = await loop.run_in_executor(
-                None, self._client.post_order,
-                signed_dn, order_type, False
-            )
-
-            log.debug(f"[{b.id}] DOWN order posted: {resp_dn!r}")
-
             def _parse(resp):
                 if not isinstance(resp, dict):
                     return "", "", "", ""
@@ -591,31 +583,66 @@ class Trader:
                     (resp.get("message") or resp.get("errorMsg") or ""),
                 )
 
+            # ── DOWN first (separated try/except so UP exceptions are handled correctly) ──
+
+            try:
+                resp_dn = await loop.run_in_executor(
+                    None, self._client.post_order,
+                    signed_dn, order_type, False
+                )
+            except Exception as e:
+                # DOWN itself threw (400 FOK reject) — no exposure, clean abort.
+                log.info(
+                    f"[{b.id}] DOWN FOK exception (no fill) — "
+                    f"ask={b.leg_down.price:.3f} lim={limit_down:.3f} sh={shares_down:.2f} "
+                    f"depth={b.depth_down:.1f} | {e}"
+                )
+                b.leg_down.status = OrderStatus.CANCELLED
+                b.leg_up.status   = OrderStatus.CANCELLED
+                return await self._retry_down_reduced(b, signed_up, limit_up, limit_down, order_type, loop)
+
             dn_id, dn_status, dn_err, dn_msg = _parse(resp_dn)
             dn_filled = dn_status == "matched"
 
-            # If DOWN didn't fill, abort early (zero exposure, zero loss)
             if not dn_filled:
-                log.debug(
-                    f"[{b.id}] DOWN order did not fill — aborting before UP POST. "
-                    f"No exposure incurred. Status={dn_status!r} Err={dn_err!r}"
+                log.info(
+                    f"[{b.id}] DOWN FOK miss — "
+                    f"ask={b.leg_down.price:.3f} lim={limit_down:.3f} sh={shares_down:.2f} "
+                    f"depth={b.depth_down:.1f} status={dn_status!r} err={dn_err!r}"
                 )
-                # Mark no fill but don't trigger emergency exit (no partial exposure)
                 now = time.time()
                 b.leg_down.order_id = dn_id or None
                 b.leg_down.placed_at = now
                 b.leg_down.status = OrderStatus.CANCELLED
-                # UP was never posted, mark as cancelled too
+                b.leg_up.status   = OrderStatus.CANCELLED
+                return await self._retry_down_reduced(b, signed_up, limit_up, limit_down, order_type, loop)
+
+            # ── DOWN filled — now post UP ──────────────────────────────────────────────
+
+            try:
+                resp_up = await loop.run_in_executor(
+                    None, self._client.post_order,
+                    signed_up, order_type, False
+                )
+            except Exception as e:
+                # DOWN filled but UP threw (400 FOK reject) — partial fill, need emergency exit.
+                log.warning(
+                    f"[{b.id}] UP FOK exception after DOWN fill — partial exposure! "
+                    f"ask={b.leg_up.price:.3f} lim={limit_up:.3f} sh={shares_up:.2f} "
+                    f"depth={b.depth_up:.1f} | {e}. Initiating emergency exit."
+                )
+                now = time.time()
+                b.leg_down.order_id  = dn_id or None
+                b.leg_down.placed_at = now
+                b.leg_down.status    = OrderStatus.FILLED
+                b.leg_down.filled_at = now
+                b.leg_down.fill_price = b.leg_down.price
                 b.leg_up.status = OrderStatus.CANCELLED
+                b.status = "partial_fill"
+                self._log_trade(b, "partial_fill")
+                self.risk.mark_partial_fill(b.market_condition_id)
+                asyncio.get_running_loop().create_task(self._emergency_exit(b))
                 return False
-
-            # DOWN filled! Now post UP order immediately
-            resp_up = await loop.run_in_executor(
-                None, self._client.post_order,
-                signed_up, order_type, False
-            )
-
-            log.debug(f"[{b.id}] UP order posted (after DOWN fill): {resp_up!r}")
 
             up_id, up_status, up_err, up_msg = _parse(resp_up)
             up_filled = up_status == "matched"
@@ -659,21 +686,10 @@ class Trader:
                 )
                 b.status = "partial_fill"
                 self._log_trade(b, "partial_fill")
-                # Mark cooldown immediately so the market is blocked during the full
-                # emergency exit window (up to ~28s of retries), not just until the
-                # 10s placement timeout fires.
                 self.risk.mark_partial_fill(b.market_condition_id)
-                # Fire emergency exit as a background task so it runs outside the
-                # 10s wait_for timeout in _handle_opportunity.  _emergency_exit owns
-                # its own risk.close() + _open_brackets cleanup.
                 asyncio.get_running_loop().create_task(self._emergency_exit(b))
                 return False
 
-            # UNREACHABLE in sequential execution mode (DOWN→UP):
-            # - If DOWN doesn't fill → early return above
-            # - If DOWN fills + UP fills → handled at line 637
-            # - If DOWN fills + UP doesn't → handled by "if up_filled or dn_filled" above
-            # This branch exists only for symmetry with async/legacy code.
             log.info(
                 f"[{b.id}] Unexpected state: no fills after sequential execution | "
                 f"up: status={up_status!r} dn: status={dn_status!r} age={b.age_ms:.0f}ms"
@@ -683,6 +699,153 @@ class Trader:
         except Exception as e:
             log.error(f"[{b.id}] Order placement failed: {e}")
             return False
+
+    async def _retry_down_reduced(
+        self, b: Bracket, signed_up, limit_up: float, limit_down: float,
+        order_type, loop
+    ) -> bool:
+        """After a full-size DOWN FOK miss, attempt a reduced-size bracket.
+
+        Uses WS-observed depth (b.depth_down) as the target share count, capped
+        at the original shares and floored at min_position_size_usdc / ask_down.
+        If the smaller DOWN fills, immediately posts UP at the same share count.
+
+        This lets us capture bracketing opportunities where only part of the
+        target depth is available at submission time (race condition between
+        detection and order arrival).  Returns True only if both reduced legs fill.
+        """
+        from py_clob_client.clob_types import OrderArgs
+
+        ask_down = b.leg_down.price
+        ask_up   = b.leg_up.price
+
+        # Floor: shares worth at least min_position_size_usdc per leg
+        min_shares = STRATEGY.min_position_size_usdc / ask_down if ask_down > 0 else 2.0
+        # Target: smaller of WS depth and original shares, with a 10% safety haircut
+        # to account for depth consumed since the last WS snapshot.
+        if b.depth_down > 0:
+            target = min(b.depth_down * 0.9, b.leg_down.shares)
+        else:
+            target = b.leg_down.shares * 0.5   # no depth data — try half
+
+        if target < min_shares:
+            log.debug(
+                f"[{b.id}] DOWN reduced-size retry skipped — "
+                f"target={target:.2f} < min={min_shares:.2f}"
+            )
+            return False
+
+        retry_shares = _clob_valid_shares(target, limit_down)
+
+        log.info(
+            f"[{b.id}] DOWN reduced-size retry — "
+            f"target={target:.2f}sh (depth={b.depth_down:.1f}) → "
+            f"retry={retry_shares:.2f}sh lim={limit_down:.3f}"
+        )
+
+        try:
+            signed_dn_r = await loop.run_in_executor(
+                None, self._client.create_order,
+                OrderArgs(token_id=b.leg_down.token_id, price=limit_down,
+                          size=retry_shares, side="BUY"),
+            )
+            resp_dn_r = await loop.run_in_executor(
+                None, self._client.post_order, signed_dn_r, order_type, False
+            )
+        except Exception as e:
+            log.info(f"[{b.id}] DOWN reduced-size retry exception: {e}")
+            return False
+
+        def _parse_r(resp):
+            if not isinstance(resp, dict):
+                return "", "", ""
+            return (
+                (resp.get("orderID") or ""),
+                (resp.get("status") or "").lower(),
+                (resp.get("errorCode") or resp.get("error_code") or ""),
+            )
+
+        dn_r_id, dn_r_status, dn_r_err = _parse_r(resp_dn_r)
+        if dn_r_status != "matched":
+            log.info(
+                f"[{b.id}] DOWN reduced-size retry miss — "
+                f"retry_sh={retry_shares:.2f} lim={limit_down:.3f} status={dn_r_status!r} err={dn_r_err!r}"
+            )
+            return False
+
+        # DOWN filled with reduced size — post UP at same share count
+        up_retry_shares = _clob_valid_shares(retry_shares, limit_up)
+        try:
+            signed_up_r = await loop.run_in_executor(
+                None, self._client.create_order,
+                OrderArgs(token_id=b.leg_up.token_id, price=limit_up,
+                          size=up_retry_shares, side="BUY"),
+            )
+            resp_up_r = await loop.run_in_executor(
+                None, self._client.post_order, signed_up_r, order_type, False
+            )
+        except Exception as e:
+            # DOWN filled but UP threw — partial fill with reduced size
+            log.warning(
+                f"[{b.id}] Reduced-size DOWN filled but UP exception: {e}. Emergency exit."
+            )
+            now = time.time()
+            b.leg_down.order_id  = dn_r_id or None
+            b.leg_down.placed_at = now
+            b.leg_down.status    = OrderStatus.FILLED
+            b.leg_down.filled_at = now
+            b.leg_down.fill_price = ask_down
+            b.leg_down.shares    = retry_shares
+            b.submitted_shares_down = retry_shares
+            b.leg_up.status = OrderStatus.CANCELLED
+            b.status = "partial_fill"
+            self._log_trade(b, "partial_fill")
+            self.risk.mark_partial_fill(b.market_condition_id)
+            asyncio.get_running_loop().create_task(self._emergency_exit(b))
+            return False
+
+        up_r_id, up_r_status, _ = _parse_r(resp_up_r)
+        if up_r_status == "matched":
+            now = time.time()
+            b.leg_down.order_id = dn_r_id or None
+            b.leg_up.order_id   = up_r_id or None
+            for leg, filled in ((b.leg_down, True), (b.leg_up, True)):
+                leg.placed_at  = now
+                leg.status     = OrderStatus.FILLED
+                leg.filled_at  = now
+                leg.fill_price = leg.price
+            b.leg_down.shares    = retry_shares
+            b.leg_up.shares      = up_retry_shares
+            b.submitted_shares_down = retry_shares
+            b.submitted_shares_up   = up_retry_shares
+            log.info(
+                f"[{b.id}] Both legs filled (reduced-size FOK) — "
+                f"Down={dn_r_id} Up={up_r_id} | "
+                f"sh={retry_shares:.2f}/{up_retry_shares:.2f} "
+                f"lim_dn={limit_down:.3f} lim_up={limit_up:.3f}"
+            )
+            await self._live_resolve(b)
+            return True
+
+        # UP also missed at reduced size — DOWN is stranded
+        log.warning(
+            f"[{b.id}] Reduced-size DOWN filled but UP miss — "
+            f"up_status={up_r_status!r}. Emergency exit."
+        )
+        now = time.time()
+        b.leg_down.order_id  = dn_r_id or None
+        b.leg_down.placed_at = now
+        b.leg_down.status    = OrderStatus.FILLED
+        b.leg_down.filled_at = now
+        b.leg_down.fill_price = ask_down
+        b.leg_down.shares    = retry_shares
+        b.submitted_shares_down = retry_shares
+        b.leg_up.status = OrderStatus.CANCELLED
+        b.status = "partial_fill"
+        self._log_trade(b, "partial_fill")
+        self.risk.mark_partial_fill(b.market_condition_id)
+        asyncio.get_running_loop().create_task(self._emergency_exit(b))
+        return False
 
     async def _emergency_exit(self, b: Bracket):
         """One leg filled, the other was FOK-cancelled.  Sell the filled leg at
