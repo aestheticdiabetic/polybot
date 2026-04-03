@@ -609,14 +609,35 @@ class Scanner:
         if combined >= STRATEGY.bracket_threshold:
             return
 
-        # Equal-shares sizing: total spend = 2*size, shares = 2*size/combined
-        # Payout = shares × $1 = 2*size/combined (guaranteed regardless of outcome)
-        size         = STRATEGY.position_size_usdc
-        total_spend  = size * 2
-        n_shares     = total_spend / combined
-
+        # Depth-first sizing: determine max shares we can actually fill.
+        # DOWN is the thin side (consensus), so it's the limiting factor.
+        # Apply 80% safety factor to account for metadata staleness.
         depth_up   = ps_up.ask_size
         depth_down = ps_down.ask_size
+        max_fillable_down = depth_down * 0.80
+
+        # UP must have comparable depth to DOWN
+        if depth_up < max_fillable_down * 0.80:
+            log.debug(
+                f"DEPTH SKIP {m.asset} {m.window} | "
+                f"UP depth={depth_up:.1f} insufficient for DOWN depth={depth_down:.1f}"
+            )
+            self.stats["brackets_depth_skipped"] = self.stats.get("brackets_depth_skipped", 0) + 1
+            return
+
+        # Size bracket to what DOWN can actually provide
+        size = STRATEGY.position_size_usdc
+        total_spend = size * 2
+        max_shares_by_budget = total_spend / combined
+        n_shares = min(max_fillable_down, max_shares_by_budget)
+
+        if n_shares < 1.0:  # Minimum viable order size
+            log.debug(
+                f"DEPTH SKIP {m.asset} {m.window} | "
+                f"n_shares={n_shares:.2f} too small (budget limits or thin depth)"
+            )
+            self.stats["brackets_depth_skipped"] = self.stats.get("brackets_depth_skipped", 0) + 1
+            return
 
         # FOK limit prices: give UP exactly 1 tick of headroom; give DOWN all remaining
         # margin plus extra ticks.  DOWN books are structurally thinner (consensus side,
@@ -635,25 +656,6 @@ class Scanner:
             limit_down = round(max_limit_sum - limit_up, 2)
             limit_down = max(limit_down, ask_down)  # never below current ask
 
-        # Only skip if we have book data AND best-ask depth is well below our need.
-        # With limit-price sweeping the actual fillable depth extends above best ask,
-        # so a single-level depth reading is only useful as a "book looks empty" guard.
-        # Threshold: skip if visible depth < 25% of required shares.
-        if depth_up > 0 and depth_up < n_shares * 0.25:
-            log.debug(
-                f"DEPTH SKIP {m.asset} {m.window} | "
-                f"need {n_shares:.2f}sh, UP only has {depth_up:.2f} at best ask"
-            )
-            self.stats["brackets_depth_skipped"] = self.stats.get("brackets_depth_skipped", 0) + 1
-            return
-        if depth_down > 0 and depth_down < n_shares * 0.25:
-            log.debug(
-                f"DEPTH SKIP {m.asset} {m.window} | "
-                f"need {n_shares:.2f}sh, DOWN only has {depth_down:.2f} at best ask"
-            )
-            self.stats["brackets_depth_skipped"] = self.stats.get("brackets_depth_skipped", 0) + 1
-            return
-
         # Throttle: skip if we detected a bracket on this market recently
         last = self._recent_brackets.get(m.condition_id, 0)
         throttle_window = 60.0 / STRATEGY.pause_if_bracket_hz
@@ -664,8 +666,10 @@ class Scanner:
         self._recent_brackets[m.condition_id] = time.time()
         self.stats["brackets_detected"] += 1
 
-        gross = n_shares - total_spend
-        fee   = total_spend * STRATEGY.taker_fee_pct
+        # Profitability based on ACTUAL shares we'll fill
+        actual_spend = n_shares * (ask_up + ask_down)
+        gross = n_shares - actual_spend
+        fee   = actual_spend * STRATEGY.taker_fee_pct
         gas   = STRATEGY.gas_fee_live_usdc
         net   = gross - fee - gas
         metadata_age_ms = (time.time() - self._metadata_cache_time) * 1000
@@ -693,7 +697,7 @@ class Scanner:
             f"BRACKET {m.asset} {m.window} | "
             f"Up={ask_up:.3f}({depth_up:.1f}) lim={limit_up:.3f} "
             f"Down={ask_down:.3f}({depth_down:.1f}) lim={limit_down:.3f} "
-            f"Sum={combined:.3f} Need={n_shares:.2f}sh Net=+${net:.3f} "
+            f"Sum={combined:.3f} Fillable={n_shares:.2f}sh Net=+${net:.3f} "
             f"metadata_age={metadata_age_ms:.0f}ms"
         )
         self.on_bracket(opp)
