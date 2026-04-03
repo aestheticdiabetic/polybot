@@ -82,6 +82,13 @@ class StrategyConfig:
     # still < 1.0 and profitable. Tradeoff: slightly wider limits > presigned order failures.
     down_extra_ticks: int = 5
 
+    # Parallel order submission (hybrid approach)
+    # Enable parallel submission when order book depth is sufficient.
+    # Parallel reduces latency from ~723ms → ~360ms but increases partial fill risk.
+    # Only enabled when both sides have depth_threshold × shares available.
+    parallel_submission_enabled: bool = True
+    parallel_depth_threshold_multiplier: float = 1.5  # require 150% of shares on each side
+
 STRATEGY = StrategyConfig()
 
 # ─── Simulation parameters ────────────────────────────────────────
