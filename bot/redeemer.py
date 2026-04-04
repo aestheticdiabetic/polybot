@@ -124,9 +124,49 @@ class Redeemer:
             return
 
         condition_id = activity.get("condition_id") or logs.get("data", "")[:66]
-        if condition_id and condition_id not in self._redeemed:
-            log.info(f"Resolution detected on-chain: {condition_id}")
-            await self._redeem(condition_id)
+        if not condition_id or condition_id in self._redeemed:
+            return
+
+        # Verify we actually hold a winning position before spending gas.
+        # The webhook fires for all settlements on CTF_EXCHANGE, not just ours.
+        value = await self._fetch_redeemable_value(condition_id)
+        if value <= 0:
+            log.debug(f"Webhook: no redeemable value for {condition_id} — skipping")
+            self._redeemed.add(condition_id)
+            self._save_redeemed()
+            return
+
+        log.info(f"Resolution detected on-chain: {condition_id} (value={value:.4f})")
+        await self._redeem(condition_id)
+
+    # ── Helpers ───────────────────────────────────────────────────
+
+    async def _fetch_redeemable_value(self, condition_id: str) -> float:
+        """
+        Query the Polymarket Data API to check if we hold a winning position
+        for this condition. Returns the redeemable value (>0 means worth redeeming).
+        Returns 0 if we have no position, the market isn't resolved, or it's a loser.
+        """
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = "https://data-api.polymarket.com/positions"
+                params = {"user": FUNDER_ADDRESS, "conditionId": condition_id, "redeemable": "true"}
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    positions = await r.json()
+            for pos in (positions or []):
+                if pos.get("conditionId") != condition_id:
+                    continue
+                if not pos.get("redeemable"):
+                    continue
+                size = float(pos.get("size", 0) or 0)
+                current_value = float(pos.get("currentValue", 0) or 0)
+                if size > 0 and current_value > 0:
+                    return current_value
+            return 0.0
+        except Exception as e:
+            log.debug(f"Could not fetch redeemable value for {condition_id}: {e}")
+            return 0.0
 
     # ── Fallback polling ─────────────────────────────────────────
 
@@ -150,15 +190,16 @@ class Redeemer:
                         continue
                     if not pos.get("redeemable"):
                         continue
-                    # Skip zero-share losers — no USDC to recover, gas is wasted
+                    # Skip zero-value positions — losers have size>0 but currentValue=0
                     size = float(pos.get("size", 0) or 0)
-                    if size == 0:
-                        log.debug(f"Skipping zero-share position {cid} — nothing to redeem")
+                    current_value = float(pos.get("currentValue", 0) or 0)
+                    if size == 0 or current_value <= 0:
+                        log.debug(f"Skipping zero-value position {cid} (size={size}, value={current_value}) — nothing to redeem")
                         # Mark as handled so we never check it again
                         self._redeemed.add(cid)
                         self._save_redeemed()
                         continue
-                    log.info(f"Redeemable position found (poll): {pos.get('title', cid)} size={size}")
+                    log.info(f"Redeemable position found (poll): {pos.get('title', cid)} size={size} value={current_value:.4f}")
                     await self._redeem(cid)
             except Exception as e:
                 log.debug(f"Poll error: {e}")
