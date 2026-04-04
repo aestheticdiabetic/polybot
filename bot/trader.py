@@ -250,8 +250,14 @@ class Trader:
         cid = opp.market.condition_id
 
         # Don't re-sign if we already have a fresh pre-sign for this market
+        # AND current asks are still within the presigned limits.
+        # If prices have moved (e.g. ask_down rose above limit_down), the presign
+        # is invalid and we need to re-sign with updated limits immediately.
         existing = self._presigned.get(cid)
-        if existing and time.time() - existing["ts"] < 10.0:
+        if (existing
+                and time.time() - existing["ts"] < 10.0
+                and opp.ask_up <= existing["limit_up"]
+                and opp.ask_down <= existing["limit_down"]):
             return
 
         # Warm cache first (no-op if already warm within TTL)
@@ -265,7 +271,11 @@ class Trader:
         combined = opp.ask_up + opp.ask_down
         margin   = STRATEGY.bracket_threshold - combined   # may be ≤ 0 at near-threshold
         limit_up   = round(opp.ask_up   + tick, 2)
-        limit_down = round(opp.ask_down + max(margin - tick, 0.0) + STRATEGY.down_extra_ticks * tick, 2)
+        # Use max(margin, 0) so DOWN always gets at least down_extra_ticks of headroom
+        # even when presigning at near-bracket (where margin is negative).  Without this,
+        # DOWN limit collapses to ask_down+0.05 and is easily breached before the bracket
+        # actually fires — causing presign rejection and forcing expensive fresh signing.
+        limit_down = round(opp.ask_down + max(margin, 0.0) + STRATEGY.down_extra_ticks * tick, 2)
         # Profitability cap: must match scanner's invariant — limit_up + limit_down must
         # stay below 1.0 - fee so a worst-case fill (both at limit) is still profitable.
         max_limit_sum = round(1.0 - STRATEGY.taker_fee_pct - tick, 2)
@@ -389,15 +399,15 @@ class Trader:
         total_budget = size * 2
         n_shares = total_budget / combined
 
-        # Depth-proportional sizing: if visible depth on either leg is less than
-        # 50% of the target, cap shares to that depth.  WS depth is single-level
-        # (best ask only), so we only apply this guard when the book looks genuinely
-        # thin — not just because depth is spread across levels above best ask.
-        # This prevents FOK attempts on markets where the book is clearly empty.
-        if opp.depth_up > 0 and opp.depth_up < n_shares * 0.5:
-            n_shares = min(n_shares, opp.depth_up)
-        if opp.depth_down > 0 and opp.depth_down < n_shares * 0.5:
-            n_shares = min(n_shares, opp.depth_down)
+        # Depth-first sizing: cap shares to 80% of visible depth on each leg,
+        # matching the scanner's sizing logic.  The previous 50% guard only triggered
+        # when depth was severely thin, causing the trader to submit more shares than
+        # the scanner computed as fillable (e.g. scanner: 9.60sh, trader: 10.50sh),
+        # which caused systematic FOK failures on orders the scanner had approved.
+        if opp.depth_up > 0:
+            n_shares = min(n_shares, opp.depth_up * 0.80)
+        if opp.depth_down > 0:
+            n_shares = min(n_shares, opp.depth_down * 0.80)
         # Skip if the position is now too small to be worth the transaction cost.
         # risk.open() hasn't been called yet so no cleanup needed — just return.
         if n_shares * combined / 2 < STRATEGY.min_position_size_usdc:
