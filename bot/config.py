@@ -91,6 +91,28 @@ class StrategyConfig:
 
 STRATEGY = StrategyConfig()
 
+# ─── Maker pre-positioning (DOWN GTC queue priority) ──────────────
+@dataclass
+class MakerPositioningConfig:
+    # Enable resting GTC DOWN orders posted at near-bracket to gain queue priority
+    enabled: bool = True
+
+    # Resting DOWN order posted at this limit price:
+    # limit = bracket_threshold - ask_up + maker_margin_pct
+    # So if DOWN fills at this price + UP fills at current ask, combined ≈ threshold
+    # Set to 0.0 for breakeven, or negative for slightly aggressive (e.g., -0.01)
+    maker_margin_pct: float = 0.0
+
+    # How long to wait (in seconds) after posting the DOWN GTC before cancelling if
+    # bracket threshold hasn't fired. Prevents orphaned resting orders.
+    down_gtc_timeout_s: int = 10
+
+    # Only post maker GTC if current DOWN depth < this threshold (in multiples of our size).
+    # If DOWN already has 3x our shares at good prices, we don't need to be a maker.
+    min_down_depth_for_maker_x: float = 2.0
+
+MAKER = MakerPositioningConfig()
+
 # ─── Simulation parameters ────────────────────────────────────────
 @dataclass
 class SimConfig:

@@ -17,7 +17,7 @@ from enum import Enum
 from config import (
     CLOB_HOST, PRIVATE_KEY, FUNDER_ADDRESS,
     API_KEY, API_SECRET, API_PASSPHRASE,
-    STRATEGY, SIM, TRADE_LOG
+    STRATEGY, SIM, TRADE_LOG, MAKER
 )
 from scanner import BracketOpportunity
 
@@ -189,6 +189,9 @@ class Trader:
         # the scanner fires on_near_bracket; consumed (and cleared) by _live_place.
         self._presigned: Dict[str, dict] = {}
         self._warmed_tokens: set = set()  # track warmed (up_id, down_id) pairs to avoid re-warming
+        # Resting DOWN GTC orders posted by maker positioning, keyed by condition_id
+        # Value: {order_id, shares, limit_down_maker, posted_at}
+        self._pending_down_gtc: Dict[str, dict] = {}
         self.stats = {
             "brackets_attempted": 0,
             "brackets_stale_skipped": 0,
@@ -209,6 +212,8 @@ class Trader:
         if not SIM.enabled:
             await self._init_client()
         log.info(f"Trader started — {'SIMULATION' if SIM.enabled else 'LIVE'} mode")
+        if not SIM.enabled and MAKER.enabled:
+            asyncio.get_running_loop().create_task(self._cleanup_down_gtc())
 
     async def _init_client(self):
         """Initialise py-clob-client."""
@@ -242,11 +247,14 @@ class Trader:
     def on_near_bracket(self, opp: BracketOpportunity):
         """Called by scanner when combined ask is within near_bracket_threshold.
 
-        Fires a background task that warms the CLOB metadata cache and pre-signs
-        both orders so the critical path at actual threshold is just one POST call.
+        Simultaneously:
+        1. Warm CLOB metadata cache and pre-sign both orders (existing behavior)
+        2. Post a resting GTC DOWN order if maker positioning is enabled (new behavior)
         """
         if not SIM.enabled and self._client is not None:
             asyncio.get_running_loop().create_task(self._presign_orders(opp))
+            if MAKER.enabled:
+                asyncio.get_running_loop().create_task(self._post_down_maker_gtc(opp))
 
     async def _presign_orders(self, opp: BracketOpportunity) -> None:
         """Warm cache + pre-sign both legs for a near-threshold opportunity.
@@ -338,6 +346,89 @@ class Trader:
             )
         except Exception as e:
             log.debug(f"[PRESIGN] {opp.market.asset} {opp.market.window} error: {e}")
+
+    async def _post_down_maker_gtc(self, opp: BracketOpportunity) -> None:
+        """Post a resting GTC DOWN order at a price that locks in profitability if filled.
+
+        Called by on_near_bracket when combined ask is near threshold (0.985-0.98).
+        The DOWN order rests on the book and gains queue priority while we wait for the
+        actual bracket threshold to fire. If it fills, we immediately post UP.
+        """
+        cid = opp.market.condition_id
+
+        # Check if we already have a pending DOWN GTC for this market
+        if cid in self._pending_down_gtc:
+            existing = self._pending_down_gtc[cid]
+            if time.time() - existing["posted_at"] < 5.0:
+                return  # Still fresh, don't re-post
+            # Old pending DOWN GTC — fall through and post a new one
+
+        # Skip if current DOWN depth is already healthy relative to our target size
+        depth_check = opp.depth_down / ((STRATEGY.position_size_usdc * 2) / opp.combined_ask)
+        if depth_check >= MAKER.min_down_depth_for_maker_x:
+            log.debug(
+                f"[MAKER] {opp.market.asset} {opp.market.window} | DOWN depth={opp.depth_down:.1f} "
+                f"is {depth_check:.1f}x our size — skipping maker GTC"
+            )
+            return
+
+        # Limit price for maker DOWN: such that DOWN fill + current UP ask = bracket_threshold
+        limit_down_maker = round(
+            STRATEGY.bracket_threshold - opp.ask_up + MAKER.maker_margin_pct, 2
+        )
+        limit_down_maker = max(limit_down_maker, opp.ask_down)  # never below current ask
+
+        # Size: use same sizing as the bracket would use
+        n_shares = (STRATEGY.position_size_usdc * 2) / opp.combined_ask
+        shares_down = _clob_valid_shares(n_shares, limit_down_maker)
+
+        if shares_down < 1.0:
+            log.debug(f"[MAKER] {opp.market.asset} {opp.market.window} | shares too small")
+            return
+
+        try:
+            from py_clob_client.clob_types import OrderArgs, OrderType
+            loop = asyncio.get_running_loop()
+
+            # Post the GTC
+            signed_down = await loop.run_in_executor(
+                None, self._client.create_order,
+                OrderArgs(
+                    token_id=opp.market.token_id_down,
+                    price=limit_down_maker,
+                    size=shares_down,
+                    side="BUY",
+                ),
+            )
+
+            resp = await loop.run_in_executor(
+                None, self._client.post_order,
+                signed_down, OrderType.GTC, False  # GTC, not FOK
+            )
+
+            order_id = (resp.get("orderID") or "") if isinstance(resp, dict) else ""
+            status = (resp.get("status") or "").lower() if isinstance(resp, dict) else ""
+
+            if status == "open" and order_id:
+                self._pending_down_gtc[cid] = {
+                    "order_id": order_id,
+                    "shares": shares_down,
+                    "limit_down_maker": limit_down_maker,
+                    "posted_at": time.time(),
+                }
+                log.info(
+                    f"[MAKER] {opp.market.asset} {opp.market.window} | "
+                    f"DOWN GTC posted id={order_id} lim={limit_down_maker:.3f} sh={shares_down:.2f}"
+                )
+            else:
+                log.debug(
+                    f"[MAKER] {opp.market.asset} {opp.market.window} | "
+                    f"DOWN GTC post failed: status={status!r}"
+                )
+        except Exception as e:
+            log.debug(
+                f"[MAKER] {opp.market.asset} {opp.market.window} | DOWN GTC exception: {e}"
+            )
 
     async def _warm_token_cache(self, token_id_up: str, token_id_down: str) -> None:
         """Pre-populate ClobClient's tick-size / neg-risk / fee-rate caches for both
@@ -634,6 +725,46 @@ class Trader:
                     (resp.get("message") or resp.get("errorMsg") or ""),
                 )
 
+            # ── Check for resting DOWN maker GTC from on_near_bracket ──
+            cid = b.market_condition_id
+            down_gtc_filled = False
+            down_gtc_shares = 0.0
+            down_gtc_limit = 0.0
+
+            if cid in self._pending_down_gtc:
+                pending = self._pending_down_gtc[cid]
+                gtc_order_id = pending["order_id"]
+
+                # Fetch fresh order status from REST
+                try:
+                    order_status = await loop.run_in_executor(
+                        None, self._client.get_order, gtc_order_id
+                    )
+                    if isinstance(order_status, dict):
+                        gtc_status = (order_status.get("status") or "").lower()
+                        if gtc_status == "filled" or gtc_status == "matched":
+                            down_gtc_filled = True
+                            down_gtc_shares = pending["shares"]
+                            down_gtc_limit = pending["limit_down_maker"]
+                            log.info(
+                                f"[{b.id}] DOWN maker GTC filled: id={gtc_order_id} "
+                                f"sh={down_gtc_shares:.2f} lim={down_gtc_limit:.3f}"
+                            )
+                        elif gtc_status == "open" or gtc_status == "pending":
+                            # Still resting — cancel it before submitting new orders
+                            try:
+                                await loop.run_in_executor(
+                                    None, self._client.cancel_order, gtc_order_id
+                                )
+                                log.debug(f"[{b.id}] Cancelled pending DOWN GTC {gtc_order_id}")
+                            except:
+                                pass
+                except Exception as e:
+                    log.debug(f"[{b.id}] Error checking DOWN GTC status: {e}")
+
+                # Clear the pending dict regardless of outcome
+                del self._pending_down_gtc[cid]
+
             # ── Decide: parallel or sequential submission ──
 
             # Calculate actual available depth from order book snapshots (not stale WS-at-detection time)
@@ -647,6 +778,69 @@ class Trader:
             )
 
             # No need for pre-flight REST check — we have current depth from ask_book snapshots
+
+            if down_gtc_filled:
+                # DOWN maker GTC filled — submit UP with the same share count
+                log.info(
+                    f"[{b.id}] Submitting UP to match DOWN GTC fill (sh={down_gtc_shares:.2f})"
+                )
+                shares_up = _clob_valid_shares(down_gtc_shares, limit_up)
+
+                try:
+                    signed_up = await loop.run_in_executor(
+                        None, self._client.create_order,
+                        OrderArgs(token_id=b.leg_up.token_id, price=limit_up,
+                                  size=shares_up, side="BUY"),
+                    )
+                    resp_up = await loop.run_in_executor(
+                        None, self._client.post_order, signed_up, order_type, False
+                    )
+                    up_id, up_status, up_err, up_msg = _parse(resp_up)
+
+                    # Mark both legs as filled/matched
+                    now = time.time()
+                    b.leg_down.order_id = pending["order_id"]
+                    b.leg_down.status = OrderStatus.FILLED
+                    b.leg_down.fill_price = down_gtc_limit
+                    b.leg_down.shares = down_gtc_shares
+                    b.leg_down.filled_at = now
+                    b.leg_down.placed_at = now
+
+                    if up_status == "matched":
+                        b.leg_up.order_id = up_id
+                        b.leg_up.status = OrderStatus.FILLED
+                        b.leg_up.fill_price = limit_up
+                        b.leg_up.shares = shares_up
+                        b.leg_up.filled_at = now
+                        b.leg_up.placed_at = now
+
+                        b.status = "matched"
+                        log.info(
+                            f"[{b.id}] Maker DOWN + FOK UP both filled | "
+                            f"DOWN={down_gtc_shares:.2f}@{down_gtc_limit:.3f} "
+                            f"UP={shares_up:.2f}@{limit_up:.3f}"
+                        )
+                        await self._live_resolve(b)
+                        return True
+                    else:
+                        # DOWN filled but UP failed — emergency exit (same as normal partial fill)
+                        log.warning(f"[{b.id}] DOWN GTC filled but UP FOK failed — emergency exit")
+                        b.leg_up.status = OrderStatus.CANCELLED
+                        b.status = "partial_fill"
+                        self._log_trade(b, "partial_fill")
+                        self.risk.mark_partial_fill(cid)
+                        asyncio.get_running_loop().create_task(self._emergency_exit(b))
+                        return True
+
+                except Exception as e:
+                    log.warning(f"[{b.id}] Exception submitting UP after DOWN GTC fill: {e}")
+                    # Mark DOWN as filled for emergency exit
+                    b.leg_down.status = OrderStatus.FILLED
+                    b.status = "partial_fill"
+                    self._log_trade(b, "partial_fill")
+                    self.risk.mark_partial_fill(cid)
+                    asyncio.get_running_loop().create_task(self._emergency_exit(b))
+                    return True
 
             if use_parallel:
                 dn_id, dn_status, dn_err, dn_msg, up_id, up_status, up_err, up_msg = (
@@ -1183,6 +1377,29 @@ class Trader:
         # The cooldown already prevents re-entry for partial_fill_cooldown_s.
         self.risk.close(b.market_condition_id, STRATEGY.position_size_usdc * 2)
         self._open_brackets.pop(b.id, None)
+
+    async def _cleanup_down_gtc(self) -> None:
+        """Periodically cancel resting DOWN GTCs that haven't been claimed."""
+        while True:
+            await asyncio.sleep(5.0)
+            now = time.time()
+            expired = []
+
+            for cid, pending in self._pending_down_gtc.items():
+                age = now - pending["posted_at"]
+                if age > MAKER.down_gtc_timeout_s:
+                    expired.append(cid)
+                    try:
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(
+                            None, self._client.cancel_order, pending["order_id"]
+                        )
+                        log.info(f"[MAKER] Cancelled expired DOWN GTC {pending['order_id']}")
+                    except Exception as e:
+                        log.debug(f"[MAKER] Error cancelling expired DOWN GTC: {e}")
+
+            for cid in expired:
+                del self._pending_down_gtc[cid]
 
     async def _sim_place(self, b: Bracket) -> bool:
         """Simulate order placement with realistic latency and fill probability."""
