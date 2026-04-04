@@ -188,7 +188,6 @@ class Trader:
         # Pre-signed orders keyed by condition_id.  Populated by _presign_orders when
         # the scanner fires on_near_bracket; consumed (and cleared) by _live_place.
         self._presigned: Dict[str, dict] = {}
-        self._warmed_tokens: set = set()  # track warmed (up_id, down_id) pairs to avoid re-warming
         # Resting DOWN GTC orders posted by maker positioning, keyed by condition_id
         # Value: {order_id, shares, limit_down_maker, posted_at}
         self._pending_down_gtc: Dict[str, dict] = {}
@@ -257,7 +256,7 @@ class Trader:
                 asyncio.get_running_loop().create_task(self._post_down_maker_gtc(opp))
 
     async def _presign_orders(self, opp: BracketOpportunity) -> None:
-        """Warm cache + pre-sign both legs for a near-threshold opportunity.
+        """Pre-sign both legs for a near-threshold opportunity.
 
         Pre-signed orders are stored in _presigned[condition_id] and consumed by
         _live_place when the real threshold is crossed.  They expire after 8s because
@@ -279,9 +278,6 @@ class Trader:
                 and opp.ask_up <= existing["limit_up"]
                 and opp.ask_down <= existing["limit_down"]):
             return
-
-        # Warm cache first (no-op if already warm within TTL)
-        await self._warm_token_cache(opp.market.token_id_up, opp.market.token_id_down)
 
         # Limits: match the scanner's limit calculation so presigned orders have the
         # same sweep room as freshly-signed ones.  Previously presigned DOWN was only
@@ -430,50 +426,7 @@ class Trader:
                 f"[MAKER] {opp.market.asset} {opp.market.window} | DOWN GTC exception: {e}"
             )
 
-    async def _warm_token_cache(self, token_id_up: str, token_id_down: str) -> None:
-        """Pre-populate ClobClient's tick-size / neg-risk / fee-rate caches for both
-        tokens *concurrently*.
-
-        ClobClient fetches these values lazily inside create_order() — three
-        sequential HTTP GETs per token (~200 ms total when cold).  By firing all six
-        GETs in parallel here, we reduce the cold-path cost to roughly one round-trip
-        (~60 ms) and leave create_order() with nothing to fetch, so it only does
-        ECDSA signing (~5 ms).
-
-        return_exceptions=True means a failed warm (e.g. transient 500) is silently
-        ignored; create_order() will simply re-fetch that value itself.
-        """
-        loop = asyncio.get_running_loop()
-        await asyncio.gather(
-            loop.run_in_executor(None, self._client.get_tick_size,    token_id_up),
-            loop.run_in_executor(None, self._client.get_neg_risk,     token_id_up),
-            loop.run_in_executor(None, self._client.get_fee_rate_bps, token_id_up),
-            loop.run_in_executor(None, self._client.get_tick_size,    token_id_down),
-            loop.run_in_executor(None, self._client.get_neg_risk,     token_id_down),
-            loop.run_in_executor(None, self._client.get_fee_rate_bps, token_id_down),
-            return_exceptions=True,
-        )
-
     async def _handle_opportunity(self, opp: BracketOpportunity):
-        # Warm token metadata cache proactively on first encounter with this market.
-        # Cache is persistent: neg-risk and fee-rate never expire, tick-size lasts 300s.
-        # This eliminates the 6 HTTP metadata GETs from the critical path on subsequent
-        # brackets, reducing execution latency from ~550ms to ~110ms.
-        _warm = None
-        if not SIM.enabled and self._client is not None:
-            token_pair = (opp.market.token_id_up, opp.market.token_id_down)
-            if token_pair not in self._warmed_tokens:
-                self._warmed_tokens.add(token_pair)
-                _warm = asyncio.get_running_loop().create_task(
-                    self._warm_token_cache(
-                        opp.market.token_id_up, opp.market.token_id_down
-                    )
-                )
-                await asyncio.sleep(0)   # yield → warm GETs start immediately
-                # Wait for warm to complete; first bracket on a market may need it
-                await _warm
-                _warm = None
-
         self.stats["brackets_attempted"] += 1
 
         # Reject if opportunity is stale — prices may have moved since detection
@@ -481,18 +434,13 @@ class Trader:
         if age_ms > 500:
             log.debug(f"Stale opportunity: {age_ms:.0f}ms old, skipping")
             self.stats["brackets_stale_skipped"] += 1
-            # Let _warm finish in background — result cached for next opportunity
             return
 
         balance = self.state.get_balance()
         ok, reason = self.risk.can_open(opp.market.condition_id, balance)
         if not ok:
             log.debug(f"Risk block: {reason}")
-            return  # same — warm result still useful
-
-        # Ensure cache is populated before signing (should already be done or near-done)
-        if _warm is not None:
-            await _warm
+            return
 
         size = STRATEGY.position_size_usdc
         # Equal-shares sizing: buy the same number of shares on each leg so
