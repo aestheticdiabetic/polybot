@@ -1224,6 +1224,21 @@ class Trader:
             "latency_ms": b.latency_ms,
             "age_ms": b.age_ms,
             "sim": b.sim_mode,
+            # Detailed leg info for debugging partial fills and execution details
+            "leg_up": {
+                "status": b.leg_up.status.value,
+                "order_id": b.leg_up.order_id,
+                "price": b.leg_up.price,
+                "shares": b.leg_up.shares,
+                "fill_price": b.leg_up.fill_price,
+            },
+            "leg_down": {
+                "status": b.leg_down.status.value,
+                "order_id": b.leg_down.order_id,
+                "price": b.leg_down.price,
+                "shares": b.leg_down.shares,
+                "fill_price": b.leg_down.fill_price,
+            },
         }
         try:
             with open(TRADE_LOG, "a") as f:
