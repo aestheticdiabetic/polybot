@@ -81,10 +81,12 @@ class Scanner:
         self,
         on_bracket: Callable[[BracketOpportunity], None],
         on_near_bracket: Optional[Callable[[BracketOpportunity], None]] = None,
+        on_new_markets: Optional[Callable[[List["MarketInfo"]], None]] = None,
         client=None,
     ):
         self.on_bracket = on_bracket
         self.on_near_bracket = on_near_bracket
+        self.on_new_markets = on_new_markets
         self._markets: Dict[str, MarketInfo] = {}          # condition_id → MarketInfo
         self._prices:  Dict[str, PriceState] = {}          # token_id → PriceState
         self._market_added_at: Dict[str, float] = {}       # condition_id → unix ts added
@@ -418,6 +420,7 @@ class Scanner:
                 )
 
             new_count = 0
+            new_markets = []
             for m in markets:
                 if m.condition_id not in self._markets:
                     self._markets[m.condition_id] = m
@@ -426,7 +429,11 @@ class Scanner:
                         self._prices[m.token_id_up] = PriceState()
                     if m.token_id_down not in self._prices:
                         self._prices[m.token_id_down] = PriceState()
+                    new_markets.append(m)
                     new_count += 1
+
+            if new_markets and self.on_new_markets is not None:
+                self.on_new_markets(new_markets)
 
             # Count markets with live price data on both sides
             active_count = sum(

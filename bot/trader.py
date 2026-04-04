@@ -338,19 +338,26 @@ class Trader:
 
         log.info("Client metadata methods patched to use cache")
 
-    async def _prewarm_metadata_cache(self) -> None:
-        """Pre-fetch metadata for common tokens at startup.
+    def on_new_markets(self, markets) -> None:
+        """Called by scanner when new markets are discovered.
 
-        This reduces latency on first bracket for each token by fetching
-        metadata proactively instead of on-demand during order creation.
+        Kick off background metadata pre-warming so token metadata is cached
+        before any bracket can fire for these markets.
         """
-        if self._metadata_cache is None or self._client is None:
+        if self._metadata_cache is None:
             return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        for m in markets:
+            for token_id in (m.token_id_up, m.token_id_down):
+                if token_id not in self._metadata_cache._cache:
+                    loop.create_task(self._metadata_cache.get_or_fetch(token_id))
 
-        # Collect all unique token IDs from target markets
-        # Scanner will populate these from the market list
-        # For now, we'll let on-demand fetching handle new tokens
-        log.info("[METADATA] Cache initialized, will populate on first market encounter")
+    async def _prewarm_metadata_cache(self) -> None:
+        """No-op: metadata is warmed via on_new_markets when the scanner discovers markets."""
+        log.info("[METADATA] Cache initialized, will populate as markets are discovered")
 
     async def _ensure_token_metadata(self, token_id_up: str, token_id_down: str, wait: bool = False) -> None:
         """Fetch and cache metadata for token pair if not already cached.

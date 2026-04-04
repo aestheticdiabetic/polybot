@@ -36,7 +36,7 @@ log = logging.getLogger("main")
 async def run_bot(state: StateManager):
     """Main bot loop."""
     trader   = Trader(state)
-    scanner  = Scanner(on_bracket=trader.on_bracket, on_near_bracket=trader.on_near_bracket)
+    scanner  = Scanner(on_bracket=trader.on_bracket, on_near_bracket=trader.on_near_bracket, on_new_markets=trader.on_new_markets)
     redeemer = Redeemer(state)
 
     await trader.start()
