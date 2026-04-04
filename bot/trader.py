@@ -29,52 +29,70 @@ class TokenMetadataCache:
 
     Fetches metadata once at startup and on first encounter with new tokens.
     Prevents repeated REST calls for the same token metadata.
+    A semaphore caps concurrent REST fetches to avoid rate-limiting (429).
     """
+    _MAX_CONCURRENT_FETCHES = 8
+
     def __init__(self, client):
         self._client = client
         self._cache: Dict[str, dict] = {}  # token_id -> {tick_size, fee_rate_bps, neg_risk}
         self._fetching: Dict[str, asyncio.Task] = {}  # in-flight fetches to deduplicate
+        self._sem: Optional[asyncio.Semaphore] = None  # initialised on first use (needs running loop)
 
-    async def get_or_fetch(self, token_id: str) -> dict:
-        """Get metadata for a token, fetching if not cached."""
+    def _get_sem(self) -> asyncio.Semaphore:
+        if self._sem is None:
+            self._sem = asyncio.Semaphore(self._MAX_CONCURRENT_FETCHES)
+        return self._sem
+
+    async def get_or_fetch(self, token_id: str) -> Optional[dict]:
+        """Get metadata for a token, fetching if not cached.
+
+        Returns None if the fetch failed (caller should fall back to REST).
+        """
         if token_id in self._cache:
             return self._cache[token_id]
 
         # If already fetching, wait for that fetch to complete
         if token_id in self._fetching:
-            await self._fetching[token_id]
-            return self._cache[token_id]
+            try:
+                await self._fetching[token_id]
+            except Exception:
+                pass
+            return self._cache.get(token_id)
 
-        # Fetch in background, store the task so other callers can wait
+        # Start fetch, store task so concurrent callers deduplicate
         loop = asyncio.get_running_loop()
         task = loop.create_task(self._fetch_metadata(token_id))
         self._fetching[token_id] = task
 
         try:
             await task
-            return self._cache[token_id]
+        except Exception:
+            pass
         finally:
-            del self._fetching[token_id]
+            self._fetching.pop(token_id, None)
+
+        return self._cache.get(token_id)
 
     async def _fetch_metadata(self, token_id: str) -> None:
-        """Fetch tick-size, fee-rate, neg-risk for a token."""
+        """Fetch tick-size, fee-rate, neg-risk for a token (rate-limited by semaphore)."""
         loop = asyncio.get_running_loop()
-        try:
-            tick_size, fee_rate_bps, neg_risk = await asyncio.gather(
-                loop.run_in_executor(None, self._client.get_tick_size, token_id),
-                loop.run_in_executor(None, self._client.get_fee_rate_bps, token_id),
-                loop.run_in_executor(None, self._client.get_neg_risk, token_id),
-                return_exceptions=False,
-            )
-            self._cache[token_id] = {
-                "tick_size": tick_size,
-                "fee_rate_bps": fee_rate_bps,
-                "neg_risk": neg_risk,
-            }
-            log.debug(f"[METADATA] Cached {token_id}: tick={tick_size}, fee={fee_rate_bps}bps, neg_risk={neg_risk}")
-        except Exception as e:
-            log.warning(f"[METADATA] Failed to fetch {token_id}: {e}")
-            # Don't cache on failure, allow retry next time
+        async with self._get_sem():
+            try:
+                tick_size, fee_rate_bps, neg_risk = await asyncio.gather(
+                    loop.run_in_executor(None, self._client.get_tick_size, token_id),
+                    loop.run_in_executor(None, self._client.get_fee_rate_bps, token_id),
+                    loop.run_in_executor(None, self._client.get_neg_risk, token_id),
+                    return_exceptions=False,
+                )
+                self._cache[token_id] = {
+                    "tick_size": tick_size,
+                    "fee_rate_bps": fee_rate_bps,
+                    "neg_risk": neg_risk,
+                }
+                log.debug(f"[METADATA] Cached {token_id[:16]}…: tick={tick_size}, fee={fee_rate_bps}bps, neg_risk={neg_risk}")
+            except Exception as e:
+                log.warning(f"[METADATA] Failed to fetch {token_id[:16]}…: {e}")
 
 
 def _ask_book_depth_to(ask_book: list, limit_price: float) -> float:
