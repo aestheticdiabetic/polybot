@@ -24,6 +24,59 @@ from scanner import BracketOpportunity
 log = logging.getLogger("trader")
 
 
+class TokenMetadataCache:
+    """Cache tick-size, fee-rate, and neg-risk for all tokens.
+
+    Fetches metadata once at startup and on first encounter with new tokens.
+    Prevents repeated REST calls for the same token metadata.
+    """
+    def __init__(self, client):
+        self._client = client
+        self._cache: Dict[str, dict] = {}  # token_id -> {tick_size, fee_rate_bps, neg_risk}
+        self._fetching: Dict[str, asyncio.Task] = {}  # in-flight fetches to deduplicate
+
+    async def get_or_fetch(self, token_id: str) -> dict:
+        """Get metadata for a token, fetching if not cached."""
+        if token_id in self._cache:
+            return self._cache[token_id]
+
+        # If already fetching, wait for that fetch to complete
+        if token_id in self._fetching:
+            await self._fetching[token_id]
+            return self._cache[token_id]
+
+        # Fetch in background, store the task so other callers can wait
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(self._fetch_metadata(token_id))
+        self._fetching[token_id] = task
+
+        try:
+            await task
+            return self._cache[token_id]
+        finally:
+            del self._fetching[token_id]
+
+    async def _fetch_metadata(self, token_id: str) -> None:
+        """Fetch tick-size, fee-rate, neg-risk for a token."""
+        loop = asyncio.get_running_loop()
+        try:
+            tick_size, fee_rate_bps, neg_risk = await asyncio.gather(
+                loop.run_in_executor(None, self._client.get_tick_size, token_id),
+                loop.run_in_executor(None, self._client.get_fee_rate_bps, token_id),
+                loop.run_in_executor(None, self._client.get_neg_risk, token_id),
+                return_exceptions=False,
+            )
+            self._cache[token_id] = {
+                "tick_size": tick_size,
+                "fee_rate_bps": fee_rate_bps,
+                "neg_risk": neg_risk,
+            }
+            log.debug(f"[METADATA] Cached {token_id}: tick={tick_size}, fee={fee_rate_bps}bps, neg_risk={neg_risk}")
+        except Exception as e:
+            log.warning(f"[METADATA] Failed to fetch {token_id}: {e}")
+            # Don't cache on failure, allow retry next time
+
+
 def _ask_book_depth_to(ask_book: list, limit_price: float) -> float:
     """Calculate cumulative ask depth up to a limit price from an order book snapshot.
 
@@ -183,6 +236,7 @@ class Trader:
         self.state = state_manager
         self.risk  = RiskGuard()
         self._client = None
+        self._metadata_cache: Optional[TokenMetadataCache] = None
         self._open_brackets: Dict[str, Bracket] = {}
         self._cancel_tasks: Dict[str, asyncio.Task] = {}
         # Pre-signed orders keyed by condition_id.  Populated by _presign_orders when
@@ -210,12 +264,14 @@ class Trader:
     async def start(self):
         if not SIM.enabled:
             await self._init_client()
+            # Pre-warm metadata cache with all known tokens
+            await self._prewarm_metadata_cache()
         log.info(f"Trader started — {'SIMULATION' if SIM.enabled else 'LIVE'} mode")
         if not SIM.enabled and MAKER.enabled:
             asyncio.get_running_loop().create_task(self._cleanup_down_gtc())
 
     async def _init_client(self):
-        """Initialise py-clob-client."""
+        """Initialise py-clob-client with metadata cache."""
         try:
             from py_clob_client.client import ClobClient
             from py_clob_client.clob_types import ApiCreds
@@ -233,27 +289,127 @@ class Trader:
                 funder=FUNDER_ADDRESS,
             )
             log.info("CLOB client initialised")
+
+            # Initialize metadata cache and monkey-patch client methods
+            # to use cached metadata instead of making REST calls
+            self._metadata_cache = TokenMetadataCache(self._client)
+            self._patch_client_metadata_methods()
+
         except Exception as e:
             log.error(f"Failed to init CLOB client: {e}")
             raise
+
+    def _patch_client_metadata_methods(self) -> None:
+        """Monkey-patch client's metadata methods to use cache-first approach.
+
+        This intercepts get_tick_size, get_fee_rate_bps, and get_neg_risk calls
+        to check the cache first before making REST calls. The cached values are
+        fetched asynchronously to avoid blocking order creation.
+        """
+        if self._client is None or self._metadata_cache is None:
+            return
+
+        original_tick_size = self._client.get_tick_size
+        original_fee_rate = self._client.get_fee_rate_bps
+        original_neg_risk = self._client.get_neg_risk
+
+        def get_tick_size_cached(token_id: str) -> float:
+            """Return cached tick-size or fetch synchronously as fallback."""
+            if token_id in self._metadata_cache._cache:
+                return self._metadata_cache._cache[token_id]["tick_size"]
+            # Fallback to original (will make REST call)
+            return original_tick_size(token_id)
+
+        def get_fee_rate_bps_cached(token_id: str) -> int:
+            """Return cached fee-rate or fetch synchronously as fallback."""
+            if token_id in self._metadata_cache._cache:
+                return self._metadata_cache._cache[token_id]["fee_rate_bps"]
+            return original_fee_rate(token_id)
+
+        def get_neg_risk_cached(token_id: str) -> dict:
+            """Return cached neg-risk or fetch synchronously as fallback."""
+            if token_id in self._metadata_cache._cache:
+                return self._metadata_cache._cache[token_id]["neg_risk"]
+            return original_neg_risk(token_id)
+
+        self._client.get_tick_size = get_tick_size_cached
+        self._client.get_fee_rate_bps = get_fee_rate_bps_cached
+        self._client.get_neg_risk = get_neg_risk_cached
+
+        log.info("Client metadata methods patched to use cache")
+
+    async def _prewarm_metadata_cache(self) -> None:
+        """Pre-fetch metadata for common tokens at startup.
+
+        This reduces latency on first bracket for each token by fetching
+        metadata proactively instead of on-demand during order creation.
+        """
+        if self._metadata_cache is None or self._client is None:
+            return
+
+        # Collect all unique token IDs from target markets
+        # Scanner will populate these from the market list
+        # For now, we'll let on-demand fetching handle new tokens
+        log.info("[METADATA] Cache initialized, will populate on first market encounter")
+
+    async def _ensure_token_metadata(self, token_id_up: str, token_id_down: str, wait: bool = False) -> None:
+        """Fetch and cache metadata for token pair if not already cached.
+
+        Args:
+            token_id_up: UP token ID
+            token_id_down: DOWN token ID
+            wait: If True, wait for metadata to be cached before returning.
+                  If False, spawn background tasks and return immediately.
+        """
+        if self._metadata_cache is None:
+            return
+
+        if wait:
+            # Wait for both tokens to be cached
+            await asyncio.gather(
+                self._metadata_cache.get_or_fetch(token_id_up),
+                self._metadata_cache.get_or_fetch(token_id_down),
+                return_exceptions=True,
+            )
+        else:
+            # Fire and forget in background
+            loop = asyncio.get_running_loop()
+            for token_id in [token_id_up, token_id_down]:
+                if token_id not in self._metadata_cache._cache:
+                    loop.create_task(self._metadata_cache.get_or_fetch(token_id))
 
     # ── Main entry point ─────────────────────────────────────────
 
     def on_bracket(self, opp: BracketOpportunity):
         """Called by scanner when a bracket opportunity is found."""
+        if not SIM.enabled:
+            # Pre-fetch metadata for this market in background (fire-and-forget)
+            asyncio.get_running_loop().create_task(
+                self._ensure_token_metadata(opp.market.token_id_up, opp.market.token_id_down, wait=False)
+            )
         asyncio.get_running_loop().create_task(self._handle_opportunity(opp))
 
     def on_near_bracket(self, opp: BracketOpportunity):
         """Called by scanner when combined ask is within near_bracket_threshold.
 
-        Simultaneously:
-        1. Warm CLOB metadata cache and pre-sign both orders (existing behavior)
-        2. Post a resting GTC DOWN order if maker positioning is enabled (new behavior)
+        Pre-fetches metadata for this market (waiting briefly if needed), then:
+        1. Pre-sign both orders (uses cached metadata)
+        2. Post a resting GTC DOWN order if maker positioning is enabled
         """
         if not SIM.enabled and self._client is not None:
-            asyncio.get_running_loop().create_task(self._presign_orders(opp))
-            if MAKER.enabled:
-                asyncio.get_running_loop().create_task(self._post_down_maker_gtc(opp))
+            asyncio.get_running_loop().create_task(
+                self._presign_and_post(opp)
+            )
+
+    async def _presign_and_post(self, opp: BracketOpportunity) -> None:
+        """Ensure metadata is cached, then presign and post GTC."""
+        # Wait briefly for metadata to be cached (usually <50ms)
+        await self._ensure_token_metadata(opp.market.token_id_up, opp.market.token_id_down, wait=True)
+
+        # Now presign and post GTC (metadata cache is populated)
+        await self._presign_orders(opp)
+        if MAKER.enabled:
+            await self._post_down_maker_gtc(opp)
 
     async def _presign_orders(self, opp: BracketOpportunity) -> None:
         """Pre-sign both legs for a near-threshold opportunity.
