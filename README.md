@@ -223,6 +223,9 @@ docker compose ps
 
 # Rebuild after code changes
 docker compose build && docker compose up -d
+
+# no cache
+docker compose build --no-cache
 ```
 
 ### Log analysis

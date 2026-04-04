@@ -40,6 +40,7 @@ async def run_bot(state: StateManager):
     redeemer = Redeemer(state)
 
     await trader.start()
+    scanner.set_client(trader._client)  # Provide client for fresh metadata fetches on bracket detection
     await redeemer.start()
 
     state.set_running(True)

@@ -79,6 +79,7 @@ class Scanner:
         self,
         on_bracket: Callable[[BracketOpportunity], None],
         on_near_bracket: Optional[Callable[[BracketOpportunity], None]] = None,
+        client=None,
     ):
         self.on_bracket = on_bracket
         self.on_near_bracket = on_near_bracket
@@ -92,8 +93,9 @@ class Scanner:
         self._last_ws_msg_at: float = 0.0
         self._metadata_cache: Optional[List[MarketInfo]] = None  # cache for market metadata
         self._metadata_cache_time: float = 0.0  # timestamp of last fresh fetch
-        self._metadata_cache_ttl: float = 30.0  # cache valid for 30 seconds (was 300s — too long)
+        self._metadata_cache_ttl: float = 10.0  # cache valid for 10 seconds (was 30s)
         self._last_http_fetch_at: float = 0.0  # timestamp of last HTTP call
+        self._client = client  # PolyClient for fetching fresh metadata on bracket detection
         self.stats = {
             "markets_tracked": 0,
             "markets_active": 0,   # subset with live WS price data on both sides
@@ -120,6 +122,14 @@ class Scanner:
         self._running = False
         if self._ws:
             await self._ws.close()
+
+    def set_client(self, client):
+        """Set the PolyClient after trader initialization."""
+        self._client = client
+
+    def invalidate_metadata_cache(self):
+        """Force next metadata fetch to be fresh (not cached)."""
+        self._metadata_cache_time = 0.0
 
     @property
     def tracked_market_count(self) -> int:
@@ -724,4 +734,6 @@ class Scanner:
             f"Sum={combined:.3f} Fillable={n_shares:.2f}sh Net=+${net:.3f} "
             f"metadata_age={metadata_age_ms:.0f}ms"
         )
+        # Invalidate metadata cache when bracket detected so trader gets fresh data
+        self.invalidate_metadata_cache()
         self.on_bracket(opp)
