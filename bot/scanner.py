@@ -34,8 +34,19 @@ class PriceState:
     """Price state for a single token (one side of a bracket)."""
     ask: float = 1.0
     bid: float = 0.0
-    ask_size: float = 0.0   # shares available at best ask
+    ask_size: float = 0.0   # shares at best ask (top-of-book, for log display)
+    ask_book: list = field(default_factory=list)  # [(price, size), ...] ascending
     last_update: float = 0.0
+
+    def depth_up_to(self, limit_price: float) -> float:
+        """Cumulative ask depth (shares) for all levels at or below limit_price.
+
+        A FOK order with this limit sweeps every resting ask ≤ limit_price, so
+        this measures the actual fillable quantity — unlike ask_size which only
+        counts the single best-ask level and under-counts on thin multi-level books.
+        Returns 0.0 when no book snapshot has been received yet.
+        """
+        return sum(size for price, size in self.ask_book if price <= limit_price)
 
 
 @dataclass
@@ -517,10 +528,22 @@ class Scanner:
         # asks are sorted ascending — asks[0] is the best (lowest) ask.
         if event.get("asks"):
             try:
-                # Asks are sorted descending (0.99 → best); asks[-1] = lowest = best ask for buyer
-                best = event["asks"][-1]
-                ps.ask      = float(best["price"])
-                ps.ask_size = float(best.get("size", 0.0))
+                # WS sends asks sorted descending (highest price first).
+                # Build a sorted-ascending book so depth_up_to() can sum cheaply.
+                levels: list = []
+                for a in event["asks"]:
+                    try:
+                        p = float(a["price"])
+                        s = float(a.get("size", 0.0))
+                        if s > 0:
+                            levels.append((p, s))
+                    except Exception:
+                        pass
+                if levels:
+                    levels.sort(key=lambda x: x[0])  # ascending by price
+                    ps.ask_book = levels
+                    ps.ask      = levels[0][0]   # best (lowest) ask
+                    ps.ask_size = levels[0][1]   # top-of-book size (for logging)
             except Exception:
                 pass
         if event.get("bids"):
@@ -571,6 +594,20 @@ class Scanner:
 
         combined = ask_up + ask_down
 
+        # Compute FOK limit prices first — needed for accurate multi-level depth
+        # calculation below and for the near-bracket presign.
+        # Limit prices are deterministic from current asks so this is cheap.
+        tick       = 0.01
+        margin     = STRATEGY.bracket_threshold - combined
+        limit_up   = round(ask_up + tick, 2)
+        limit_down = round(ask_down + max(margin - tick, 0.0) + STRATEGY.down_extra_ticks * tick, 2)
+        # Profitability cap: worst-case (both legs fill at limit) must still be profitable.
+        # CRITICAL: limit_up + limit_down MUST remain below 1.0 - fee.
+        max_limit_sum = round(1.0 - STRATEGY.taker_fee_pct - tick, 2)
+        if limit_up + limit_down > max_limit_sum:
+            limit_down = round(max_limit_sum - limit_up, 2)
+            limit_down = max(limit_down, ask_down)  # never below current ask
+
         # Near-bracket hook: when combined is between near_threshold and bracket_threshold,
         # fire on_near_bracket so the trader can pre-warm the cache and pre-sign orders
         # while prices are still moving toward the entry threshold.  Throttled to once
@@ -582,6 +619,9 @@ class Scanner:
                 self._recent_near_brackets[m.condition_id] = time.time()
                 self.stats["near_brackets_detected"] += 1
                 metadata_age_ms = (time.time() - self._metadata_cache_time) * 1000
+                # Use total visible ask depth (all levels) for near-bracket sizing.
+                nb_depth_up   = sum(s for _, s in ps_up.ask_book)   if ps_up.ask_book   else ps_up.ask_size
+                nb_depth_down = sum(s for _, s in ps_down.ask_book) if ps_down.ask_book else ps_down.ask_size
                 near_opp = BracketOpportunity(
                     market=m,
                     ask_up=ask_up,
@@ -591,12 +631,12 @@ class Scanner:
                     gross_profit_usdc=0.0,
                     net_profit_usdc=0.0,
                     detected_at=time.time(),
-                    depth_up=ps_up.ask_size,
-                    depth_down=ps_down.ask_size,
+                    depth_up=nb_depth_up,
+                    depth_down=nb_depth_down,
                     bid_up=ps_up.bid,
                     bid_down=ps_down.bid,
-                    limit_up=0.0,
-                    limit_down=0.0,
+                    limit_up=limit_up,
+                    limit_down=limit_down,
                     sim_mode=SIM.enabled,
                     metadata_age_ms=metadata_age_ms,
                 )
@@ -609,11 +649,12 @@ class Scanner:
         if combined >= STRATEGY.bracket_threshold:
             return
 
-        # Depth-first sizing: determine max shares we can actually fill.
-        # DOWN is the thin side (consensus), so it's the limiting factor.
-        # Apply 80% safety factor to account for metadata staleness.
-        depth_up   = ps_up.ask_size
-        depth_down = ps_down.ask_size
+        # Multi-level depth: count cumulative shares available up to each FOK limit price.
+        # A FOK sweeps every resting ask ≤ limit, so this directly measures actual
+        # fillable quantity.  Single-level ask_size under-counts when depth spans
+        # multiple price levels, causing phantom-depth bracket approvals.
+        depth_up   = ps_up.depth_up_to(limit_up)
+        depth_down = ps_down.depth_up_to(limit_down)
         max_fillable_down = depth_down * 0.80
 
         # UP must have comparable depth to DOWN
@@ -638,23 +679,6 @@ class Scanner:
             )
             self.stats["brackets_depth_skipped"] = self.stats.get("brackets_depth_skipped", 0) + 1
             return
-
-        # FOK limit prices: give UP exactly 1 tick of headroom; give DOWN all remaining
-        # margin plus extra ticks.  DOWN books are structurally thinner (consensus side,
-        # fewer sellers), so DOWN needs more room to sweep through additional price levels.
-        # CRITICAL: limit_up + limit_down MUST remain below 1.0 - fee, otherwise a fill
-        # at both limit prices produces a guaranteed loss (you pay > $1/share to receive
-        # $1/share at resolution).  Cap limit_down so this invariant always holds.
-        tick       = 0.01
-        margin     = STRATEGY.bracket_threshold - combined
-        limit_up   = round(ask_up + tick, 2)
-        limit_down = round(ask_down + max(margin - tick, 0.0) + STRATEGY.down_extra_ticks * tick, 2)
-        # Profitability cap: worst-case (both legs fill at limit) must still be profitable.
-        # Reserve 1 tick above fees as a buffer so we never cross into loss territory.
-        max_limit_sum = round(1.0 - STRATEGY.taker_fee_pct - tick, 2)
-        if limit_up + limit_down > max_limit_sum:
-            limit_down = round(max_limit_sum - limit_up, 2)
-            limit_down = max(limit_down, ask_down)  # never below current ask
 
         # Throttle: skip if we detected a bracket on this market recently
         last = self._recent_brackets.get(m.condition_id, 0)

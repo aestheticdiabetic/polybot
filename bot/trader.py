@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
@@ -626,6 +627,25 @@ class Trader:
                 and b.depth_down >= (shares_down * STRATEGY.parallel_depth_threshold_multiplier)
             )
 
+            # Pre-flight REST depth check — only on the parallel path where both legs
+            # fire simultaneously, making a stale-WS miss unrecoverable.  Fetches the
+            # live DOWN book (~50ms) and falls back to sequential if depth has dropped
+            # since the WS snapshot.  A -1 return (network error) keeps parallel enabled
+            # so a transient fetch failure doesn't degrade every bracket indefinitely.
+            if use_parallel:
+                fresh_depth = await self._fetch_book_depth(b.leg_down.token_id, limit_down)
+                if fresh_depth >= 0 and fresh_depth < shares_down:
+                    log.info(
+                        f"[{b.id}] Pre-flight: DOWN depth {b.depth_down:.1f} → "
+                        f"{fresh_depth:.1f}sh (need {shares_down:.2f}sh) — switching to sequential"
+                    )
+                    use_parallel = False
+                elif fresh_depth >= 0:
+                    log.debug(
+                        f"[{b.id}] Pre-flight: DOWN depth {fresh_depth:.1f}sh confirmed "
+                        f"(need {shares_down:.2f}sh) — parallel OK"
+                    )
+
             if use_parallel:
                 dn_id, dn_status, dn_err, dn_msg, up_id, up_status, up_err, up_msg = (
                     await self._submit_orders_parallel(b, signed_up, signed_dn, limit_up,
@@ -979,6 +999,38 @@ class Trader:
         asyncio.get_running_loop().create_task(self._emergency_exit(b))
         return False
 
+    async def _fetch_book_depth(self, token_id: str, limit_price: float) -> float:
+        """REST fetch of cumulative ask depth up to limit_price for token_id.
+
+        Hits GET /book?token_id=... which always returns the live order book,
+        guaranteeing freshness regardless of WS snapshot age.
+
+        Returns total fillable shares (sum of all ask levels ≤ limit_price), or
+        -1.0 on any error so the caller can fall back to cached WS depth gracefully.
+        Called only on the parallel submission path to validate DOWN book depth
+        immediately before committing both legs simultaneously (~50ms round-trip).
+        """
+        import aiohttp
+        url = f"{CLOB_HOST}/book"
+        params = {"token_id": token_id}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, params=params,
+                    timeout=aiohttp.ClientTimeout(total=2.0),
+                ) as resp:
+                    data = await resp.json()
+            asks = data.get("asks", [])
+            total = sum(
+                float(a.get("size", 0))
+                for a in asks
+                if float(a.get("price", 1.0)) <= limit_price
+            )
+            return total
+        except Exception as e:
+            log.debug(f"Book depth REST fetch failed for {token_id[:12]}: {e}")
+            return -1.0
+
     async def _emergency_exit(self, b: Bracket):
         """One leg filled, the other was FOK-cancelled.  Sell the filled leg at
         bid minus slippage buffer to exit the one-sided position.
@@ -990,6 +1042,18 @@ class Trader:
         Polymarket batches on-chain CTF token delivery, so a SELL placed in the
         same millisecond as the fill will see balance=0.  Retry up to 4 times
         with increasing waits to allow the token settlement to land.
+
+        Fix 1 — balance parsing: on "not enough balance" errors with a non-zero
+        actual balance, parse the settled token count from the error message and
+        shrink exit_shares to match.  Handles FOK sweep-fill rounding where the
+        on-chain CTF delivery is fractionally less than the nominal order size.
+
+        Fix 2 — GTC instead of FOK: a GTC sell at bid-2% immediately crosses
+        against any existing buy at or above that price (filling at the better
+        bid price), and rests on the book if no immediate match exists.  Either
+        way the position is exited — unlike FOK which simply cancels with no fill
+        when the bid has moved.  Status "live" is treated as success since the
+        order will fill independently without further intervention.
         """
         self.stats["emergency_exits_attempted"] += 1
 
@@ -1000,8 +1064,6 @@ class Trader:
         exit_price = max(exit_price, 0.01)
         # Use the ACTUAL submitted shares (after limit revalidation in _live_place),
         # not the original bracket shares which may differ.
-        # Revalidating here with a lower (exit) price could compute a larger share
-        # count than was actually filled, causing "not enough balance" errors.
         submitted_shares = b.submitted_shares_up if filled_leg is b.leg_up else b.submitted_shares_down
         exit_shares = submitted_shares if submitted_shares > 0 else _clob_valid_shares(filled_leg.shares, exit_price)
 
@@ -1027,11 +1089,15 @@ class Trader:
                         side="SELL",
                     ),
                 )
+                # Fix 2: GTC so the order crosses immediately against any resting bid,
+                # or rests on the book if no match — never silently cancels like FOK.
                 resp = await loop.run_in_executor(
                     None, self._client.post_order,
-                    signed_exit, OrderType.FOK,
+                    signed_exit, OrderType.GTC,
                 )
-                status = (resp.get("status") or "").lower() if isinstance(resp, dict) else ""
+                status   = (resp.get("status")  or "").lower() if isinstance(resp, dict) else ""
+                order_id = (resp.get("orderID") or "")          if isinstance(resp, dict) else ""
+
                 if status == "matched":
                     realised_loss = (filled_leg.price - exit_price) * exit_shares
                     log.info(
@@ -1046,30 +1112,62 @@ class Trader:
                     self.risk.close(b.market_condition_id, STRATEGY.position_size_usdc * 2)
                     self._open_brackets.pop(b.id, None)
                     return
+
+                elif status in ("live", "open"):
+                    # GTC order is resting on the book — will fill when a buyer crosses.
+                    # Release risk and cleanup now; the position resolves independently.
+                    realised_loss = (filled_leg.price - exit_price) * exit_shares
+                    log.info(
+                        f"[{b.id}] Emergency exit GTC live on book @ {exit_price:.2f} "
+                        f"(attempt {attempt}) order={order_id} | est_loss=${realised_loss:.4f}"
+                    )
+                    self.stats["emergency_exits_succeeded"] += 1
+                    b.actual_net_usdc = -realised_loss
+                    b.status = "emergency_exited"
+                    b.closed_at = time.time()
+                    self._log_trade(b, "emergency_exited")
+                    self.risk.close(b.market_condition_id, STRATEGY.position_size_usdc * 2)
+                    self._open_brackets.pop(b.id, None)
+                    return
+
                 else:
                     log.warning(
-                        f"[{b.id}] Emergency exit attempt {attempt} not matched "
-                        f"(status={status!r})"
+                        f"[{b.id}] Emergency exit attempt {attempt} unexpected status "
+                        f"(status={status!r} order={order_id})"
                     )
                     last_exc = None
+
             except Exception as e:
+                err_str = str(e)
                 log.warning(f"[{b.id}] Emergency exit attempt {attempt} failed: {e}")
+
+                # Fix 1: parse actual settled token balance from the CLOB error message.
+                # Format: "balance: 9820140, order amount: 10000000"
+                # If balance > 0 but < exit_shares, the CTF delivered fewer tokens than
+                # the nominal order size (sweep-fill rounding).  Shrink exit_shares so
+                # the next attempt sells exactly what settled, not the nominal amount.
+                if "not enough balance" in err_str.lower():
+                    m = re.search(r'balance:\s*(\d+)', err_str)
+                    if m:
+                        actual_micro = int(m.group(1))
+                        if actual_micro == 0:
+                            log.info(f"[{b.id}] Token not yet settled (balance=0) — waiting")
+                        elif actual_micro < round(exit_shares * 1_000_000):
+                            actual_shares = actual_micro / 1_000_000
+                            log.info(
+                                f"[{b.id}] Adjusting exit_shares {exit_shares:.6f} → "
+                                f"{actual_shares:.6f} (actual settled balance)"
+                            )
+                            exit_shares = _clob_valid_shares(actual_shares, exit_price)
                 last_exc = e
 
         # All attempts exhausted — position is stranded until market resolution
-        if last_exc:
-            log.error(
-                f"[{b.id}] EMERGENCY EXIT FAILED after {len(_RETRY_DELAYS)+1} attempts "
-                f"(last error: {last_exc}) — stranded {filled_leg.side} position "
-                f"({exit_shares:.2f} shares @ {filled_leg.price:.3f}). "
-                f"Will resolve at market close."
-            )
-        else:
-            log.error(
-                f"[{b.id}] EMERGENCY EXIT FAILED — no FOK match after "
-                f"{len(_RETRY_DELAYS)+1} attempts — stranded {filled_leg.side} position. "
-                f"Will resolve at market close."
-            )
+        log.error(
+            f"[{b.id}] EMERGENCY EXIT FAILED after {len(_RETRY_DELAYS)+1} attempts "
+            f"(last error: {last_exc}) — stranded {filled_leg.side} position "
+            f"({exit_shares:.2f} shares @ {filled_leg.price:.3f}). "
+            f"Will resolve at market close."
+        )
         self.stats["emergency_exits_failed"] += 1
         b.status = "stranded"
         b.closed_at = time.time()
