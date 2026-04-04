@@ -1111,6 +1111,8 @@ class Trader:
                     b.actual_net_usdc = -realised_loss
                     b.status = "emergency_exited"
                     b.closed_at = time.time()
+                    self.state.update_balance(-realised_loss)
+                    self.state.close_bracket(b.id, -realised_loss)
                     self._log_trade(b, "emergency_exited")
                     self.risk.close(b.market_condition_id, STRATEGY.position_size_usdc * 2)
                     self._open_brackets.pop(b.id, None)
@@ -1128,6 +1130,8 @@ class Trader:
                     b.actual_net_usdc = -realised_loss
                     b.status = "emergency_exited"
                     b.closed_at = time.time()
+                    self.state.update_balance(-realised_loss)
+                    self.state.close_bracket(b.id, -realised_loss)
                     self._log_trade(b, "emergency_exited")
                     self.risk.close(b.market_condition_id, STRATEGY.position_size_usdc * 2)
                     self._open_brackets.pop(b.id, None)
