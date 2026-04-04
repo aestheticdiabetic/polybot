@@ -24,6 +24,15 @@ from scanner import BracketOpportunity
 log = logging.getLogger("trader")
 
 
+def _ask_book_depth_to(ask_book: list, limit_price: float) -> float:
+    """Calculate cumulative ask depth up to a limit price from an order book snapshot.
+
+    ask_book is a list of (price, size) tuples sorted by price (ascending).
+    Returns the sum of all sizes where price <= limit_price.
+    """
+    return sum(size for price, size in ask_book if price <= limit_price)
+
+
 def _clob_valid_shares(target: float, price: float) -> float:
     """Return the largest share count ≤ target such that the CLOB maker-amount
     constraint is satisfied: floor(shares×100)/100 × price must have ≤ 2
@@ -113,6 +122,8 @@ class Bracket:
     submitted_shares_down: float = 0.0   # actual shares submitted in order (after revalidation)
     depth_up: float = 0.0   # WS-observed depth at detection time (single best-ask level)
     depth_down: float = 0.0 # WS-observed depth at detection time (single best-ask level)
+    ask_book_up: list = field(default_factory=list)  # Order book snapshot for UP token at detection
+    ask_book_down: list = field(default_factory=list)  # Order book snapshot for DOWN token at detection
 
 
 class RiskGuard:
@@ -458,6 +469,8 @@ class Trader:
         bracket.age_ms = age_ms
         bracket.depth_up   = opp.depth_up
         bracket.depth_down = opp.depth_down
+        bracket.ask_book_up = opp.ask_book_up
+        bracket.ask_book_down = opp.ask_book_down
         self.risk.open(opp.market.condition_id, total_budget)
         self._open_brackets[bracket.id] = bracket
 
@@ -551,11 +564,13 @@ class Trader:
                 signed_dn   = presigned["signed_dn"]
                 limit_up    = presigned["limit_up"]
                 limit_down  = presigned["limit_down"]
-                # Recalculate shares based on CURRENT order book depth.
+                # Recalculate shares based on CURRENT order book depth from snapshots.
                 # Presigned shares assumed certain depth; actual depth may have shrunk.
                 # Use depth-first sizing: limit to min(presigned_size, actual_fillable_depth).
-                max_fillable_down = b.depth_down * 0.80  # 80% safety margin
-                max_fillable_up   = b.depth_up * 0.80
+                current_depth_down = _ask_book_depth_to(b.ask_book_down, limit_down)
+                current_depth_up = _ask_book_depth_to(b.ask_book_up, limit_up)
+                max_fillable_down = current_depth_down * 0.80  # 80% safety margin
+                max_fillable_up   = current_depth_up * 0.80
                 # Ensure balanced depth on both sides (80% rule)
                 if max_fillable_up < max_fillable_down * 0.80:
                     # UP depth too shallow relative to DOWN — reject and re-sign fresh
@@ -621,30 +636,17 @@ class Trader:
 
             # ── Decide: parallel or sequential submission ──
 
+            # Calculate actual available depth from order book snapshots (not stale WS-at-detection time)
+            current_depth_down_check = _ask_book_depth_to(b.ask_book_down, limit_down)
+            current_depth_up_check = _ask_book_depth_to(b.ask_book_up, limit_up)
+
             use_parallel = (
                 STRATEGY.parallel_submission_enabled
-                and b.depth_up >= (shares_up * STRATEGY.parallel_depth_threshold_multiplier)
-                and b.depth_down >= (shares_down * STRATEGY.parallel_depth_threshold_multiplier)
+                and current_depth_up_check >= (shares_up * STRATEGY.parallel_depth_threshold_multiplier)
+                and current_depth_down_check >= (shares_down * STRATEGY.parallel_depth_threshold_multiplier)
             )
 
-            # Pre-flight REST depth check — only on the parallel path where both legs
-            # fire simultaneously, making a stale-WS miss unrecoverable.  Fetches the
-            # live DOWN book (~50ms) and falls back to sequential if depth has dropped
-            # since the WS snapshot.  A -1 return (network error) keeps parallel enabled
-            # so a transient fetch failure doesn't degrade every bracket indefinitely.
-            if use_parallel:
-                fresh_depth = await self._fetch_book_depth(b.leg_down.token_id, limit_down)
-                if fresh_depth >= 0 and fresh_depth < shares_down:
-                    log.info(
-                        f"[{b.id}] Pre-flight: DOWN depth {b.depth_down:.1f} → "
-                        f"{fresh_depth:.1f}sh (need {shares_down:.2f}sh) — switching to sequential"
-                    )
-                    use_parallel = False
-                elif fresh_depth >= 0:
-                    log.debug(
-                        f"[{b.id}] Pre-flight: DOWN depth {fresh_depth:.1f}sh confirmed "
-                        f"(need {shares_down:.2f}sh) — parallel OK"
-                    )
+            # No need for pre-flight REST check — we have current depth from ask_book snapshots
 
             if use_parallel:
                 dn_id, dn_status, dn_err, dn_msg, up_id, up_status, up_err, up_msg = (
@@ -873,10 +875,11 @@ class Trader:
 
         # Floor: shares worth at least min_position_size_usdc per leg
         min_shares = STRATEGY.min_position_size_usdc / ask_down if ask_down > 0 else 2.0
-        # Target: smaller of WS depth and original shares, with a 10% safety haircut
-        # to account for depth consumed since the last WS snapshot.
-        if b.depth_down > 0:
-            target = min(b.depth_down * 0.9, b.leg_down.shares)
+        # Target: smaller of current ask_book depth and original shares, with a 10% safety haircut
+        # to account for depth consumed since the snapshot.
+        current_down_depth = _ask_book_depth_to(b.ask_book_down, limit_down)
+        if current_down_depth > 0:
+            target = min(current_down_depth * 0.9, b.leg_down.shares)
         else:
             target = b.leg_down.shares * 0.5   # no depth data — try half
 

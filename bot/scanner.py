@@ -72,6 +72,8 @@ class BracketOpportunity:
     limit_down: float = 0.0
     sim_mode: bool = False
     metadata_age_ms: float = 0.0  # age of market metadata used in detection (cache vs. fresh)
+    ask_book_up: list = field(default_factory=list)  # Full order book for UP token [(price, size), ...]
+    ask_book_down: list = field(default_factory=list)  # Full order book for DOWN token [(price, size), ...]
 
 
 class Scanner:
@@ -92,7 +94,7 @@ class Scanner:
         self._ws = None
         self._last_ws_msg_at: float = 0.0
         self._metadata_cache: Optional[List[MarketInfo]] = None  # cache for market metadata
-        self._metadata_cache_time: float = 0.0  # timestamp of last fresh fetch
+        self._metadata_cache_time: float = time.time()  # Initialize to now to avoid stale metadata_age before first fetch
         self._metadata_cache_ttl: float = 10.0  # cache valid for 10 seconds (was 30s)
         self._last_http_fetch_at: float = 0.0  # timestamp of last HTTP call
         self._client = client  # PolyClient for fetching fresh metadata on bracket detection
@@ -649,6 +651,8 @@ class Scanner:
                     limit_down=limit_down,
                     sim_mode=SIM.enabled,
                     metadata_age_ms=metadata_age_ms,
+                    ask_book_up=ps_up.ask_book.copy() if ps_up.ask_book else [],
+                    ask_book_down=ps_down.ask_book.copy() if ps_down.ask_book else [],
                 )
                 log.debug(
                     f"NEAR_BRACKET {m.asset} {m.window} | "
@@ -725,6 +729,8 @@ class Scanner:
             limit_down=limit_down,
             sim_mode=SIM.enabled,
             metadata_age_ms=metadata_age_ms,
+            ask_book_up=ps_up.ask_book.copy() if ps_up.ask_book else [],
+            ask_book_down=ps_down.ask_book.copy() if ps_down.ask_book else [],
         )
 
         log.info(
