@@ -522,13 +522,14 @@ class Trader:
             shares_up   = _clob_valid_shares(b.leg_up.shares,   limit_up)
             shares_down = _clob_valid_shares(b.leg_down.shares, limit_down)
 
-            # Use pre-signed orders if available, fresh (< 55s), and still valid
+            # Use pre-signed orders if available, fresh (< 8s), and still valid
             # (current ask hasn't risen above the pre-signed limit on either leg).
-            # 55s TTL covers the typical gap between near-bracket and real bracket.
-            # This skips ~12ms of signing and, crucially, avoids any thread-pool
-            # contention — the critical path becomes a single POST call.
+            # Presigned limit prices remain valid across depth changes; however, presigned
+            # shares were calculated with budget-first sizing and may exceed current depth.
+            # Recalculate shares based on actual depth at submission time (depth-first).
             presigned = self._presigned.pop(b.market_condition_id, None)
             used_presigned = False
+            presigned_depth_rejected = False
             # Presigned orders expire after 8 seconds. Beyond that, prices have moved
             # too much and the precomputed limits are invalid. Force fresh signing.
             if (presigned is not None
@@ -539,13 +540,33 @@ class Trader:
                 signed_dn   = presigned["signed_dn"]
                 limit_up    = presigned["limit_up"]
                 limit_down  = presigned["limit_down"]
-                shares_up   = presigned["shares_up"]
-                shares_down = presigned["shares_dn"]
-                used_presigned = True
-                log.info(f"[{b.id}] Using pre-signed orders "
-                         f"(age={(time.time()-presigned['ts'])*1000:.0f}ms)")
-            else:
-                if presigned is not None:
+                # Recalculate shares based on CURRENT order book depth.
+                # Presigned shares assumed certain depth; actual depth may have shrunk.
+                # Use depth-first sizing: limit to min(presigned_size, actual_fillable_depth).
+                max_fillable_down = b.depth_down * 0.80  # 80% safety margin
+                max_fillable_up   = b.depth_up * 0.80
+                # Ensure balanced depth on both sides (80% rule)
+                if max_fillable_up < max_fillable_down * 0.80:
+                    # UP depth too shallow relative to DOWN — reject and re-sign fresh
+                    presigned_depth_rejected = True
+                    presigned = None
+                else:
+                    shares_up   = _clob_valid_shares(min(presigned["shares_up"], max_fillable_up), limit_up)
+                    shares_down = _clob_valid_shares(min(presigned["shares_dn"], max_fillable_down), limit_down)
+                    used_presigned = True
+                    presign_age = (time.time() - presigned['ts']) * 1000
+                    log.info(f"[{b.id}] Using pre-signed orders (age={presign_age:.0f}ms) "
+                             f"| shares resized for current depth: up={shares_up:.2f} (was {presigned['shares_up']:.2f}), "
+                             f"dn={shares_down:.2f} (was {presigned['shares_dn']:.2f})")
+            if not used_presigned:
+                # Presigned was either not available, expired, price-changed, or rejected due to depth
+                if presigned_depth_rejected:
+                    log.info(
+                        f"[{b.id}] Pre-signed depth-rejected — signing fresh "
+                        f"(up={b.depth_up:.1f} insufficient vs down={b.depth_down:.1f})"
+                    )
+                elif presigned is not None:
+                    # Presigned failed outer validation (expired or price changed)
                     log.info(
                         f"[{b.id}] Pre-signed stale/invalid — signing fresh "
                         f"(age={(time.time()-presigned['ts'])*1000:.0f}ms "
@@ -554,7 +575,7 @@ class Trader:
                     )
                 else:
                     log.debug(
-                        f"[{b.id}] No presign for this condition — signing fresh "
+                        f"[{b.id}] No presign — signing fresh "
                         f"(near-bracket fired on a different {b.asset} {b.window} window)"
                     )
                 # Sign both orders concurrently (ECDSA crypto, pure CPU, no I/O)
