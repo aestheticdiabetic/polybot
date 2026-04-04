@@ -5,7 +5,9 @@
       "Bash(python -c ':*)",
       "Bash(git add:*)",
       "Bash(git commit -m ':*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Read(//c/Users/Angus/.vscode/predictionbot/venv/Lib/site-packages/py_clob_client/order_builder/**)",
+      "Read(//c/Users/Angus/.vscode/predictionbot/venv/Lib/site-packages/py_clob_client/**)"
     ]
   }
 }

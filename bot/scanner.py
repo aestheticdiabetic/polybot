@@ -27,6 +27,8 @@ class MarketInfo:
     window: str       # "5M", "15M", "1H"
     asset: str        # "ETH", "BTC"
     end_time: float   # unix timestamp
+    neg_risk: bool = False   # from Gamma API negRisk field
+    tick_size: str = "0.01"  # from Gamma API orderPriceMinTickSize field
 
 
 @dataclass
@@ -343,6 +345,9 @@ class Scanner:
                 except Exception:
                     pass
 
+            neg_risk = bool(market.get("negRisk", False))
+            tick_size = str(market.get("orderPriceMinTickSize", 0.01))
+
             return MarketInfo(
                 token_id_up=token_up,
                 token_id_down=token_down,
@@ -351,6 +356,8 @@ class Scanner:
                 window=window,
                 asset=asset,
                 end_time=end_time,
+                neg_risk=neg_risk,
+                tick_size=tick_size,
             )
         except Exception as e:
             log.debug(f"Market parse error: {e}")

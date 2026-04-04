@@ -29,20 +29,12 @@ class TokenMetadataCache:
 
     Fetches metadata once at startup and on first encounter with new tokens.
     Prevents repeated REST calls for the same token metadata.
-    A semaphore caps concurrent REST fetches to avoid rate-limiting (429).
     """
-    _MAX_CONCURRENT_FETCHES = 8
 
     def __init__(self, client):
         self._client = client
         self._cache: Dict[str, dict] = {}  # token_id -> {tick_size, fee_rate_bps, neg_risk}
         self._fetching: Dict[str, asyncio.Task] = {}  # in-flight fetches to deduplicate
-        self._sem: Optional[asyncio.Semaphore] = None  # initialised on first use (needs running loop)
-
-    def _get_sem(self) -> asyncio.Semaphore:
-        if self._sem is None:
-            self._sem = asyncio.Semaphore(self._MAX_CONCURRENT_FETCHES)
-        return self._sem
 
     async def get_or_fetch(self, token_id: str) -> Optional[dict]:
         """Get metadata for a token, fetching if not cached.
@@ -75,24 +67,23 @@ class TokenMetadataCache:
         return self._cache.get(token_id)
 
     async def _fetch_metadata(self, token_id: str) -> None:
-        """Fetch tick-size, fee-rate, neg-risk for a token (rate-limited by semaphore)."""
+        """Fetch tick-size, fee-rate, neg-risk for a token."""
         loop = asyncio.get_running_loop()
-        async with self._get_sem():
-            try:
-                tick_size, fee_rate_bps, neg_risk = await asyncio.gather(
-                    loop.run_in_executor(None, self._client.get_tick_size, token_id),
-                    loop.run_in_executor(None, self._client.get_fee_rate_bps, token_id),
-                    loop.run_in_executor(None, self._client.get_neg_risk, token_id),
-                    return_exceptions=False,
-                )
-                self._cache[token_id] = {
-                    "tick_size": tick_size,
-                    "fee_rate_bps": fee_rate_bps,
-                    "neg_risk": neg_risk,
-                }
-                log.debug(f"[METADATA] Cached {token_id[:16]}…: tick={tick_size}, fee={fee_rate_bps}bps, neg_risk={neg_risk}")
-            except Exception as e:
-                log.warning(f"[METADATA] Failed to fetch {token_id[:16]}…: {e}")
+        try:
+            tick_size, fee_rate_bps, neg_risk = await asyncio.gather(
+                loop.run_in_executor(None, self._client.get_tick_size, token_id),
+                loop.run_in_executor(None, self._client.get_fee_rate_bps, token_id),
+                loop.run_in_executor(None, self._client.get_neg_risk, token_id),
+                return_exceptions=False,
+            )
+            self._cache[token_id] = {
+                "tick_size": tick_size,
+                "fee_rate_bps": fee_rate_bps,
+                "neg_risk": neg_risk,
+            }
+            log.debug(f"[METADATA] Cached {token_id[:16]}…: tick={tick_size}, fee={fee_rate_bps}bps, neg_risk={neg_risk}")
+        except Exception as e:
+            log.warning(f"[METADATA] Failed to fetch {token_id[:16]}…: {e}")
 
 
 def _ask_book_depth_to(ask_book: list, limit_price: float) -> float:
@@ -282,8 +273,6 @@ class Trader:
     async def start(self):
         if not SIM.enabled:
             await self._init_client()
-            # Pre-warm metadata cache with all known tokens
-            await self._prewarm_metadata_cache()
         log.info(f"Trader started — {'SIMULATION' if SIM.enabled else 'LIVE'} mode")
         if not SIM.enabled and MAKER.enabled:
             asyncio.get_running_loop().create_task(self._cleanup_down_gtc())
@@ -359,23 +348,20 @@ class Trader:
     def on_new_markets(self, markets) -> None:
         """Called by scanner when new markets are discovered.
 
-        Kick off background metadata pre-warming so token metadata is cached
-        before any bracket can fire for these markets.
+        Populates the metadata cache synchronously from Gamma API data already
+        embedded in MarketInfo — zero REST calls required.
         """
         if self._metadata_cache is None:
             return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
+        count = 0
         for m in markets:
+            entry = {"tick_size": m.tick_size, "fee_rate_bps": 0, "neg_risk": m.neg_risk}
             for token_id in (m.token_id_up, m.token_id_down):
                 if token_id not in self._metadata_cache._cache:
-                    loop.create_task(self._metadata_cache.get_or_fetch(token_id))
-
-    async def _prewarm_metadata_cache(self) -> None:
-        """No-op: metadata is warmed via on_new_markets when the scanner discovers markets."""
-        log.info("[METADATA] Cache initialized, will populate as markets are discovered")
+                    self._metadata_cache._cache[token_id] = entry
+                    count += 1
+        if count:
+            log.debug(f"[METADATA] Pre-populated {count} tokens from Gamma API data (0 REST calls)")
 
     async def _ensure_token_metadata(self, token_id_up: str, token_id_down: str, wait: bool = False) -> None:
         """Fetch and cache metadata for token pair if not already cached.
