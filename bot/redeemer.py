@@ -6,6 +6,7 @@ redeems winning shares back to USDC.
 import asyncio
 import json
 import logging
+import os
 import time
 from typing import Dict, Set
 from aiohttp import web
@@ -21,11 +22,14 @@ CTF_CONTRACT = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 # PositionSettled event topic
 POSITION_SETTLED_TOPIC = "0x1f99a5a5c09e05db7e498f1d73d29ee06aa1c7462db9946b36a0e2e6e9f46e62"
 
+# Persist redeemed set across restarts so we never re-submit gas for old positions
+REDEEMED_LOG = "/app/logs/redeemed.json"
+
 
 class Redeemer:
     def __init__(self, state_manager):
         self.state = state_manager
-        self._redeemed: Set[str] = set()   # condition_ids already redeemed
+        self._redeemed: Set[str] = self._load_redeemed()
         self._web3 = None
         self._app = None
         self.stats = {
@@ -34,6 +38,28 @@ class Redeemer:
             "usdc_redeemed": 0.0,
             "gas_spent_usdc": 0.0,
         }
+
+    def _load_redeemed(self) -> Set[str]:
+        """Load persisted set of already-redeemed condition IDs."""
+        try:
+            if os.path.exists(REDEEMED_LOG):
+                with open(REDEEMED_LOG, "r") as f:
+                    data = json.load(f)
+                loaded = set(data)
+                log.info(f"Loaded {len(loaded)} previously redeemed condition IDs from disk")
+                return loaded
+        except Exception as e:
+            log.warning(f"Could not load redeemed log: {e}")
+        return set()
+
+    def _save_redeemed(self):
+        """Persist the redeemed set so restarts don't re-submit old positions."""
+        try:
+            os.makedirs(os.path.dirname(REDEEMED_LOG), exist_ok=True)
+            with open(REDEEMED_LOG, "w") as f:
+                json.dump(list(self._redeemed), f)
+        except Exception as e:
+            log.warning(f"Could not save redeemed log: {e}")
 
     async def start(self):
         if SIM.enabled:
@@ -120,9 +146,20 @@ class Redeemer:
 
                 for pos in (positions or []):
                     cid = pos.get("conditionId")
-                    if cid and pos.get("redeemable") and cid not in self._redeemed:
-                        log.info(f"Redeemable position found (poll): {pos.get('title', cid)}")
-                        await self._redeem(cid)
+                    if not cid or cid in self._redeemed:
+                        continue
+                    if not pos.get("redeemable"):
+                        continue
+                    # Skip zero-share losers — no USDC to recover, gas is wasted
+                    size = float(pos.get("size", 0) or 0)
+                    if size == 0:
+                        log.debug(f"Skipping zero-share position {cid} — nothing to redeem")
+                        # Mark as handled so we never check it again
+                        self._redeemed.add(cid)
+                        self._save_redeemed()
+                        continue
+                    log.info(f"Redeemable position found (poll): {pos.get('title', cid)} size={size}")
+                    await self._redeem(cid)
             except Exception as e:
                 log.debug(f"Poll error: {e}")
             await asyncio.sleep(30)
@@ -133,11 +170,16 @@ class Redeemer:
         """Call redeemPositions on the CTF contract."""
         if condition_id in self._redeemed:
             return
-        self._redeemed.add(condition_id)
 
         if not self._web3:
+            # Don't mark as redeemed — web3 wasn't ready, safe to retry later
             log.warning(f"Cannot redeem {condition_id} — web3 not initialised")
             return
+
+        # Mark as redeemed BEFORE submitting to prevent duplicate submissions
+        # across restarts. Even a failed/0-return tx means the position is settled.
+        self._redeemed.add(condition_id)
+        self._save_redeemed()
 
         try:
             success, amount = await asyncio.get_event_loop().run_in_executor(
@@ -152,10 +194,13 @@ class Redeemer:
                 await asyncio.sleep(2)
             else:
                 self.stats["redemptions_failed"] += 1
-                self._redeemed.discard(condition_id)  # allow retry
+                # Do NOT discard — tx was submitted, position is settled on-chain.
+                # Re-submitting would just waste more gas.
+                log.warning(f"Redemption tx failed for {condition_id} — skipping retry to save gas")
         except Exception as e:
             log.error(f"Redemption error for {condition_id}: {e}")
-            self._redeemed.discard(condition_id)
+            # Do NOT discard from _redeemed — the tx may have been broadcast.
+            # Operator should investigate rather than auto-retry.
 
     def _do_redeem_tx(self, condition_id: str) -> tuple[bool, float]:
         """
