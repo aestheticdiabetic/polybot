@@ -724,28 +724,36 @@ class Trader:
         is ~5-10ms (versus ~0ms with sequential). Only attempted when order book depth
         is sufficient (>= 150% of requested shares on each side).
         """
-        try:
-            resp_dn, resp_up = await asyncio.gather(
-                loop.run_in_executor(
-                    None, self._client.post_order,
-                    signed_dn, order_type, False
-                ),
-                loop.run_in_executor(
-                    None, self._client.post_order,
-                    signed_up, order_type, False
-                ),
-            )
-            dn_id, dn_status, dn_err, dn_msg = _parse(resp_dn)
-            up_id, up_status, up_err, up_msg = _parse(resp_up)
-            return dn_id, dn_status, dn_err, dn_msg, up_id, up_status, up_err, up_msg
+        resp_dn, resp_up = await asyncio.gather(
+            loop.run_in_executor(
+                None, self._client.post_order,
+                signed_dn, order_type, False
+            ),
+            loop.run_in_executor(
+                None, self._client.post_order,
+                signed_up, order_type, False
+            ),
+            return_exceptions=True,
+        )
 
-        except Exception as e:
-            # One or both requests threw (unlikely for authenticated requests, but handle it)
+        if isinstance(resp_dn, Exception):
+            dn_id, dn_status, dn_err, dn_msg = "", "cancelled", "exception", str(resp_dn)
+        else:
+            dn_id, dn_status, dn_err, dn_msg = _parse(resp_dn)
+
+        if isinstance(resp_up, Exception):
+            up_id, up_status, up_err, up_msg = "", "cancelled", "exception", str(resp_up)
+        else:
+            up_id, up_status, up_err, up_msg = _parse(resp_up)
+
+        if isinstance(resp_dn, Exception) or isinstance(resp_up, Exception):
             log.warning(
-                f"[{b.id}] Parallel submission exception — falling back to assume no fills | {e}"
+                f"[{b.id}] Parallel submission: one or both legs raised exception | "
+                f"dn={resp_dn if isinstance(resp_dn, Exception) else dn_status} "
+                f"up={resp_up if isinstance(resp_up, Exception) else up_status}"
             )
-            # Treat as no fills (safest assumption — don't guess which one failed)
-            return "", "cancelled", "", str(e), "", "cancelled", "", str(e)
+
+        return dn_id, dn_status, dn_err, dn_msg, up_id, up_status, up_err, up_msg
 
     async def _submit_orders_sequential(
         self, b: Bracket, signed_up, signed_dn, limit_up: float, limit_down: float,
