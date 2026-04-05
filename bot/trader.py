@@ -419,12 +419,26 @@ class Trader:
 
     def on_bracket(self, opp: BracketOpportunity):
         """Called by scanner when a bracket opportunity is found."""
-        if not SIM.enabled:
+        loop = asyncio.get_running_loop()
+        if not SIM.enabled and self._client is not None:
             # Pre-fetch metadata for this market in background (fire-and-forget)
-            asyncio.get_running_loop().create_task(
+            loop.create_task(
                 self._ensure_token_metadata(opp.market.token_id_up, opp.market.token_id_down, wait=False)
             )
-        asyncio.get_running_loop().create_task(self._handle_opportunity(opp))
+            # Proactively refresh a stale or missing presign in the background.
+            # Once combined drops below bracket_threshold the scanner stops firing
+            # on_near_bracket, so presigns age out silently.  Re-signing here means
+            # the NEXT bracket detection (seconds later) has a valid presign ready,
+            # avoiding a fresh-sign delay on the critical path.
+            existing = self._presigned.get(opp.market.condition_id)
+            presign_stale = (
+                existing is None
+                or time.time() - existing["ts"] > 5.0
+                or opp.ask_down > existing.get("limit_down", 0.0)
+            )
+            if presign_stale:
+                loop.create_task(self._presign_and_post(opp))
+        loop.create_task(self._handle_opportunity(opp))
 
     def on_near_bracket(self, opp: BracketOpportunity):
         """Called by scanner when combined ask is within near_bracket_threshold.
@@ -449,15 +463,20 @@ class Trader:
             await self._post_down_maker_gtc(opp)
 
     async def _presign_orders(self, opp: BracketOpportunity) -> None:
-        """Pre-sign both legs for a near-threshold opportunity.
+        """Pre-sign both legs for this market opportunity.
+
+        Called from two contexts:
+          - on_near_bracket: proactive warm-up while prices approach threshold
+          - on_bracket: background refresh when the presign has aged out while
+            combined was already below bracket_threshold (scanner stops firing
+            on_near_bracket in that zone, so presigns silently expire)
 
         Pre-signed orders are stored in _presigned[condition_id] and consumed by
-        _live_place when the real threshold is crossed.  They expire after 8s because
-        prices move significantly beyond that window, making precomputed limits invalid.
+        _live_place at submission time.  The inner guard returns early if a fresh,
+        price-valid presign already exists (< 10s old, asks within limits).
 
-        Limit prices are set 1 tick above the near-threshold ask so the signed
-        orders remain valid even if prices drift slightly upward before the actual
-        threshold crossing.  FOK still executes at the real market price (≤ limit).
+        Limit prices incorporate margin from the current spread so the signed orders
+        sweep all available depth up to the profitability cap.
         """
         cid = opp.market.condition_id
 
