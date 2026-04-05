@@ -94,6 +94,7 @@ class Scanner:
         self._market_added_at: Dict[str, float] = {}       # condition_id → unix ts added
         self._recent_brackets: Dict[str, float] = {}       # condition_id → last bracket ts
         self._recent_near_brackets: Dict[str, float] = {}  # condition_id → last near-bracket ts
+        self._recent_near_bracket_ask_dn: Dict[str, float] = {}  # condition_id → ask_down at last near-bracket fire
         self._running = False
         self._ws = None
         self._last_ws_msg_at: float = 0.0
@@ -640,13 +641,18 @@ class Scanner:
 
         # Near-bracket hook: when combined is between near_threshold and bracket_threshold,
         # fire on_near_bracket so the trader can pre-warm the cache and pre-sign orders
-        # while prices are still moving toward the entry threshold.  Throttled to once
-        # per 5s per market so we don't flood the thread pool.
+        # while prices are still moving toward the entry threshold.  Base throttle is 1s,
+        # but we bypass it immediately when DOWN ask has risen >2 ticks since the last
+        # presign — this ensures a stale presign gets refreshed before the bracket fires
+        # rather than forcing expensive fresh signing on the critical path.
         if (self.on_near_bracket is not None and
                 STRATEGY.bracket_threshold <= combined < STRATEGY.near_bracket_threshold):
             last_near = self._recent_near_brackets.get(m.condition_id, 0)
-            if time.time() - last_near > 5.0:
+            last_ask_dn = self._recent_near_bracket_ask_dn.get(m.condition_id, 0.0)
+            down_moved_past_limit = ask_down > last_ask_dn + 2 * 0.01
+            if time.time() - last_near > 1.0 or down_moved_past_limit:
                 self._recent_near_brackets[m.condition_id] = time.time()
+                self._recent_near_bracket_ask_dn[m.condition_id] = ask_down
                 self.stats["near_brackets_detected"] += 1
                 # Age of WS book data: time since the last WS update on either side
                 metadata_age_ms = max(time.time() - ps_up.last_update, time.time() - ps_down.last_update) * 1000
@@ -673,10 +679,16 @@ class Scanner:
                     ask_book_up=ps_up.ask_book.copy() if ps_up.ask_book else [],
                     ask_book_down=ps_down.ask_book.copy() if ps_down.ask_book else [],
                 )
-                log.debug(
-                    f"NEAR_BRACKET {m.asset} {m.window} | "
-                    f"combined={combined:.3f} | book_age={metadata_age_ms:.0f}ms"
-                )
+                if down_moved_past_limit:
+                    log.debug(
+                        f"NEAR_BRACKET {m.asset} {m.window} [DN_MOVED +{ask_down - last_ask_dn:.2f}] | "
+                        f"combined={combined:.3f} | book_age={metadata_age_ms:.0f}ms"
+                    )
+                else:
+                    log.debug(
+                        f"NEAR_BRACKET {m.asset} {m.window} | "
+                        f"combined={combined:.3f} | book_age={metadata_age_ms:.0f}ms"
+                    )
                 self.on_near_bracket(near_opp)
 
         if combined >= STRATEGY.bracket_threshold:
