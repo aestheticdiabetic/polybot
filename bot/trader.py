@@ -329,11 +329,18 @@ class Trader:
             return original_tick_size(token_id)
 
         def get_fee_rate_bps_cached(token_id: str) -> int:
-            """Return cached fee-rate or fetch synchronously as fallback."""
+            """Return cached fee-rate, or fetch via REST and write back to cache."""
             cached = self._metadata_cache._cache.get(token_id)
             if cached is not None and "fee_rate_bps" in cached:
                 return cached["fee_rate_bps"]
-            return original_fee_rate(token_id)
+            result = original_fee_rate(token_id)
+            # Write back so subsequent calls are served from our cache (no REST)
+            if token_id in self._metadata_cache._cache:
+                self._metadata_cache._cache[token_id]["fee_rate_bps"] = result
+            else:
+                self._metadata_cache._cache[token_id] = {"fee_rate_bps": result}
+            log.debug(f"[METADATA] fee_rate_bps={result} fetched and cached for {token_id[:16]}…")
+            return result
 
         def get_neg_risk_cached(token_id: str) -> dict:
             """Return cached neg-risk or fetch synchronously as fallback."""
@@ -361,13 +368,16 @@ class Trader:
             return
         count = 0
         for m in markets:
-            entry = {"tick_size": m.tick_size, "fee_rate_bps": 0, "neg_risk": m.neg_risk}
+            # fee_rate_bps intentionally omitted: Gamma API does not reliably expose
+            # the CLOB taker fee. The monkey-patched get_fee_rate_bps will fetch it
+            # via REST on first use and write it back here so subsequent calls are cached.
+            entry = {"tick_size": m.tick_size, "neg_risk": m.neg_risk}
             for token_id in (m.token_id_up, m.token_id_down):
                 if token_id not in self._metadata_cache._cache:
                     self._metadata_cache._cache[token_id] = entry
                     count += 1
         if count:
-            log.debug(f"[METADATA] Pre-populated {count} tokens from Gamma API data (0 REST calls)")
+            log.debug(f"[METADATA] Pre-populated {count} tokens (tick_size+neg_risk) from Gamma API (0 REST calls)")
 
     async def _ensure_token_metadata(self, token_id_up: str, token_id_down: str, wait: bool = False) -> None:
         """Fetch and cache metadata for token pair if not already cached.
