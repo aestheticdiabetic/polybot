@@ -137,6 +137,10 @@ class Scanner:
         """Force next metadata fetch to be fresh (not cached)."""
         self._metadata_cache_time = 0.0
 
+    def get_price_state(self, token_id: str) -> Optional[PriceState]:
+        """Return the live WS price state for a token (updated continuously by WS)."""
+        return self._prices.get(token_id)
+
     @property
     def tracked_market_count(self) -> int:
         return len(self._markets)
@@ -644,7 +648,8 @@ class Scanner:
             if time.time() - last_near > 5.0:
                 self._recent_near_brackets[m.condition_id] = time.time()
                 self.stats["near_brackets_detected"] += 1
-                metadata_age_ms = (time.time() - self._metadata_cache_time) * 1000
+                # Age of WS book data: time since the last WS update on either side
+                metadata_age_ms = max(time.time() - ps_up.last_update, time.time() - ps_down.last_update) * 1000
                 # Use total visible ask depth (all levels) for near-bracket sizing.
                 nb_depth_up   = sum(s for _, s in ps_up.ask_book)   if ps_up.ask_book   else ps_up.ask_size
                 nb_depth_down = sum(s for _, s in ps_down.ask_book) if ps_down.ask_book else ps_down.ask_size
@@ -670,7 +675,7 @@ class Scanner:
                 )
                 log.debug(
                     f"NEAR_BRACKET {m.asset} {m.window} | "
-                    f"combined={combined:.3f} | metadata_age={metadata_age_ms:.0f}ms"
+                    f"combined={combined:.3f} | book_age={metadata_age_ms:.0f}ms"
                 )
                 self.on_near_bracket(near_opp)
 
@@ -724,7 +729,8 @@ class Scanner:
         fee   = actual_spend * STRATEGY.taker_fee_pct
         gas   = STRATEGY.gas_fee_live_usdc
         net   = gross - fee - gas
-        metadata_age_ms = (time.time() - self._metadata_cache_time) * 1000
+        # Age of WS book data: time since the last WS update on either side
+        metadata_age_ms = max(time.time() - ps_up.last_update, time.time() - ps_down.last_update) * 1000
 
         opp = BracketOpportunity(
             market=m,
@@ -752,7 +758,7 @@ class Scanner:
             f"Up={ask_up:.3f}({depth_up:.1f}) lim={limit_up:.3f} "
             f"Down={ask_down:.3f}({depth_down:.1f}) lim={limit_down:.3f} "
             f"Sum={combined:.3f} Fillable={n_shares:.2f}sh Net=+${net:.3f} "
-            f"metadata_age={metadata_age_ms:.0f}ms"
+            f"book_age={metadata_age_ms:.0f}ms"
         )
         # Invalidate metadata cache when bracket detected so trader gets fresh data
         self.invalidate_metadata_cache()

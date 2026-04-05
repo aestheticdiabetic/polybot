@@ -41,6 +41,7 @@ async def run_bot(state: StateManager):
 
     await trader.start()
     scanner.set_client(trader._client)  # Provide client for fresh metadata fetches on bracket detection
+    trader.set_scanner(scanner)         # Provide live WS price state for order book refresh at submission
     await redeemer.start()
 
     state.set_running(True)

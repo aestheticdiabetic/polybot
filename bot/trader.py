@@ -254,6 +254,7 @@ class Trader:
         # Resting DOWN GTC orders posted by maker positioning, keyed by condition_id
         # Value: {order_id, shares, limit_down_maker, posted_at}
         self._pending_down_gtc: Dict[str, dict] = {}
+        self._scanner = None  # set via set_scanner() after scanner is created
         self.stats = {
             "brackets_attempted": 0,
             "brackets_stale_skipped": 0,
@@ -346,6 +347,10 @@ class Trader:
 
         log.info("Client metadata methods patched to use cache")
 
+    def set_scanner(self, scanner) -> None:
+        """Set scanner reference for live WS price state lookups at order submission."""
+        self._scanner = scanner
+
     def on_new_markets(self, markets) -> None:
         """Called by scanner when new markets are discovered.
 
@@ -356,7 +361,7 @@ class Trader:
             return
         count = 0
         for m in markets:
-            entry = {"tick_size": m.tick_size, "neg_risk": m.neg_risk}
+            entry = {"tick_size": m.tick_size, "fee_rate_bps": 0, "neg_risk": m.neg_risk}
             for token_id in (m.token_id_up, m.token_id_down):
                 if token_id not in self._metadata_cache._cache:
                     self._metadata_cache._cache[token_id] = entry
@@ -506,7 +511,7 @@ class Trader:
             log.info(
                 f"[PRESIGN] {opp.market.asset} {opp.market.window} ready | "
                 f"lim_up={limit_up:.3f} lim_dn={limit_down:.3f} sh={shares_up}/{shares_dn} | "
-                f"metadata_age={opp.metadata_age_ms:.0f}ms"
+                f"book_age={opp.metadata_age_ms:.0f}ms"
             )
         except Exception as e:
             log.debug(f"[PRESIGN] {opp.market.asset} {opp.market.window} error: {e}")
@@ -744,6 +749,18 @@ class Trader:
             order_type = (
                 OrderType.FOK if STRATEGY.order_type == "FOK" else OrderType.GTC
             )
+
+            # Refresh order book snapshots from live WS data before any depth calculations.
+            # The snapshots in b.ask_book_up/down were captured at detection time; by the
+            # time we reach here they may be stale. Scanner._prices is updated continuously
+            # by the WS — pull the latest copy so depth checks reflect current liquidity.
+            if self._scanner is not None:
+                live_up = self._scanner.get_price_state(b.leg_up.token_id)
+                live_dn = self._scanner.get_price_state(b.leg_down.token_id)
+                if live_up is not None and live_up.ask_book:
+                    b.ask_book_up = live_up.ask_book.copy()
+                if live_dn is not None and live_dn.ask_book:
+                    b.ask_book_down = live_dn.ask_book.copy()
 
             # Use limit prices (not just best ask) so the FOK can sweep through
             # multiple price levels up to the max profitable price.
