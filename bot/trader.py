@@ -329,8 +329,9 @@ class Trader:
 
         def get_fee_rate_bps_cached(token_id: str) -> int:
             """Return cached fee-rate or fetch synchronously as fallback."""
-            if token_id in self._metadata_cache._cache:
-                return self._metadata_cache._cache[token_id]["fee_rate_bps"]
+            cached = self._metadata_cache._cache.get(token_id)
+            if cached is not None and "fee_rate_bps" in cached:
+                return cached["fee_rate_bps"]
             return original_fee_rate(token_id)
 
         def get_neg_risk_cached(token_id: str) -> dict:
@@ -355,7 +356,7 @@ class Trader:
             return
         count = 0
         for m in markets:
-            entry = {"tick_size": m.tick_size, "fee_rate_bps": 0, "neg_risk": m.neg_risk}
+            entry = {"tick_size": m.tick_size, "neg_risk": m.neg_risk}
             for token_id in (m.token_id_up, m.token_id_down):
                 if token_id not in self._metadata_cache._cache:
                     self._metadata_cache._cache[token_id] = entry
