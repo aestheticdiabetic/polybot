@@ -3,6 +3,7 @@ trader.py — Order placement, position tracking, and risk controls.
 Handles both live trading and simulation mode.
 """
 import asyncio
+import concurrent.futures
 import json
 import logging
 import math
@@ -255,6 +256,12 @@ class Trader:
         # Value: {order_id, shares, limit_down_maker, posted_at}
         self._pending_down_gtc: Dict[str, dict] = {}
         self._scanner = None  # set via set_scanner() after scanner is created
+        # Dedicated thread pool for critical-path signing (create_order + post_order).
+        # Isolated from the default executor so background presigning/metadata fetches
+        # never queue-starve bracket submissions.  2 workers: enough for parallel legs.
+        self._sign_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="sign-"
+        )
         self.stats = {
             "brackets_attempted": 0,
             "brackets_stale_skipped": 0,
@@ -367,17 +374,20 @@ class Trader:
         if self._metadata_cache is None:
             return
         count = 0
+        default_fee_bps = int(STRATEGY.taker_fee_pct * 10000)  # 0.01 → 100 bps
         for m in markets:
-            # fee_rate_bps intentionally omitted: Gamma API does not reliably expose
-            # the CLOB taker fee. The monkey-patched get_fee_rate_bps will fetch it
-            # via REST on first use and write it back here so subsequent calls are cached.
-            entry = {"tick_size": m.tick_size, "neg_risk": m.neg_risk}
+            # Seed fee_rate_bps with the strategy default (e.g. 100bps for 1% fee).
+            # Gamma API doesn't reliably expose CLOB fee, but seeding prevents a
+            # synchronous REST fallback on the critical path for markets that skip
+            # the near-bracket zone.  The monkey-patched get_fee_rate_bps will
+            # overwrite this on first real use if the market's actual fee differs.
+            entry = {"tick_size": m.tick_size, "neg_risk": m.neg_risk, "fee_rate_bps": default_fee_bps}
             for token_id in (m.token_id_up, m.token_id_down):
                 if token_id not in self._metadata_cache._cache:
                     self._metadata_cache._cache[token_id] = entry
                     count += 1
         if count:
-            log.debug(f"[METADATA] Pre-populated {count} tokens (tick_size+neg_risk) from Gamma API (0 REST calls)")
+            log.debug(f"[METADATA] Pre-populated {count} tokens (tick_size+neg_risk+fee={default_fee_bps}bps) from Gamma API")
 
     async def _ensure_token_metadata(self, token_id_up: str, token_id_down: str, wait: bool = False) -> None:
         """Fetch and cache metadata for token pair if not already cached.
@@ -838,15 +848,16 @@ class Trader:
                         f"[{b.id}] No presign — signing fresh "
                         f"(near-bracket fired on a different {b.asset} {b.window} window)"
                     )
-                # Sign both orders concurrently (ECDSA crypto, pure CPU, no I/O)
+                # Sign both orders concurrently on dedicated signing executor so background
+                # presign/metadata tasks on the default pool don't queue-starve us.
                 signed_up, signed_dn = await asyncio.gather(
                     loop.run_in_executor(
-                        None, self._client.create_order,
+                        self._sign_executor, self._client.create_order,
                         OrderArgs(token_id=b.leg_up.token_id, price=limit_up,
                                   size=shares_up, side="BUY"),
                     ),
                     loop.run_in_executor(
-                        None, self._client.create_order,
+                        self._sign_executor, self._client.create_order,
                         OrderArgs(token_id=b.leg_down.token_id, price=limit_down,
                                   size=shares_down, side="BUY"),
                     ),
@@ -931,12 +942,12 @@ class Trader:
 
                 try:
                     signed_up = await loop.run_in_executor(
-                        None, self._client.create_order,
+                        self._sign_executor, self._client.create_order,
                         OrderArgs(token_id=b.leg_up.token_id, price=limit_up,
                                   size=shares_up, side="BUY"),
                     )
                     resp_up = await loop.run_in_executor(
-                        None, self._client.post_order, signed_up, order_type, False
+                        self._sign_executor, self._client.post_order, signed_up, order_type, False
                     )
                     up_id, up_status, up_err, up_msg = _parse(resp_up)
 
@@ -1085,11 +1096,11 @@ class Trader:
         """
         resp_dn, resp_up = await asyncio.gather(
             loop.run_in_executor(
-                None, self._client.post_order,
+                self._sign_executor, self._client.post_order,
                 signed_dn, order_type, False
             ),
             loop.run_in_executor(
-                None, self._client.post_order,
+                self._sign_executor, self._client.post_order,
                 signed_up, order_type, False
             ),
             return_exceptions=True,
@@ -1141,7 +1152,7 @@ class Trader:
 
         try:
             resp_dn = await loop.run_in_executor(
-                None, self._client.post_order,
+                self._sign_executor, self._client.post_order,
                 signed_dn, order_type, False
             )
             dn_id, dn_status, dn_err, dn_msg = _parse(resp_dn)
@@ -1171,7 +1182,7 @@ class Trader:
 
         try:
             resp_up = await loop.run_in_executor(
-                None, self._client.post_order,
+                self._sign_executor, self._client.post_order,
                 signed_up, order_type, False
             )
             up_id, up_status, up_err, up_msg = _parse(resp_up)
@@ -1237,12 +1248,12 @@ class Trader:
 
         try:
             signed_dn_r = await loop.run_in_executor(
-                None, self._client.create_order,
+                self._sign_executor, self._client.create_order,
                 OrderArgs(token_id=b.leg_down.token_id, price=limit_down,
                           size=retry_shares, side="BUY"),
             )
             resp_dn_r = await loop.run_in_executor(
-                None, self._client.post_order, signed_dn_r, order_type, False
+                self._sign_executor, self._client.post_order, signed_dn_r, order_type, False
             )
         except Exception as e:
             log.info(f"[{b.id}] DOWN reduced-size retry exception: {e}")
@@ -1269,12 +1280,12 @@ class Trader:
         up_retry_shares = _clob_valid_shares(retry_shares, limit_up)
         try:
             signed_up_r = await loop.run_in_executor(
-                None, self._client.create_order,
+                self._sign_executor, self._client.create_order,
                 OrderArgs(token_id=b.leg_up.token_id, price=limit_up,
                           size=up_retry_shares, side="BUY"),
             )
             resp_up_r = await loop.run_in_executor(
-                None, self._client.post_order, signed_up_r, order_type, False
+                self._sign_executor, self._client.post_order, signed_up_r, order_type, False
             )
         except Exception as e:
             # DOWN filled but UP threw — partial fill with reduced size
@@ -1421,7 +1432,7 @@ class Trader:
 
             try:
                 signed_exit = await loop.run_in_executor(
-                    None, self._client.create_order,
+                    self._sign_executor, self._client.create_order,
                     OrderArgs(
                         token_id=filled_leg.token_id,
                         price=exit_price,
@@ -1432,7 +1443,7 @@ class Trader:
                 # Fix 2: GTC so the order crosses immediately against any resting bid,
                 # or rests on the book if no match — never silently cancels like FOK.
                 resp = await loop.run_in_executor(
-                    None, self._client.post_order,
+                    self._sign_executor, self._client.post_order,
                     signed_exit, OrderType.GTC,
                 )
                 status   = (resp.get("status")  or "").lower() if isinstance(resp, dict) else ""

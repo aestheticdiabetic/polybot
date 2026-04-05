@@ -641,7 +641,7 @@ class Scanner:
 
         # Near-bracket hook: when combined is between near_threshold and bracket_threshold,
         # fire on_near_bracket so the trader can pre-warm the cache and pre-sign orders
-        # while prices are still moving toward the entry threshold.  Base throttle is 1s,
+        # while prices are still moving toward the entry threshold.  Base throttle is 5s,
         # but we bypass it immediately when DOWN ask has risen >2 ticks since the last
         # presign — this ensures a stale presign gets refreshed before the bracket fires
         # rather than forcing expensive fresh signing on the critical path.
@@ -650,7 +650,7 @@ class Scanner:
             last_near = self._recent_near_brackets.get(m.condition_id, 0)
             last_ask_dn = self._recent_near_bracket_ask_dn.get(m.condition_id, 0.0)
             down_moved_past_limit = ask_down > last_ask_dn + 2 * 0.01
-            if time.time() - last_near > 1.0 or down_moved_past_limit:
+            if time.time() - last_near > 5.0 or down_moved_past_limit:
                 self._recent_near_brackets[m.condition_id] = time.time()
                 self._recent_near_bracket_ask_dn[m.condition_id] = ask_down
                 self.stats["near_brackets_detected"] += 1
