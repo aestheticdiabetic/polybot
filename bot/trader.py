@@ -374,20 +374,19 @@ class Trader:
         if self._metadata_cache is None:
             return
         count = 0
-        default_fee_bps = int(STRATEGY.taker_fee_pct * 10000)  # 0.01 → 100 bps
         for m in markets:
-            # Seed fee_rate_bps with the strategy default (e.g. 100bps for 1% fee).
-            # Gamma API doesn't reliably expose CLOB fee, but seeding prevents a
-            # synchronous REST fallback on the critical path for markets that skip
-            # the near-bracket zone.  The monkey-patched get_fee_rate_bps will
-            # overwrite this on first real use if the market's actual fee differs.
-            entry = {"tick_size": m.tick_size, "neg_risk": m.neg_risk, "fee_rate_bps": default_fee_bps}
+            # fee_rate_bps intentionally omitted: Gamma API does not reliably expose
+            # the CLOB taker fee and markets vary (100bps, 1000bps, etc.).  A wrong
+            # pre-seeded value produces a signed order with an invalid feeRateBps and
+            # a CLOB 400 rejection.  The monkey-patched get_fee_rate_bps fetches it
+            # via REST on first use and writes it back so subsequent calls are cached.
+            entry = {"tick_size": m.tick_size, "neg_risk": m.neg_risk}
             for token_id in (m.token_id_up, m.token_id_down):
                 if token_id not in self._metadata_cache._cache:
                     self._metadata_cache._cache[token_id] = entry
                     count += 1
         if count:
-            log.debug(f"[METADATA] Pre-populated {count} tokens (tick_size+neg_risk+fee={default_fee_bps}bps) from Gamma API")
+            log.debug(f"[METADATA] Pre-populated {count} tokens (tick_size+neg_risk) from Gamma API (0 REST calls)")
 
     async def _ensure_token_metadata(self, token_id_up: str, token_id_down: str, wait: bool = False) -> None:
         """Fetch and cache metadata for token pair if not already cached.

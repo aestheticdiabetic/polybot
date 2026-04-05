@@ -56,7 +56,13 @@ class StrategyConfig:
     pause_if_bracket_hz: float = 10.0        # min gap between brackets on same market = 60/hz seconds
 
     # Fees (Polymarket taker fee)
-    taker_fee_pct: float = 0.01   # 1% — verify via get_fee_rate_bps; some markets use 2%
+    # WARNING: crypto up/down markets appear to charge 1000bps (10%), not 100bps (1%).
+    # This value drives the profitability cap (max_limit_sum = 1 - fee - tick) AND the
+    # net profit estimate in the scanner.  If set too low, limits can allow fills at a
+    # loss and net profit will be overstated.  Changing this also requires updating
+    # bracket_threshold (break-even = 1 / (1 + fee); at 10% that's ~0.909, not 0.97).
+    # Verify per-market via: GET /fee-rate?token_id=<id>
+    taker_fee_pct: float = 0.01   # TODO: confirm 1% vs 10% before adjusting
     polygon_gas_gwei: float = 30  # estimated gas for redemption tx
     # Estimated gas cost per on-chain redemption (MATIC → USDC conversion).
     # Polygon at 30 gwei, ~150k gas, MATIC ~$0.50: ≈ $0.002.  Used in live net estimate.
