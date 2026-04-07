@@ -41,6 +41,20 @@ class ForecastResult:
 _cache: dict[tuple, tuple[float, dict]] = {}
 _cache_lock = asyncio.Lock()
 
+# Limit concurrent Open-Meteo requests to avoid 429 rate limiting.
+# Free tier has no documented per-second limit but bursts of >10 concurrent
+# requests reliably trigger 429s. 5 concurrent is safe and still fast.
+_OPEN_METEO_CONCURRENCY = 5
+_fetch_sem: Optional[asyncio.Semaphore] = None
+
+
+def _get_sem() -> asyncio.Semaphore:
+    """Lazily create semaphore on first use (must be on the running event loop)."""
+    global _fetch_sem
+    if _fetch_sem is None:
+        _fetch_sem = asyncio.Semaphore(_OPEN_METEO_CONCURRENCY)
+    return _fetch_sem
+
 
 async def get_forecast(city: str, target_date: date) -> ForecastResult:
     """
@@ -70,7 +84,9 @@ async def get_all_forecasts(
         except UnknownCityError:
             log.warning(f"weather: skipping unknown city '{city}'")
 
-    # Fetch concurrently
+    log.info(f"BOND_WEATHER_FETCH unique_pairs={len(resolved)} (concurrency={_OPEN_METEO_CONCURRENCY})")
+
+    # Fetch concurrently (throttled by semaphore inside _fetch_open_meteo)
     async def _fetch_one(key: tuple[str, date]) -> tuple[tuple[str, date], Optional[ForecastResult]]:
         canonical, d = key
         _, lat, lon = resolved[key]
@@ -83,7 +99,9 @@ async def get_all_forecasts(
 
     tasks = [_fetch_one(k) for k in resolved]
     pairs = await asyncio.gather(*tasks)
-    return {k: v for k, v in pairs if v is not None}
+    results = {k: v for k, v in pairs if v is not None}
+    log.info(f"BOND_WEATHER_DONE fetched={len(results)} failed={len(resolved)-len(results)}")
+    return results
 
 
 def prob_in_range(
@@ -181,7 +199,8 @@ async def _fetch_open_meteo(lat: float, lon: float, target_date: date) -> dict:
     Params: latitude, longitude, daily=temperature_2m_max,
             hourly=temperature_2m, timezone=auto,
             start_date, end_date (same day)
-    Cached for CACHE_TTL_SECS.
+    Cached for CACHE_TTL_SECS. Throttled to _OPEN_METEO_CONCURRENCY concurrent
+    requests; retries up to 3 times on 429 with exponential backoff.
     """
     date_str = target_date.isoformat()
     cache_key = (round(lat, 4), round(lon, 4), date_str)
@@ -202,11 +221,33 @@ async def _fetch_open_meteo(lat: float, lon: float, target_date: date) -> dict:
         "end_date":   date_str,
     }
 
-    timeout = aiohttp.ClientTimeout(total=10)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(OPEN_METEO_URL, params=params) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
+    timeout = aiohttp.ClientTimeout(total=15)
+    backoff = 1.0
+    async with _get_sem():
+        for attempt in range(4):
+            try:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(OPEN_METEO_URL, params=params) as resp:
+                        if resp.status == 429:
+                            wait = backoff * (2 ** attempt)
+                            log.debug(f"Open-Meteo 429 at ({lat:.2f},{lon:.2f}) {date_str} — retry in {wait:.1f}s")
+                            await asyncio.sleep(wait)
+                            continue
+                        resp.raise_for_status()
+                        data = await resp.json()
+                        break
+            except aiohttp.ClientResponseError as exc:
+                if exc.status == 429 and attempt < 3:
+                    wait = backoff * (2 ** attempt)
+                    log.debug(f"Open-Meteo 429 (exc) — retry in {wait:.1f}s")
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+        else:
+            raise aiohttp.ClientResponseError(
+                request_info=None, history=(), status=429,
+                message="Open-Meteo rate limit: max retries exceeded",
+            )
 
     async with _cache_lock:
         _cache[cache_key] = (time.monotonic(), data)

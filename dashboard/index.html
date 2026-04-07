@@ -149,6 +149,7 @@
 <div class="tab-bar">
   <button class="tab-btn active" onclick="switchTab('arbi')">ARBI</button>
   <button class="tab-btn" onclick="switchTab('bond')">BOND</button>
+  <button class="tab-btn" onclick="switchTab('paper')">PAPER SIM</button>
 </div>
 
 <!-- ═══════════════════════════════════════════════ ARBI TAB ══ -->
@@ -492,6 +493,119 @@
 </main>
 </div><!-- /tab-bond -->
 
+<!-- ══════════════════════════════════════════════ PAPER TAB ══ -->
+<div id="tab-paper" class="tab-pane">
+<main>
+
+  <div class="controls">
+    <button class="btn btn-start" id="paper-btn-start" onclick="startBot()">▶ START SIM</button>
+    <button class="btn btn-stop"  id="paper-btn-stop"  onclick="stopBot()" disabled>■ STOP</button>
+    <div style="width:1px;height:28px;background:var(--border);margin:0 4px;"></div>
+    <label>Starting Capital $</label>
+    <input type="number" id="paper-balance" value="1000" min="10" max="100000" step="100" style="width:110px;" oninput="recalcPaper()">
+    <button class="btn btn-sim" onclick="refreshPaperSim()">↺ REFRESH</button>
+    <button class="btn btn-purple" id="check-res-btn" onclick="checkPaperResolutions()" title="Check Gamma API for resolved markets">✓ CHECK RESOLUTIONS</button>
+    <span id="check-res-status" style="font-size:11px;color:var(--muted);"></span>
+  </div>
+
+  <div class="sim-panel">
+    <h3>⚠ PAPER SIM MODE — No real orders placed</h3>
+    <span style="color:#94a3b8;font-size:12px;">Scans weather markets and logs hypothetical buys based on Open-Meteo forecasts. Use "Check Resolutions" to see how bets would have performed after markets settle.</span>
+  </div>
+
+  <!-- Paper metrics -->
+  <div class="metric-grid">
+    <div class="metric">
+      <div class="metric-label">Scan Cycles</div>
+      <div class="metric-value blue" id="pm-cycles">—</div>
+      <div class="metric-sub">completed</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Total Opportunities</div>
+      <div class="metric-value" id="pm-total">—</div>
+      <div class="metric-sub" id="pm-resolved-count">0 resolved</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Total Capital</div>
+      <div class="metric-value amber" id="pm-capital">—</div>
+      <div class="metric-sub" id="pm-scale">all cycles combined</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Projected PnL</div>
+      <div class="metric-value" id="pm-proj-pnl">—</div>
+      <div class="metric-sub" id="pm-proj-sub">at $<span id="pm-bal-display">1000</span> starting</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">CORE Opps</div>
+      <div class="metric-value blue" id="pm-core-count">—</div>
+      <div class="metric-sub" id="pm-core-ev">avg ev —</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">SECONDARY Opps</div>
+      <div class="metric-value amber" id="pm-sec-count">—</div>
+      <div class="metric-sub" id="pm-sec-ev">avg ev —</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">WING Opps</div>
+      <div class="metric-value purple" id="pm-wing-count">—</div>
+      <div class="metric-sub" id="pm-wing-ev">avg ev —</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Actual PnL</div>
+      <div class="metric-value" id="pm-actual-pnl">—</div>
+      <div class="metric-sub">from resolved bets</div>
+    </div>
+  </div>
+
+  <!-- Tier breakdown -->
+  <div class="section">
+    <div class="section-title">Tier Analysis</div>
+    <div style="display:grid;grid-template-columns:80px 60px 80px 70px 70px 70px 80px 80px 80px;gap:8px;padding:0 0 8px;border-bottom:1px solid var(--border);">
+      <span class="tier-header">TIER</span>
+      <span class="tier-header">COUNT</span>
+      <span class="tier-header">CAPITAL</span>
+      <span class="tier-header">AVG ASK</span>
+      <span class="tier-header">AVG PROB</span>
+      <span class="tier-header">AVG EV</span>
+      <span class="tier-header">PROJ PROFIT</span>
+      <span class="tier-header">RESOLVED</span>
+      <span class="tier-header">WIN RATE</span>
+    </div>
+    <div id="paper-tier-rows"></div>
+  </div>
+
+  <!-- Recent opportunities table -->
+  <div class="section">
+    <div style="display:flex;align-items:center;margin-bottom:14px;gap:12px;">
+      <span class="section-title" style="margin-bottom:0;">Recent Paper Trades</span>
+      <select id="paper-tier-filter" onchange="renderPaperTrades()" style="font-size:11px;padding:4px 8px;">
+        <option value="">all tiers</option>
+        <option value="CORE">CORE</option>
+        <option value="SECONDARY">SECONDARY</option>
+        <option value="WING">WING</option>
+      </select>
+      <select id="paper-outcome-filter" onchange="renderPaperTrades()" style="font-size:11px;padding:4px 8px;">
+        <option value="">all outcomes</option>
+        <option value="pending">pending</option>
+        <option value="YES">won</option>
+        <option value="NO">lost</option>
+      </select>
+    </div>
+    <div class="scroll-table">
+      <table>
+        <thead><tr>
+          <th>TIME</th><th>CITY</th><th>QUESTION</th><th>TIER</th>
+          <th>SHARES</th><th>ASK</th><th>PROB</th><th>EV</th>
+          <th>CAPITAL</th><th>PROJ PROFIT</th><th>OUTCOME</th><th>ACTUAL PnL</th>
+        </tr></thead>
+        <tbody id="paper-trades-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+</main>
+</div><!-- /tab-paper -->
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script>
 // ── Shared state ───────────────────────────────────────────────────
@@ -559,13 +673,15 @@ function switchTab(tab) {
     loadBondCities();
     loadBondConfig();
     loadBondLogs();
+  } else if (tab === 'paper') {
+    refreshPaperSim();
   }
 }
 
 // ── Bot control (shared) ───────────────────────────────────────────
 async function startBot() {
   const balance = parseFloat(document.getElementById('sim-balance')?.value)||1000;
-  ['btn-start','bond-btn-start'].forEach(id => {
+  ['btn-start','bond-btn-start','paper-btn-start'].forEach(id => {
     const el = document.getElementById(id);
     if (el) { el.disabled=true; el.textContent='⏳ STARTING...'; }
   });
@@ -573,9 +689,9 @@ async function startBot() {
     await apiFetch('/api/start', { method:'POST', body:JSON.stringify({mode,balance}) });
     await poll();
   } catch(e) { console.error('Start failed:',e); }
-  ['btn-start','bond-btn-start'].forEach(id => {
+  ['btn-start','bond-btn-start','paper-btn-start'].forEach(id => {
     const el = document.getElementById(id);
-    if (el) el.textContent = '▶ START';
+    if (el) el.textContent = id === 'paper-btn-start' ? '▶ START SIM' : '▶ START';
   });
 }
 async function stopBot() {
@@ -630,10 +746,10 @@ function updateMetrics(d) {
   }
   const dot = document.getElementById('status-dot');
   dot.className='status-dot '+(d.running?'dot-running':'dot-stopped');
-  ['btn-start','bond-btn-start'].forEach(id => {
+  ['btn-start','bond-btn-start','paper-btn-start'].forEach(id => {
     const el=document.getElementById(id); if (el) el.disabled=d.running;
   });
-  ['btn-stop','bond-btn-stop'].forEach(id => {
+  ['btn-stop','bond-btn-stop','paper-btn-stop'].forEach(id => {
     const el=document.getElementById(id); if (el) el.disabled=!d.running;
   });
   document.getElementById('uptime-display').textContent='uptime: '+fmtUptime(d.uptime_s);
@@ -1084,6 +1200,161 @@ async function loadBondLogs() {
   } catch(e) { console.error('Bond logs load failed:',e); }
 }
 
+// ── Paper SIM dashboard ────────────────────────────────────────────
+let paperRecords = [];
+let paperStats   = null;
+
+async function loadPaperStats(balance) {
+  const b = balance || parseFloat(document.getElementById('paper-balance').value) || 1000;
+  try {
+    paperStats = await apiFetch(`/api/bond/paper-stats?balance=${b}`);
+    updatePaperStats(paperStats);
+  } catch(e) { console.error('Paper stats load failed:', e); }
+}
+
+async function loadPaperTrades() {
+  try {
+    paperRecords = await apiFetch('/api/bond/paper-trades?n=200');
+    renderPaperTrades();
+  } catch(e) { console.error('Paper trades load failed:', e); }
+}
+
+function recalcPaper() {
+  const b = parseFloat(document.getElementById('paper-balance').value) || 1000;
+  document.getElementById('pm-bal-display').textContent = b;
+  loadPaperStats(b);
+}
+
+async function refreshPaperSim() {
+  const b = parseFloat(document.getElementById('paper-balance').value) || 1000;
+  await Promise.all([loadPaperStats(b), loadPaperTrades()]);
+}
+
+async function checkPaperResolutions() {
+  const btn = document.getElementById('check-res-btn');
+  const status = document.getElementById('check-res-status');
+  btn.disabled = true;
+  status.textContent = 'Checking Gamma API…';
+  try {
+    const r = await apiFetch('/api/bond/paper-check', {method:'POST'});
+    if (r.ok) {
+      status.textContent = `Checked ${r.checked} pending — ${r.resolved} newly resolved`;
+      status.style.color = r.resolved > 0 ? 'var(--green)' : 'var(--muted)';
+      if (r.resolved > 0) await refreshPaperSim();
+    } else {
+      status.textContent = `Error: ${r.error || 'unknown'}`;
+      status.style.color = 'var(--red)';
+    }
+  } catch(e) {
+    status.textContent = `Error: ${e.message}`;
+    status.style.color = 'var(--red)';
+  } finally {
+    btn.disabled = false;
+    setTimeout(() => { status.textContent = ''; }, 8000);
+  }
+}
+
+function updatePaperStats(s) {
+  if (!s) return;
+  const b = parseFloat(document.getElementById('paper-balance').value) || 1000;
+
+  document.getElementById('pm-cycles').textContent       = s.cycles || '—';
+  document.getElementById('pm-total').textContent        = s.total  || '—';
+  document.getElementById('pm-resolved-count').textContent = `${s.resolved_count || 0} resolved`;
+  document.getElementById('pm-capital').textContent      = '$' + parseFloat(s.total_capital || 0).toFixed(2);
+  document.getElementById('pm-bal-display').textContent  = b;
+
+  const scaledProfit = s.scaled_projected_profit || 0;
+  const projEl = document.getElementById('pm-proj-pnl');
+  projEl.textContent = (scaledProfit >= 0 ? '+' : '') + '$' + parseFloat(scaledProfit).toFixed(4);
+  projEl.className   = 'metric-value ' + (scaledProfit > 0 ? 'green' : scaledProfit < 0 ? 'red' : '');
+
+  const scalePct = s.scale_factor < 1
+    ? ` (${(s.scale_factor*100).toFixed(0)}% of opps — limited by balance)`
+    : '';
+  document.getElementById('pm-scale').textContent = 'all cycles combined' + scalePct;
+
+  const actualPnl = s.actual_pnl || 0;
+  const actEl = document.getElementById('pm-actual-pnl');
+  actEl.textContent = (actualPnl >= 0 ? '+' : '') + '$' + parseFloat(actualPnl).toFixed(4);
+  actEl.className   = 'metric-value ' + (actualPnl > 0 ? 'green' : actualPnl < 0 ? 'red' : '');
+
+  const ts = s.tier_stats || {};
+  for (const [tier, count_id, ev_id] of [
+    ['CORE','pm-core-count','pm-core-ev'],
+    ['SECONDARY','pm-sec-count','pm-sec-ev'],
+    ['WING','pm-wing-count','pm-wing-ev'],
+  ]) {
+    const t = ts[tier] || {};
+    document.getElementById(count_id).textContent = t.count || 0;
+    document.getElementById(ev_id).textContent    = t.avg_ev != null ? `avg ev ${t.avg_ev.toFixed(4)}` : 'avg ev —';
+  }
+
+  // Tier rows
+  const rows = document.getElementById('paper-tier-rows'); rows.innerHTML = '';
+  for (const [tier, cls] of [['CORE','blue'],['SECONDARY','amber'],['WING','purple']]) {
+    const t = ts[tier] || {count:0,capital:0,avg_ask:null,avg_prob:null,avg_ev:null,projected_profit:0,resolved:0,wins:0,win_rate:null};
+    const div = document.createElement('div');
+    div.style.cssText = 'display:grid;grid-template-columns:80px 60px 80px 70px 70px 70px 80px 80px 80px;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:12px;';
+    const wr    = t.win_rate != null ? t.win_rate + '%' : '—';
+    const wrCls = t.win_rate != null ? (t.win_rate >= 70 ? 'green' : t.win_rate >= 50 ? 'amber' : 'red') : '';
+    const pp    = parseFloat(t.projected_profit || 0);
+    div.innerHTML = `<span><span class="pill pill-${tier.toLowerCase()}">${tier}</span></span>
+      <span>${t.count || 0}</span>
+      <span class="amber">$${parseFloat(t.capital||0).toFixed(2)}</span>
+      <span>${t.avg_ask != null ? t.avg_ask.toFixed(4) : '—'}</span>
+      <span>${t.avg_prob != null ? (t.avg_prob*100).toFixed(1)+'%' : '—'}</span>
+      <span class="${(t.avg_ev||0)>0?'green':''}">${t.avg_ev != null ? t.avg_ev.toFixed(4) : '—'}</span>
+      <span class="${pp>=0?'green':'red'}">${pp>=0?'+':''}$${pp.toFixed(4)}</span>
+      <span style="color:var(--muted)">${t.resolved || 0}</span>
+      <span class="${wrCls}">${wr}${t.resolved?` (${t.wins||0}/${t.resolved})`:''}</span>`;
+    rows.appendChild(div);
+  }
+}
+
+function renderPaperTrades() {
+  const tierFilt    = document.getElementById('paper-tier-filter').value;
+  const outcomeFilt = document.getElementById('paper-outcome-filter').value;
+  let records = [...paperRecords];
+  if (tierFilt) records = records.filter(r => r.tier === tierFilt);
+  if (outcomeFilt === 'pending') records = records.filter(r => r.outcome == null);
+  else if (outcomeFilt === 'YES') records = records.filter(r => r.outcome === 'YES');
+  else if (outcomeFilt === 'NO')  records = records.filter(r => r.outcome === 'NO');
+
+  const tbody = document.getElementById('paper-trades-tbody'); tbody.innerHTML = '';
+  if (!records.length) {
+    tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:var(--muted);padding:16px;">no paper trades yet — start the bot in PAPER mode to generate data</td></tr>';
+    return;
+  }
+  records.forEach(r => {
+    const projProfit = (r.ev || 0) * (r.shares || 0);
+    const outcomeHtml = r.outcome == null
+      ? '<span style="color:var(--muted)">pending</span>'
+      : r.outcome === 'YES'
+        ? '<span class="pill pill-won">YES ✓</span>'
+        : '<span class="pill pill-lost">NO ✗</span>';
+    const pnlHtml = r.pnl != null
+      ? `<span class="${r.pnl >= 0 ? 'green' : 'red'}">${r.pnl >= 0 ? '+' : ''}$${parseFloat(r.pnl).toFixed(4)}</span>`
+      : '—';
+    const tr = document.createElement('tr');
+    const ts = r.ts ? new Date(r.ts).toLocaleString() : '—';
+    tr.innerHTML = `
+      <td style="color:var(--muted);white-space:nowrap;font-size:10px;">${ts}</td>
+      <td><strong>${r.city || '?'}</strong></td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)">${r.question || ''}</td>
+      <td><span class="pill pill-${(r.tier||'').toLowerCase()}">${r.tier||'?'}</span></td>
+      <td>${r.shares || 0}</td>
+      <td>${parseFloat(r.ask || 0).toFixed(4)}</td>
+      <td>${r.prob != null ? (r.prob*100).toFixed(1)+'%' : '—'}</td>
+      <td class="${(r.ev||0)>0?'green':''}">${r.ev != null ? r.ev.toFixed(4) : '—'}</td>
+      <td class="amber">$${parseFloat(r.capital||0).toFixed(4)}</td>
+      <td class="${projProfit>=0?'green':'red'}">${projProfit>=0?'+':''}$${projProfit.toFixed(4)}</td>
+      <td>${outcomeHtml}</td>
+      <td>${pnlHtml}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
 // ── Main poll loop ─────────────────────────────────────────────────
 async function poll() {
   try {
@@ -1095,8 +1366,11 @@ async function poll() {
   if (currentTab === 'arbi') {
     try { await loadLogs(); } catch(e) {}
     try { await loadMarkets(); } catch(e) {}
-  } else {
+  } else if (currentTab === 'bond') {
     try { await pollBond(); } catch(e) {}
+  } else if (currentTab === 'paper') {
+    // Paper data is file-based; poll on each cycle but don't block
+    try { await loadPaperStats(); } catch(e) {}
   }
 }
 

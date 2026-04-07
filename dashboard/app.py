@@ -21,6 +21,29 @@ log = logging.getLogger("dashboard")
 DASHBOARD_DIR = Path(__file__).parent
 
 
+PAPER_LOG = Path(os.getenv("PAPER_LOG", "/app/logs/paper_trades.jsonl"))
+
+
+def _load_paper_trades(n: int = 10000) -> list[dict]:
+    """Read paper trade records from JSONL file. Returns empty list on any error."""
+    try:
+        if not PAPER_LOG.exists():
+            return []
+        lines = PAPER_LOG.read_text(encoding="utf-8").splitlines()
+        records = []
+        for line in lines[-n:]:
+            line = line.strip()
+            if line:
+                try:
+                    records.append(json.loads(line))
+                except Exception:
+                    pass
+        return records
+    except Exception as exc:
+        log.debug(f"dashboard: failed to read paper trades: {exc}")
+        return []
+
+
 def _load_bond_ledger() -> list[dict]:
     """Read bond position ledger from disk. Returns empty list on any error."""
     try:
@@ -394,6 +417,149 @@ async def create_app(state):
         except FileNotFoundError:
             return web.json_response({"lines": []})
 
+    @_auth_required
+    async def api_bond_paper_trades(request):
+        """Return last N paper trade records from paper_trades.jsonl."""
+        n = int(request.rel_url.query.get("n", 200))
+        records = _load_paper_trades(n)
+        records.sort(key=lambda r: r.get("ts", ""), reverse=True)
+        return web.json_response(records[:n])
+
+    @_auth_required
+    async def api_bond_paper_stats(request):
+        """Aggregated paper sim stats with P&L projection for a given starting balance."""
+        starting_balance = float(request.rel_url.query.get("balance", 1000))
+        records = _load_paper_trades()
+
+        if not records:
+            return web.json_response({
+                "total": 0, "cycles": 0, "tier_stats": {},
+                "total_capital": 0, "total_projected_profit": 0,
+                "scaled_projected_profit": 0, "starting_balance": starting_balance,
+                "scale_factor": 0, "actual_pnl": 0, "resolved_count": 0,
+            })
+
+        # Approximate cycle count by distinct timestamp values
+        # (all records in one run_cycle() share the same ts)
+        cycles = len(set(r.get("ts", "") for r in records))
+
+        tier_stats: dict = {}
+        for tier in ("CORE", "SECONDARY", "WING"):
+            tr_list = [r for r in records if r.get("tier") == tier]
+            if not tr_list:
+                tier_stats[tier] = {
+                    "count": 0, "capital": 0, "avg_ask": None,
+                    "avg_prob": None, "avg_ev": None, "projected_profit": 0,
+                    "resolved": 0, "wins": 0, "win_rate": None,
+                }
+                continue
+            total_cap   = sum(r.get("capital", 0) for r in tr_list)
+            proj_profit = sum(r.get("ev", 0) * r.get("shares", 0) for r in tr_list)
+            resolved    = [r for r in tr_list if r.get("outcome") is not None]
+            wins        = [r for r in resolved if r.get("outcome") == "YES"]
+            tier_stats[tier] = {
+                "count":            len(tr_list),
+                "capital":          round(total_cap, 4),
+                "avg_ask":          round(sum(r.get("ask", 0) for r in tr_list) / len(tr_list), 4),
+                "avg_prob":         round(sum(r.get("prob", 0) for r in tr_list) / len(tr_list), 4),
+                "avg_ev":           round(sum(r.get("ev", 0) for r in tr_list) / len(tr_list), 4),
+                "projected_profit": round(proj_profit, 4),
+                "resolved":         len(resolved),
+                "wins":             len(wins),
+                "win_rate":         round(len(wins) / len(resolved) * 100, 1) if resolved else None,
+            }
+
+        total_capital         = sum(r.get("capital", 0) for r in records)
+        total_projected_profit = sum(r.get("ev", 0) * r.get("shares", 0) for r in records)
+        scale                 = min(1.0, starting_balance / total_capital) if total_capital > 0 else 0
+        resolved_records      = [r for r in records if r.get("pnl") is not None]
+        actual_pnl            = sum(r.get("pnl", 0) for r in resolved_records)
+
+        return web.json_response({
+            "total":                    len(records),
+            "cycles":                   cycles,
+            "total_capital":            round(total_capital, 4),
+            "total_projected_profit":   round(total_projected_profit, 4),
+            "scaled_projected_profit":  round(total_projected_profit * scale, 4),
+            "starting_balance":         starting_balance,
+            "scale_factor":             round(scale, 4),
+            "actual_pnl":               round(actual_pnl, 4),
+            "resolved_count":           len(resolved_records),
+            "tier_stats":               tier_stats,
+        })
+
+    @_auth_required
+    async def api_bond_paper_check_resolutions(request):
+        """
+        Check Gamma API for outcomes on paper trades whose resolution_time has passed
+        and outcome is still null. Updates the JSONL file in-place.
+        """
+        import aiohttp as _aiohttp
+        from datetime import datetime, timezone as _tz
+
+        records = _load_paper_trades()
+        now = datetime.now(_tz.utc)
+        pending = [
+            r for r in records
+            if r.get("outcome") is None
+            and r.get("resolution_time")
+            and datetime.fromisoformat(r["resolution_time"].replace("Z", "+00:00")) < now
+        ]
+
+        if not pending:
+            return web.json_response({"ok": True, "checked": 0, "resolved": 0})
+
+        # Fetch outcomes for each market
+        resolved_count = 0
+        outcome_map: dict[str, str] = {}
+        timeout = _aiohttp.ClientTimeout(total=10)
+        async with _aiohttp.ClientSession(timeout=timeout) as session:
+            for r in pending[:50]:  # cap at 50 per call
+                mid = r.get("market_id", "")
+                if not mid or mid in outcome_map:
+                    continue
+                try:
+                    async with session.get(
+                        f"https://gamma-api.polymarket.com/markets/{mid}"
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            # resolved = True means market settled
+                            if data.get("resolved"):
+                                # outcome 1 = YES resolved, 0 = NO resolved
+                                winners = data.get("outcomePrices", [])
+                                if winners:
+                                    outcome_map[mid] = "YES" if float(winners[0]) >= 0.99 else "NO"
+                except Exception:
+                    pass
+
+        if not outcome_map:
+            return web.json_response({"ok": True, "checked": len(pending), "resolved": 0})
+
+        # Update records and rewrite file
+        updated = []
+        for r in records:
+            mid = r.get("market_id", "")
+            if mid in outcome_map and r.get("outcome") is None:
+                r = dict(r)
+                r["outcome"] = outcome_map[mid]
+                shares = r.get("shares", 0)
+                ask    = r.get("ask", 0)
+                r["pnl"] = round((1.0 - ask) * shares if outcome_map[mid] == "YES" else -ask * shares, 4)
+                resolved_count += 1
+            updated.append(r)
+
+        try:
+            tmp = PAPER_LOG.with_suffix(".tmp")
+            tmp.write_text("\n".join(json.dumps(rec) for rec in updated) + "\n", encoding="utf-8")
+            tmp.replace(PAPER_LOG)
+        except Exception as exc:
+            log.error(f"paper trades file update failed: {exc}")
+            return web.json_response({"ok": False, "error": str(exc)})
+
+        log.info(f"paper-check-resolutions: checked={len(pending)} resolved={resolved_count}")
+        return web.json_response({"ok": True, "checked": len(pending), "resolved": resolved_count})
+
     # ── Static dashboard HTML ────────────────────────────────────
 
     async def dashboard_html(request):
@@ -432,8 +598,11 @@ async def create_app(state):
     app.router.add_post("/api/bond/config",   api_bond_config_set)
     app.router.add_get("/api/bond/cities",    api_bond_cities_get)
     app.router.add_post("/api/bond/cities",   api_bond_cities_set)
-    app.router.add_get("/api/bond/logs",             api_bond_logs)
+    app.router.add_get("/api/bond/logs",              api_bond_logs)
     app.router.add_get("/api/bond/discover-cities",  api_bond_discover_cities)
+    app.router.add_get("/api/bond/paper-trades",     api_bond_paper_trades)
+    app.router.add_get("/api/bond/paper-stats",      api_bond_paper_stats)
+    app.router.add_post("/api/bond/paper-check",     api_bond_paper_check_resolutions)
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
