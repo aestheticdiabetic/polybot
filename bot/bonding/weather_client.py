@@ -1,16 +1,21 @@
 """
 weather_client.py — Fetch city temperature forecasts from Open-Meteo.
 
-No API key required. Free tier covers 10,000 calls/day.
+No API key required. Free tier limits:
+  - 10,000 calls/day
+  -  5,000 calls/hour
+  -    600 calls/minute
 
 Rate limiting strategy:
 - Disk-persistent cache (2h TTL at /app/data/weather_cache.json) survives
   restarts, so a full city refresh only happens once every 2 hours.
 - Batch all dates for a city into a single API call (date range fetch).
 - Strict serial rate limiter: min 3s between requests (~20 req/min).
+- Sliding-window counters enforce all three Open-Meteo limits hard.
 - Together these reduce daily API calls from ~6,000 to ~300-400.
 """
 import asyncio
+import collections
 import json
 import logging
 import math
@@ -35,8 +40,17 @@ DISK_CACHE_TTL_SECS = 7200   # 2 hours
 DISK_CACHE_PATH = os.environ.get("WEATHER_CACHE_PATH", "/app/data/weather_cache.json")
 
 # Minimum seconds between consecutive API requests.
-# 3s = ~20 req/min — conservative enough to avoid 429s under normal conditions.
+# 3s = ~20 req/min — well under the 600/min Open-Meteo limit.
 _MIN_REQUEST_INTERVAL = 3.0
+
+# Open-Meteo free-tier hard limits (enforced via sliding-window counters below)
+_LIMIT_PER_MINUTE = 600
+_LIMIT_PER_HOUR   = 5_000
+_LIMIT_PER_DAY    = 10_000
+
+# Timestamps of every successful API call in the last 24 hours.
+# Entries older than 24 hours are pruned before each new request.
+_api_call_log: collections.deque[float] = collections.deque()
 
 
 class UnknownCityError(ValueError):
@@ -67,6 +81,50 @@ def _get_rate_lock() -> asyncio.Lock:
     if _rate_lock is None:
         _rate_lock = asyncio.Lock()
     return _rate_lock
+
+
+def _check_limits() -> None:
+    """
+    Raise RuntimeError if any Open-Meteo sliding-window limit would be exceeded.
+    Must be called while holding _get_rate_lock() (serial execution guaranteed).
+    Prunes entries older than 24 hours as a side-effect.
+    """
+    now = time.time()
+    cutoff_day = now - 86400
+    # Drop entries outside the 24-hour window
+    while _api_call_log and _api_call_log[0] < cutoff_day:
+        _api_call_log.popleft()
+
+    day_count  = len(_api_call_log)
+    hour_count = sum(1 for t in _api_call_log if t > now - 3600)
+    min_count  = sum(1 for t in _api_call_log if t > now - 60)
+
+    if day_count >= _LIMIT_PER_DAY:
+        raise RuntimeError(
+            f"Open-Meteo daily limit reached ({day_count}/{_LIMIT_PER_DAY}). "
+            "No further requests until the window resets."
+        )
+    if hour_count >= _LIMIT_PER_HOUR:
+        raise RuntimeError(
+            f"Open-Meteo hourly limit reached ({hour_count}/{_LIMIT_PER_HOUR}). "
+            "Backing off until the window resets."
+        )
+    if min_count >= _LIMIT_PER_MINUTE:
+        raise RuntimeError(
+            f"Open-Meteo per-minute limit reached ({min_count}/{_LIMIT_PER_MINUTE}). "
+            "Backing off."
+        )
+
+    # Log a warning when approaching limits (within 10%)
+    if day_count  >= _LIMIT_PER_DAY   * 0.9:
+        log.warning(f"Open-Meteo daily budget at {day_count}/{_LIMIT_PER_DAY} — approaching limit")
+    elif hour_count >= _LIMIT_PER_HOUR * 0.9:
+        log.warning(f"Open-Meteo hourly budget at {hour_count}/{_LIMIT_PER_HOUR} — approaching limit")
+
+
+def _record_api_call() -> None:
+    """Record a completed API call in the sliding-window log."""
+    _api_call_log.append(time.time())
 
 
 def _load_disk_cache() -> None:
@@ -227,14 +285,30 @@ async def geocode_city(name: str) -> tuple[str, float, float]:
     Resolve a city name to (display_name, lat, lon) using Open-Meteo geocoding.
     Free API, no key required.
     Raises UnknownCityError if no results found.
+    Goes through the shared rate limiter so geocoding calls count against
+    the same Open-Meteo budget as forecast calls.
     """
+    global _last_request_time
+
     url = "https://geocoding-api.open-meteo.com/v1/search"
     params = {"name": name, "count": 1, "language": "en", "format": "json"}
     timeout = aiohttp.ClientTimeout(total=10)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(url, params=params) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
+
+    async with _get_rate_lock():
+        gap = time.time() - _last_request_time
+        if gap < _MIN_REQUEST_INTERVAL:
+            await asyncio.sleep(_MIN_REQUEST_INTERVAL - gap)
+
+        _check_limits()
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, params=params) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+
+        _last_request_time = time.time()
+        _record_api_call()
+
     results = data.get("results", [])
     if not results:
         raise UnknownCityError(f"No geocoding results for '{name}'")
@@ -311,11 +385,14 @@ async def _fetch_open_meteo_range(lat: float, lon: float, start_date: date, end_
 
     timeout = aiohttp.ClientTimeout(total=20)
 
-    # Serial rate limiter: enforce minimum gap between requests
+    # Serial rate limiter: enforce minimum gap and sliding-window budgets
     async with _get_rate_lock():
         gap = time.time() - _last_request_time
         if gap < _MIN_REQUEST_INTERVAL:
             await asyncio.sleep(_MIN_REQUEST_INTERVAL - gap)
+
+        # Raises RuntimeError if any Open-Meteo limit would be exceeded
+        _check_limits()
 
         for attempt in range(5):
             try:
@@ -343,6 +420,7 @@ async def _fetch_open_meteo_range(lat: float, lon: float, start_date: date, end_
             raise RuntimeError(f"Open-Meteo rate limit: max retries exceeded (429) for ({lat:.2f},{lon:.2f})")
 
         _last_request_time = time.time()
+        _record_api_call()
 
     now = time.time()
     async with _cache_lock:
