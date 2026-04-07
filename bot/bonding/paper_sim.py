@@ -43,8 +43,29 @@ def _append_record(record: dict) -> None:
         f.write(json.dumps(record) + "\n")
 
 
+def _load_seen_market_ids() -> set[str]:
+    """Return set of market_ids already recorded in the paper log."""
+    if not PAPER_LOG.exists():
+        return set()
+    seen: set[str] = set()
+    try:
+        for line in PAPER_LOG.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    rec = json.loads(line)
+                    mid = rec.get("market_id")
+                    if mid:
+                        seen.add(mid)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return seen
+
+
 async def run_cycle() -> int:
-    """Run one scan cycle. Returns number of opportunities found."""
+    """Run one scan cycle. Returns number of new opportunities logged."""
     markets = await scan_weather_markets()
     if not markets:
         log.info("paper_sim: no markets found this cycle")
@@ -55,8 +76,18 @@ async def run_cycle() -> int:
 
     opps = score_all(markets, forecasts)[:_config.BOND_MAX_MARKETS_PER_RUN]
 
+    # De-duplicate: skip markets already paper-traded this run
+    seen_ids = _load_seen_market_ids()
+    new_opps = [o for o in opps if o.market.market_id not in seen_ids]
+    skipped = len(opps) - len(new_opps)
+    if skipped:
+        log.info(f"paper_sim: skipped {skipped} already-logged market(s)")
+    if not new_opps:
+        log.info("paper_sim: no new opportunities this cycle")
+        return 0
+
     ts = datetime.now(timezone.utc).isoformat()
-    for opp in opps:
+    for opp in new_opps:
         record = {
             "ts":              ts,
             "event":           "WOULD_BUY",
@@ -82,8 +113,8 @@ async def run_cycle() -> int:
             f"ev={opp.ev:.4f} edge={opp.edge:.4f}"
         )
 
-    log.info(f"paper_sim: cycle complete — {len(opps)} opportunities logged to {PAPER_LOG}")
-    return len(opps)
+    log.info(f"paper_sim: cycle complete — {len(new_opps)} new opportunities logged to {PAPER_LOG}")
+    return len(new_opps)
 
 
 async def run() -> None:
