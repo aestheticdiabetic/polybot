@@ -340,6 +340,50 @@ async def create_app(state):
         return web.json_response({"ok": True})
 
     @_auth_required
+    async def api_bond_discover_cities(request):
+        """
+        Fetch Polymarket weather markets, extract city names that appear in questions
+        but aren't in BOND_CITIES, geocode them via Open-Meteo, return as candidates.
+        """
+        try:
+            from bonding.market_scanner import _fetch_gamma_markets, extract_unknown_cities
+            from bonding.weather_client import geocode_city, UnknownCityError
+
+            raw = await _fetch_gamma_markets()
+            unknown = extract_unknown_cities(raw)
+
+            # Top 25 by frequency
+            top_cities = sorted(unknown, key=lambda c: -unknown[c])[:25]
+
+            results = []
+            for city_name in top_cities:
+                try:
+                    display, lat, lon = await geocode_city(city_name)
+                    results.append({
+                        "name":          display,
+                        "query":         city_name,
+                        "lat":           round(lat, 4),
+                        "lon":           round(lon, 4),
+                        "market_count":  unknown[city_name],
+                        "geocoded":      True,
+                    })
+                except UnknownCityError:
+                    results.append({
+                        "name":         city_name,
+                        "query":        city_name,
+                        "lat":          None,
+                        "lon":          None,
+                        "market_count": unknown[city_name],
+                        "geocoded":     False,
+                    })
+
+            log.info(f"discover-cities: found {len(top_cities)} unknown cities, geocoded {sum(1 for r in results if r['geocoded'])}")
+            return web.json_response({"ok": True, "candidates": results})
+        except Exception as e:
+            log.error(f"discover-cities failed: {e}")
+            return web.json_response({"ok": False, "error": str(e), "candidates": []})
+
+    @_auth_required
     async def api_bond_logs(request):
         """Return last N lines of bond log file."""
         n = int(request.rel_url.query.get("n", 200))
@@ -388,7 +432,8 @@ async def create_app(state):
     app.router.add_post("/api/bond/config",   api_bond_config_set)
     app.router.add_get("/api/bond/cities",    api_bond_cities_get)
     app.router.add_post("/api/bond/cities",   api_bond_cities_set)
-    app.router.add_get("/api/bond/logs",      api_bond_logs)
+    app.router.add_get("/api/bond/logs",             api_bond_logs)
+    app.router.add_get("/api/bond/discover-cities",  api_bond_discover_cities)
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()

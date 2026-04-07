@@ -447,6 +447,21 @@
       </table>
     </div>
 
+    <!-- Discover cities from Polymarket -->
+    <div style="margin-top:16px;margin-bottom:4px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      <button class="btn btn-purple btn-xs" onclick="discoverCities()" id="discover-btn">⟳ DISCOVER FROM POLYMARKET</button>
+      <span id="discover-status" style="font-size:11px;color:var(--muted);"></span>
+    </div>
+    <div id="discover-results" style="display:none;margin-top:10px;">
+      <div style="font-size:11px;color:var(--muted);letter-spacing:1px;margin-bottom:6px;">CITIES FOUND IN POLYMARKET QUESTIONS (NOT YET IN YOUR LIST)</div>
+      <div class="scroll-table" style="max-height:220px;">
+        <table>
+          <thead><tr><th>CITY</th><th>LAT</th><th>LON</th><th>MARKETS</th><th></th></tr></thead>
+          <tbody id="discover-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- Aliases -->
     <div style="margin-top:20px;">
       <div style="font-size:11px;color:var(--muted);letter-spacing:1px;margin-bottom:8px;">ALIASES (alias → canonical)</div>
@@ -983,6 +998,51 @@ async function removeCity(name) {
   delete bondCities[name];
   await saveCities();
   renderCities();
+}
+async function discoverCities() {
+  const btn = document.getElementById('discover-btn');
+  const status = document.getElementById('discover-status');
+  const resultsDiv = document.getElementById('discover-results');
+  btn.disabled = true;
+  status.textContent = 'Scanning Polymarket & geocoding… (may take ~30s)';
+  try {
+    const r = await apiFetch('/api/bond/discover-cities');
+    const candidates = r.candidates || [];
+    const tbody = document.getElementById('discover-tbody');
+    tbody.innerHTML = '';
+    if (!candidates.length) {
+      status.textContent = 'No unknown cities found — all parsed cities are already in your list.';
+      resultsDiv.style.display = 'none';
+    } else {
+      candidates.forEach(c => {
+        const tr = document.createElement('tr');
+        const hasCoords = c.lat !== null && c.lon !== null;
+        tr.innerHTML = `
+          <td><strong>${c.name}</strong>${c.query !== c.name ? `<br><span style="color:var(--muted);font-size:10px;">(parsed as: ${c.query})</span>` : ''}</td>
+          <td>${hasCoords ? c.lat : '<span style="color:var(--muted)">—</span>'}</td>
+          <td>${hasCoords ? c.lon : '<span style="color:var(--muted)">—</span>'}</td>
+          <td style="color:var(--cyan)">${c.market_count}</td>
+          <td>${hasCoords
+            ? `<button class="btn-xs btn-xs-save" onclick="addDiscoveredCity('${c.name.replace(/'/g,"\\'")}',${c.lat},${c.lon},this)">+ ADD</button>`
+            : `<span style="color:var(--muted);font-size:10px;">no coords</span>`
+          }</td>`;
+        tbody.appendChild(tr);
+      });
+      status.textContent = `Found ${candidates.length} cities not in your list.`;
+      resultsDiv.style.display = 'block';
+    }
+  } catch(e) {
+    status.textContent = `Error: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+async function addDiscoveredCity(name, lat, lon, btnEl) {
+  bondCities[name] = [lat, lon];
+  await saveCities();
+  renderCities();
+  btnEl.textContent = '✓ ADDED';
+  btnEl.disabled = true;
 }
 async function addAlias() {
   const from = document.getElementById('new-alias-from').value.trim();

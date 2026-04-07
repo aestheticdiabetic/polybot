@@ -55,33 +55,45 @@ async def scan_weather_markets() -> list[MarketCandidate]:
     log.info(f"BOND_GAMMA_FETCH total_raw={len(raw_markets)}")
 
     candidates: list[MarketCandidate] = []
+    fail_parse  = 0
+    fail_city   = 0
+    fail_token  = 0
+    fail_ask    = 0
+    fail_time   = 0
+    unknown_cities: dict[str, int] = {}
+
     for m in raw_markets:
         question = m.get("question", "")
         parsed = parse_market_question(question)
         if parsed is None:
+            fail_parse += 1
             continue
 
         # Resolve city to canonical name
         try:
             canonical, _, _ = _resolve_city(parsed["city"])
         except UnknownCityError:
-            log.debug(f"scanner: skipping unrecognised city '{parsed['city']}' in: {question[:60]}")
+            fail_city += 1
+            city = parsed["city"]
+            unknown_cities[city] = unknown_cities.get(city, 0) + 1
             continue
 
         # Get YES token ID
         token_id = _extract_yes_token_id(m)
         if not token_id:
-            log.debug(f"scanner: no YES token for market {m.get('id', '?')}")
+            fail_token += 1
             continue
 
         # Fetch orderbook ask
         best_ask = await _get_best_ask(token_id)
         if best_ask <= 0.0 or best_ask >= 1.0:
+            fail_ask += 1
             continue
 
         # Parse resolution time
         resolution_time = _parse_resolution_time(m)
         if resolution_time is None:
+            fail_time += 1
             continue
 
         candidates.append(MarketCandidate(
@@ -97,8 +109,38 @@ async def scan_weather_markets() -> list[MarketCandidate]:
             resolution_time=resolution_time,
         ))
 
-    log.info(f"BOND_SCAN_COMPLETE markets_found={len(raw_markets)} qualifying={len(candidates)}")
+    log.info(
+        f"BOND_SCAN_COMPLETE total={len(raw_markets)} "
+        f"fail_parse={fail_parse} fail_city={fail_city} "
+        f"fail_token={fail_token} fail_ask={fail_ask} fail_time={fail_time} "
+        f"qualifying={len(candidates)}"
+    )
+    if unknown_cities:
+        top = sorted(unknown_cities, key=lambda c: -unknown_cities[c])[:15]
+        log.info(f"BOND_UNKNOWN_CITIES (not in city list, top 15 by frequency): {top}")
+
     return candidates
+
+
+def extract_unknown_cities(raw_markets: list[dict]) -> dict[str, int]:
+    """
+    Scan raw Gamma market dicts for cities that appear in parsed questions
+    but are not in BOND_CITIES. Returns {city_name: occurrence_count}.
+    """
+    unknown: dict[str, int] = {}
+    for m in raw_markets:
+        question = m.get("question", "")
+        parsed = parse_market_question(question)
+        if not parsed:
+            continue
+        city = parsed.get("city", "")
+        if not city:
+            continue
+        try:
+            _resolve_city(city)
+        except UnknownCityError:
+            unknown[city] = unknown.get(city, 0) + 1
+    return unknown
 
 
 def parse_market_question(question: str) -> Optional[dict]:
@@ -191,7 +233,15 @@ async def _fetch_gamma_markets() -> list[dict]:
             seen.add(mid)
             unique.append(m)
 
-    return unique
+    # Client-side keyword filter: only keep temperature-related questions.
+    # Guards against tag_slug being ignored by the API (which returns all ~50k markets).
+    _TEMP_RE = re.compile(
+        r"temperature|°[CcFf]|\bF\b|\bC\b|degrees?|daily.?high|highest.?temp|high.?temp",
+        re.IGNORECASE,
+    )
+    filtered = [m for m in unique if _TEMP_RE.search(m.get("question", ""))]
+    log.info(f"BOND_GAMMA_KEYWORD_FILTER raw={len(unique)} after_filter={len(filtered)}")
+    return filtered
 
 
 def _extract_city(question: str) -> Optional[str]:

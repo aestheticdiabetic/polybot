@@ -120,6 +120,27 @@ def fahrenheit_to_celsius(f: float) -> float:
     return (f - 32) * 5 / 9
 
 
+async def geocode_city(name: str) -> tuple[str, float, float]:
+    """
+    Resolve a city name to (display_name, lat, lon) using Open-Meteo geocoding.
+    Free API, no key required.
+    Raises UnknownCityError if no results found.
+    """
+    url = "https://geocoding-api.open-meteo.com/v1/search"
+    params = {"name": name, "count": 1, "language": "en", "format": "json"}
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url, params=params) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+    results = data.get("results", [])
+    if not results:
+        raise UnknownCityError(f"No geocoding results for '{name}'")
+    r = results[0]
+    display = r.get("name", name)
+    return display, float(r["latitude"]), float(r["longitude"])
+
+
 # ── Internal helpers ──────────────────────────────────────────────
 
 def _resolve_city(city_name: str) -> tuple[str, float, float]:
