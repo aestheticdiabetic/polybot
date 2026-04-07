@@ -78,14 +78,18 @@ async def scan_weather_markets() -> list[MarketCandidate]:
             unknown_cities[city] = unknown_cities.get(city, 0) + 1
             continue
 
-        # Get YES token ID
-        token_id = _extract_yes_token_id(m)
+        # Get YES token ID + embedded price from Gamma response
+        token_id, gamma_price = _extract_yes_token_and_price(m)
         if not token_id:
             fail_token += 1
             continue
 
-        # Fetch orderbook ask
-        best_ask = await _get_best_ask(token_id)
+        # Use Gamma-embedded price if available; fall back to CLOB orderbook
+        if gamma_price is not None and 0.0 < gamma_price < 1.0:
+            best_ask = gamma_price
+        else:
+            best_ask = await _get_best_ask(token_id)
+
         if best_ask <= 0.0 or best_ask >= 1.0:
             fail_ask += 1
             continue
@@ -359,30 +363,56 @@ def _extract_temp_bucket(question: str) -> tuple[str, Optional[float], Optional[
     return "C", None, None
 
 
-def _extract_yes_token_id(market: dict) -> Optional[str]:
+def _extract_yes_token_and_price(market: dict) -> tuple[Optional[str], Optional[float]]:
     """
-    Extract the token_id for the YES outcome from a Gamma market dict.
-    Gamma API structure varies — try several known field shapes.
+    Extract the token_id AND current price for the YES outcome from a Gamma market dict.
+    Gamma embeds prices so we can avoid a separate CLOB orderbook call in most cases.
+
+    Returns (token_id, price) — price is None if not found in Gamma response.
     """
-    # Shape 1: tokens list [{"outcome": "Yes", "token_id": "..."}, ...]
+    token_id: Optional[str] = None
+    price: Optional[float]  = None
+
+    # Shape 1: tokens list [{"outcome": "Yes", "token_id": "...", "price": "0.65"}, ...]
     tokens = market.get("tokens", [])
     for tok in tokens:
         if str(tok.get("outcome", "")).lower() in ("yes", "1"):
-            return tok.get("token_id") or tok.get("tokenId")
+            token_id = tok.get("token_id") or tok.get("tokenId")
+            raw = tok.get("price")
+            if raw is not None:
+                try:
+                    price = float(raw)
+                except (ValueError, TypeError):
+                    pass
+            break
 
     # Shape 2: clob_token_ids list (index 0 = YES by convention)
-    clob_ids = market.get("clobTokenIds") or market.get("clob_token_ids", [])
-    if clob_ids:
-        return clob_ids[0]
+    if not token_id:
+        clob_ids = market.get("clobTokenIds") or market.get("clob_token_ids", [])
+        if clob_ids:
+            token_id = clob_ids[0]
 
-    # Shape 3: outcomes/outcomePrices parallel arrays
-    outcomes = market.get("outcomes", [])
-    token_ids = market.get("outcomePrices", [])  # sometimes tokenIds here
-    for i, o in enumerate(outcomes):
-        if str(o).lower() in ("yes", "1") and i < len(token_ids):
-            return token_ids[i]
+    # Price fallback: outcomePrices parallel to outcomes (index 0 = YES)
+    if price is None:
+        outcome_prices = market.get("outcomePrices", [])
+        if outcome_prices:
+            try:
+                price = float(outcome_prices[0])
+            except (ValueError, TypeError):
+                pass
 
-    return None
+    # Price fallback 2: top-level price/lastPrice fields
+    if price is None:
+        for key in ("price", "lastPrice", "lastTradePrice"):
+            raw = market.get(key)
+            if raw is not None:
+                try:
+                    price = float(raw)
+                    break
+                except (ValueError, TypeError):
+                    pass
+
+    return token_id, price
 
 
 async def _get_best_ask(token_id: str) -> float:
