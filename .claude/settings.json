@@ -7,7 +7,8 @@
       "Bash(git commit -m ':*)",
       "Bash(git push:*)",
       "Read(//c/Users/Angus/.vscode/predictionbot/venv/Lib/site-packages/py_clob_client/order_builder/**)",
-      "Read(//c/Users/Angus/.vscode/predictionbot/venv/Lib/site-packages/py_clob_client/**)"
+      "Read(//c/Users/Angus/.vscode/predictionbot/venv/Lib/site-packages/py_clob_client/**)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('bot/trader.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")"
     ]
   }
 }

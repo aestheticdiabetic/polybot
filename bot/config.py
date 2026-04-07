@@ -138,6 +138,70 @@ class SimConfig:
 
 SIM = SimConfig()
 
+# ─── Bonding mode ─────────────────────────────────────────────────
+BOT_MODE = os.getenv("BOT_MODE", "ARBI")   # "ARBI" | "BOND"
+
+BOND_LOG_FILE    = os.getenv("BOND_LOG_FILE",    "/app/logs/polybot_bond.log")
+BOND_LEDGER_FILE = os.getenv("BOND_LEDGER_FILE", "/app/logs/bonding_positions.json")
+
+# Entry thresholds
+BOND_MIN_EV_CORE       = 0.02   # min expected value per share, core tier
+BOND_MIN_EV_SECONDARY  = 0.01   # min EV, secondary tier
+BOND_CONFIDENCE_FLOOR  = 0.70   # min forecast probability to enter any position
+BOND_EDGE_FLOOR        = 0.15   # min gap between true probability and market ask
+
+# Position sizing
+BOND_SHARES_CORE             = 25    # shares for core bonds
+BOND_SHARES_SECONDARY        = 15    # shares for secondary positions
+BOND_SHARES_WING             = 20    # shares for wing bets (cheap, more shares)
+BOND_MAX_CAPITAL_PER_CLUSTER = 4.00  # max $ across all buckets for one city/date
+
+# Exit thresholds
+BOND_EARLY_EXIT_PRICE     = 0.97  # sell core when price hits this
+BOND_WING_EXIT_MULTIPLIER = 5.0   # sell wing if price >= cost × this
+BOND_WING_MIN_ABS_GAIN    = 2.00  # AND absolute gain >= this value (USD)
+BOND_GAS_FLOOR_HOURS      = 4     # don't exit within N hours of resolution
+
+# Scanner settings
+BOND_POLL_INTERVAL_SECS  = 360   # seconds between full market scans
+BOND_MAX_MARKETS_PER_RUN = 150   # max orders placed per scan cycle
+
+# City list with (lat, lon) — extend as forecast accuracy is validated
+BOND_CITIES: dict[str, tuple[float, float]] = {
+    "Tokyo":       (35.6762,  139.6503),
+    "London":      (51.5074,   -0.1278),
+    "New York":    (40.7128,  -74.0060),
+    "Los Angeles": (34.0522, -118.2437),
+    "Chicago":     (41.8781,  -87.6298),
+    "Sydney":     (-33.8688,  151.2093),
+    "Munich":      (48.1351,   11.5820),
+    "Paris":       (48.8566,    2.3522),
+    "Dubai":       (25.2048,   55.2708),
+    "Singapore":    (1.3521,  103.8198),
+    "Seoul":       (37.5665,  126.9780),
+    "Istanbul":    (41.0082,   28.9784),
+    "Ankara":      (39.9334,   32.8597),
+    "Chengdu":     (30.5728,  104.0668),
+    "Busan":       (35.1796,  129.0756),
+    "Seattle":     (47.6062, -122.3321),
+    "Miami":       (25.7617,  -80.1918),
+    "Toronto":     (43.6532,  -79.3832),
+    "Berlin":      (52.5200,   13.4050),
+    "Amsterdam":   (52.3676,    4.9041),
+}
+
+# City name aliases — maps Polymarket's naming variants to canonical names above
+BOND_CITY_ALIASES: dict[str, str] = {
+    "NYC": "New York", "NY": "New York", "New_York": "New York",
+    "LA": "Los Angeles", "Los_Angeles": "Los Angeles",
+    "Tokyo, Japan": "Tokyo",
+    "London, UK": "London", "London, England": "London",
+    "Paris, France": "Paris",
+    "Berlin, Germany": "Berlin",
+    "Seoul, South Korea": "Seoul",
+    "Buenos Aires": "Buenos Aires",  # add coords if adding to BOND_CITIES
+}
+
 # ─── Dashboard ────────────────────────────────────────────────────
 DASHBOARD_HOST = "0.0.0.0"
 DASHBOARD_PORT = 8080

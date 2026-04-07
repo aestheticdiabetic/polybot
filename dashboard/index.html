@@ -9,7 +9,7 @@
     --bg: #0f1117; --bg2: #161b27; --bg3: #1e2535;
     --border: #2a3348; --text: #c8d8e8; --muted: #5a6a82;
     --green: #22c55e; --red: #ef4444; --amber: #f59e0b;
-    --blue: #3b82f6; --purple: #8b5cf6;
+    --blue: #3b82f6; --purple: #8b5cf6; --cyan: #06b6d4;
     --font: 'IBM Plex Mono', 'Courier New', monospace;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -19,11 +19,21 @@
   .mode-badge { font-size: 10px; padding: 3px 10px; border-radius: 4px; letter-spacing: 1px; font-weight: 600; }
   .mode-sim  { background: #f59e0b22; color: #f59e0b; border: 1px solid #f59e0b44; }
   .mode-live { background: #ef444422; color: #ef4444; border: 1px solid #ef444444; }
+  .mode-bond { background: #8b5cf622; color: #8b5cf6; border: 1px solid #8b5cf644; }
   .status-dot { width: 8px; height: 8px; border-radius: 50%; margin-left: auto; }
   .dot-running { background: var(--green); box-shadow: 0 0 6px var(--green); }
   .dot-stopped { background: var(--muted); }
   .uptime { font-size: 11px; color: var(--muted); }
-  main { padding: 20px 24px; max-width: 1200px; margin: 0 auto; }
+
+  /* Tab navigation */
+  .tab-bar { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 0 24px; display: flex; gap: 0; }
+  .tab-btn { padding: 10px 22px; font-family: var(--font); font-size: 11px; font-weight: 600; letter-spacing: 2px; border: none; background: none; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; transition: color .15s, border-color .15s; }
+  .tab-btn.active { color: var(--text); border-bottom-color: var(--blue); }
+  .tab-btn:hover:not(.active) { color: var(--text); }
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
+
+  main { padding: 20px 24px; max-width: 1300px; margin: 0 auto; }
 
   /* Controls */
   .controls { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; align-items: center; }
@@ -33,8 +43,11 @@
   .btn-stop  { background: #ef444422; border-color: #ef444466; color: #ef4444; }
   .btn-sim   { background: #f59e0b22; border-color: #f59e0b66; color: #f59e0b; }
   .btn-live  { background: #3b82f622; border-color: #3b82f666; color: #3b82f6; }
+  .btn-save  { background: #22c55e22; border-color: #22c55e66; color: #22c55e; }
+  .btn-danger { background: #ef444422; border-color: #ef444466; color: #ef4444; }
+  .btn-purple { background: #8b5cf622; border-color: #8b5cf666; color: #8b5cf6; }
   .btn:disabled { opacity: .3; cursor: not-allowed; }
-  select, input[type=number] {
+  select, input[type=number], input[type=text] {
     background: var(--bg3); border: 1px solid var(--border); color: var(--text);
     padding: 7px 10px; border-radius: 6px; font-family: var(--font); font-size: 12px;
   }
@@ -46,7 +59,8 @@
   .metric-label { font-size: 10px; color: var(--muted); letter-spacing: 2px; text-transform: uppercase; margin-bottom: 6px; }
   .metric-value { font-size: 22px; font-weight: 700; }
   .metric-sub { font-size: 10px; color: var(--muted); margin-top: 2px; }
-  .green { color: var(--green); } .red { color: var(--red); } .amber { color: var(--amber); } .blue { color: var(--blue); }
+  .green { color: var(--green); } .red { color: var(--red); } .amber { color: var(--amber); }
+  .blue { color: var(--blue); } .purple { color: var(--purple); } .cyan { color: var(--cyan); }
 
   /* Section */
   .section { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
@@ -58,26 +72,36 @@
   .chart-wrap { position: relative; height: 160px; }
   canvas { width: 100% !important; }
 
-  /* Trades table */
+  /* Tables */
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   th { color: var(--muted); font-weight: 400; text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 10px; letter-spacing: 1px; }
   td { padding: 7px 8px; border-bottom: 1px solid #1e2535; }
   tr:last-child td { border-bottom: none; }
   .pill { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 600; }
-  .pill-open     { background: #3b82f622; color: #3b82f6; }
-  .pill-won      { background: #22c55e22; color: #22c55e; }
-  .pill-lost     { background: #ef444422; color: #ef4444; }
-  .pill-cancelled{ background: #5a6a8222; color: #5a6a82; }
+  .pill-open      { background: #3b82f622; color: #3b82f6; }
+  .pill-sold      { background: #22c55e22; color: #22c55e; }
+  .pill-resolved  { background: #8b5cf622; color: #8b5cf6; }
+  .pill-won       { background: #22c55e22; color: #22c55e; }
+  .pill-lost      { background: #ef444422; color: #ef4444; }
+  .pill-cancelled { background: #5a6a8222; color: #5a6a82; }
+  .pill-core      { background: #3b82f622; color: #3b82f6; }
+  .pill-secondary { background: #f59e0b22; color: #f59e0b; }
+  .pill-wing      { background: #8b5cf622; color: #8b5cf6; }
 
-  /* Config panel */
+  /* Config panels */
   .config-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .config-field { display: flex; flex-direction: column; gap: 5px; }
   .config-field input { width: 100%; }
+  .config-desc { font-size: 10px; color: var(--muted); }
 
   /* Logs */
-  #log-output { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; font-size: 11px; height: 200px; overflow-y: auto; color: var(--muted); }
-  .log-won  { color: var(--green); }
-  .log-opened { color: var(--blue); }
+  #log-output, #bond-log-output { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; font-size: 11px; height: 240px; overflow-y: auto; color: var(--muted); white-space: pre-wrap; word-break: break-all; }
+  .log-exit    { color: var(--green); }
+  .log-buy     { color: var(--blue); }
+  .log-skip    { color: var(--muted); }
+  .log-error   { color: var(--red); }
+  .log-won     { color: var(--green); }
+  .log-opened  { color: var(--blue); }
   .log-cancelled { color: var(--amber); }
 
   /* Markets panel */
@@ -94,6 +118,22 @@
   /* Sim panel */
   .sim-panel { background: #f59e0b0a; border: 1px solid #f59e0b33; border-radius: 8px; padding: 14px; margin-bottom: 16px; }
   .sim-panel h3 { font-size: 11px; color: #f59e0b; letter-spacing: 2px; margin-bottom: 10px; }
+
+  /* Bond-specific */
+  .bond-panel { background: #8b5cf60a; border: 1px solid #8b5cf633; border-radius: 8px; padding: 14px; margin-bottom: 16px; }
+  .bond-panel h3 { font-size: 11px; color: #8b5cf6; letter-spacing: 2px; margin-bottom: 6px; }
+  .tier-row { display: grid; grid-template-columns: 80px 1fr 1fr 1fr 1fr 1fr; gap: 8px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .tier-row:last-child { border-bottom: none; }
+  .tier-header { font-size: 10px; color: var(--muted); letter-spacing: 1px; }
+  .city-editor { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  .city-editor input { flex: 1; min-width: 120px; }
+  textarea { background: var(--bg3); border: 1px solid var(--border); color: var(--text); padding: 8px; border-radius: 6px; font-family: var(--font); font-size: 11px; width: 100%; resize: vertical; }
+  .scroll-table { max-height: 420px; overflow-y: auto; }
+  .inline-actions { display: flex; gap: 6px; }
+  .btn-xs { padding: 3px 8px; font-size: 10px; border-radius: 4px; border: 1px solid; cursor: pointer; font-family: var(--font); }
+  .btn-xs-danger { background: #ef444411; border-color: #ef444444; color: #ef4444; }
+  .btn-xs-save   { background: #22c55e11; border-color: #22c55e44; color: #22c55e; }
+  .last-cycle { font-size: 11px; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -106,9 +146,15 @@
   <div class="status-dot dot-stopped" id="status-dot"></div>
 </header>
 
+<div class="tab-bar">
+  <button class="tab-btn active" onclick="switchTab('arbi')">ARBI</button>
+  <button class="tab-btn" onclick="switchTab('bond')">BOND</button>
+</div>
+
+<!-- ═══════════════════════════════════════════════ ARBI TAB ══ -->
+<div id="tab-arbi" class="tab-pane active">
 <main>
 
-  <!-- Controls -->
   <div class="controls">
     <button class="btn btn-start" id="btn-start" onclick="startBot()">▶ START</button>
     <button class="btn btn-stop"  id="btn-stop"  onclick="stopBot()" disabled>■ STOP</button>
@@ -120,16 +166,14 @@
     <input type="number" id="sim-balance" value="1000" min="100" max="100000" step="100" style="width:100px;">
   </div>
 
-  <!-- Sim warning -->
   <div class="sim-panel" id="sim-panel">
     <h3>⚠ SIMULATION MODE — No real orders placed</h3>
-    <span style="color:#94a3b8;font-size:12px;">Realistic latency (~32ms p50), fill probability (92%), and fee simulation active. Set starting balance above and press START.</span>
+    <span style="color:#94a3b8;font-size:12px;">Realistic latency (~32ms p50), fill probability (92%), and fee simulation active.</span>
   </div>
 
-  <!-- Metrics -->
   <div class="metric-grid">
     <div class="metric">
-      <div class="metric-label">Balance <span id="balance-refresh-btn" onclick="refreshLiveBalance()" style="display:none;cursor:pointer;font-size:10px;color:#3b82f6;margin-left:4px;" title="Refresh from Polymarket">↺</span></div>
+      <div class="metric-label">Balance <span id="balance-refresh-btn" onclick="refreshLiveBalance()" style="display:none;cursor:pointer;font-size:10px;color:#3b82f6;margin-left:4px;" title="Refresh">↺</span></div>
       <div class="metric-value blue" id="m-balance">$0.00</div>
       <div class="metric-sub" id="m-balance-delta">—</div>
     </div>
@@ -170,7 +214,6 @@
     </div>
   </div>
 
-  <!-- Charts -->
   <div class="chart-row">
     <div class="section">
       <div class="section-title">Cumulative PnL</div>
@@ -192,7 +235,6 @@
     </div>
   </div>
 
-  <!-- Open brackets -->
   <div class="section">
     <div class="section-title">Open Brackets</div>
     <table id="open-table">
@@ -204,7 +246,6 @@
     </table>
   </div>
 
-  <!-- Recent trades -->
   <div class="section">
     <div class="section-title">Recent Trades (last 50)</div>
     <table id="trades-table">
@@ -216,20 +257,17 @@
     </table>
   </div>
 
-  <!-- Config editor -->
   <div class="section">
     <div class="section-title">Strategy Config (live edit)</div>
     <div class="config-grid" id="config-grid"></div>
-    <button class="btn btn-start" onclick="saveConfig()" style="margin-top:14px;">SAVE CONFIG</button>
+    <button class="btn btn-save" onclick="saveConfig()" style="margin-top:14px;">SAVE CONFIG</button>
   </div>
 
-  <!-- Trade log -->
   <div class="section">
     <div class="section-title">Trade Log</div>
     <div id="log-output"></div>
   </div>
 
-  <!-- Markets debug panel -->
   <div class="section">
     <div style="display:flex;align-items:center;margin-bottom:14px;">
       <span class="section-title" style="margin-bottom:0;">Tracked Markets (debug)</span>
@@ -239,10 +277,8 @@
       <input type="text" id="mkt-search" placeholder="filter asset or title…" style="width:200px;" oninput="renderMarkets()">
       <select id="mkt-window" onchange="renderMarkets()">
         <option value="">all windows</option>
-        <option value="5M">5M</option>
-        <option value="15M">15M</option>
-        <option value="1H">1H</option>
-        <option value="24H">24H</option>
+        <option value="5M">5M</option><option value="15M">15M</option>
+        <option value="1H">1H</option><option value="24H">24H</option>
       </select>
       <select id="mkt-sort" onchange="renderMarkets()">
         <option value="spread">sort: spread ↓</option>
@@ -262,363 +298,746 @@
   </div>
 
 </main>
+</div><!-- /tab-arbi -->
+
+<!-- ═══════════════════════════════════════════════ BOND TAB ══ -->
+<div id="tab-bond" class="tab-pane">
+<main>
+
+  <!-- Controls (shared start/stop) -->
+  <div class="controls">
+    <button class="btn btn-start" id="bond-btn-start" onclick="startBot()">▶ START</button>
+    <button class="btn btn-stop"  id="bond-btn-stop"  onclick="stopBot()" disabled>■ STOP</button>
+    <div style="width:1px;height:28px;background:var(--border);margin:0 4px;"></div>
+    <span class="last-cycle" id="bond-last-cycle">last cycle: —</span>
+  </div>
+
+  <div class="bond-panel">
+    <h3>BOND MODE — Weather market bonding strategy</h3>
+    <span style="color:#94a3b8;font-size:12px;">Buys YES shares in mispriced temperature markets using Open-Meteo forecasts. Exits at configured price targets.</span>
+  </div>
+
+  <!-- Bond metrics -->
+  <div class="metric-grid">
+    <div class="metric">
+      <div class="metric-label">Total Positions</div>
+      <div class="metric-value blue" id="bm-total">0</div>
+      <div class="metric-sub" id="bm-open-count">0 open</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Capital Deployed</div>
+      <div class="metric-value amber" id="bm-capital">$0.00</div>
+      <div class="metric-sub">open positions</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Realised PnL</div>
+      <div class="metric-value" id="bm-pnl">$0.0000</div>
+      <div class="metric-sub">sold positions</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">CORE Win Rate</div>
+      <div class="metric-value green" id="bm-core-wr">—</div>
+      <div class="metric-sub" id="bm-core-wl">0 sold</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">SECONDARY Win Rate</div>
+      <div class="metric-value amber" id="bm-sec-wr">—</div>
+      <div class="metric-sub" id="bm-sec-wl">0 sold</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">WING Win Rate</div>
+      <div class="metric-value purple" id="bm-wing-wr">—</div>
+      <div class="metric-sub" id="bm-wing-wl">0 sold</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Last Scan</div>
+      <div class="metric-value" id="bm-markets-scanned">—</div>
+      <div class="metric-sub" id="bm-opps-found">markets scanned</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Orders Placed</div>
+      <div class="metric-value cyan" id="bm-orders-placed">—</div>
+      <div class="metric-sub">last cycle</div>
+    </div>
+  </div>
+
+  <!-- Tier performance -->
+  <div class="section">
+    <div class="section-title">Tier Performance</div>
+    <div style="display:grid;grid-template-columns:80px 1fr 1fr 1fr 1fr 1fr;gap:8px;padding:0 0 8px;border-bottom:1px solid var(--border);">
+      <span class="tier-header">TIER</span>
+      <span class="tier-header">OPEN</span>
+      <span class="tier-header">SOLD</span>
+      <span class="tier-header">WINS</span>
+      <span class="tier-header">WIN RATE</span>
+      <span class="tier-header">PnL</span>
+    </div>
+    <div id="tier-perf-rows"></div>
+  </div>
+
+  <!-- Open positions -->
+  <div class="section">
+    <div style="display:flex;align-items:center;margin-bottom:14px;gap:12px;">
+      <span class="section-title" style="margin-bottom:0;">Open Positions</span>
+      <select id="pos-sort" onchange="renderPositions()" style="font-size:11px;padding:4px 8px;">
+        <option value="time">sort: entry time ↓</option>
+        <option value="resolution">sort: resolution ↑</option>
+        <option value="tier">sort: tier</option>
+      </select>
+      <select id="pos-tier-filter" onchange="renderPositions()" style="font-size:11px;padding:4px 8px;">
+        <option value="">all tiers</option>
+        <option value="CORE">CORE</option>
+        <option value="SECONDARY">SECONDARY</option>
+        <option value="WING">WING</option>
+      </select>
+    </div>
+    <div class="scroll-table">
+      <table>
+        <thead><tr>
+          <th>CITY</th><th>QUESTION</th><th>TIER</th><th>SHARES</th>
+          <th>ENTRY</th><th>CAPITAL</th><th>RESOLUTION</th><th>AGE</th>
+        </tr></thead>
+        <tbody id="open-pos-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Recent sold positions -->
+  <div class="section">
+    <div class="section-title">Recent Sold Positions (last 50)</div>
+    <div class="scroll-table">
+      <table>
+        <thead><tr>
+          <th>CITY</th><th>QUESTION</th><th>TIER</th><th>SHARES</th>
+          <th>ENTRY</th><th>EXIT</th><th>PnL</th><th>STATUS</th><th>SOLD AT</th>
+        </tr></thead>
+        <tbody id="sold-pos-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Bond config editor -->
+  <div class="section">
+    <div class="section-title">Bond Config (live edit)</div>
+    <div class="config-grid" id="bond-config-grid"></div>
+    <button class="btn btn-save" onclick="saveBondConfig()" style="margin-top:14px;">SAVE CONFIG</button>
+    <span id="bond-cfg-status" style="font-size:11px;color:var(--muted);margin-left:12px;"></span>
+  </div>
+
+  <!-- City manager -->
+  <div class="section">
+    <div class="section-title">City Manager</div>
+
+    <!-- Add city form -->
+    <div style="margin-bottom:16px;">
+      <div style="font-size:11px;color:var(--muted);letter-spacing:1px;margin-bottom:8px;">ADD CITY</div>
+      <div class="city-editor">
+        <input type="text"   id="new-city-name" placeholder="City name (e.g. Mumbai)" style="width:200px;">
+        <input type="number" id="new-city-lat"  placeholder="Lat (e.g. 19.076)" step="0.0001" style="width:140px;">
+        <input type="number" id="new-city-lon"  placeholder="Lon (e.g. 72.877)" step="0.0001" style="width:140px;">
+        <button class="btn btn-purple btn-xs" onclick="addCity()">+ ADD</button>
+      </div>
+    </div>
+
+    <!-- City table -->
+    <div class="scroll-table" style="max-height:300px;">
+      <table>
+        <thead><tr><th>CITY</th><th>LAT</th><th>LON</th><th></th></tr></thead>
+        <tbody id="cities-tbody"></tbody>
+      </table>
+    </div>
+
+    <!-- Aliases -->
+    <div style="margin-top:20px;">
+      <div style="font-size:11px;color:var(--muted);letter-spacing:1px;margin-bottom:8px;">ALIASES (alias → canonical)</div>
+      <div class="city-editor" style="margin-bottom:8px;">
+        <input type="text" id="new-alias-from" placeholder="Alias (e.g. NYC)" style="width:180px;">
+        <span style="color:var(--muted);">→</span>
+        <input type="text" id="new-alias-to"   placeholder="Canonical (e.g. New York)" style="width:200px;">
+        <button class="btn btn-purple btn-xs" onclick="addAlias()">+ ADD</button>
+      </div>
+      <div class="scroll-table" style="max-height:220px;">
+        <table>
+          <thead><tr><th>ALIAS</th><th>CANONICAL</th><th></th></tr></thead>
+          <tbody id="aliases-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bond log viewer -->
+  <div class="section">
+    <div style="display:flex;align-items:center;margin-bottom:12px;gap:10px;">
+      <span class="section-title" style="margin-bottom:0;">Bond Log</span>
+      <button class="btn btn-xs btn-xs-save" onclick="loadBondLogs()">↺ REFRESH</button>
+    </div>
+    <div id="bond-log-output"></div>
+  </div>
+
+</main>
+</div><!-- /tab-bond -->
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script>
+// ── Shared state ───────────────────────────────────────────────────
 const POLL_MS = 5000;
 let mode = 'sim';
 let marketsData = [];
 let pnlData = [], pnlLabels = [];
-let spreadBuckets = new Array(20).fill(0);
-let latencyBuckets = new Array(20).fill(0);
-let hourlyVol = [];
 let pnlChart, volChart, spreadChart, latencyChart;
 let initialBalance = null;
+let currentTab = 'arbi';
+// Bond state
+let bondPositions = [];
+let bondCities    = {};
+let bondAliases   = {};
+let pendingCityChanges   = false;
+let pendingAliasChanges  = false;
 
 const C = {
-  green:  '#22c55e', red: '#ef4444', amber: '#f59e0b',
-  blue:   '#3b82f6', muted: '#2a3348', text: '#c8d8e8', bg: '#161b27'
+  green:'#22c55e', red:'#ef4444', amber:'#f59e0b',
+  blue:'#3b82f6', muted:'#2a3348', text:'#c8d8e8', bg:'#161b27',
+  purple:'#8b5cf6', cyan:'#06b6d4',
 };
 
-function fmtTime(ts) {
-  if (!ts) return '—';
-  return new Date(ts * 1000).toLocaleTimeString();
+// ── Utilities ──────────────────────────────────────────────────────
+function fmtTime(ts) { return ts ? new Date(ts*1000).toLocaleTimeString() : '—'; }
+function fmtMs(ms)   { return ms ? Math.round(ms)+'ms' : '—'; }
+function fmtUsdc(v)  { return v!=null ? '$'+parseFloat(v).toFixed(4) : '—'; }
+function fmtUptime(s){
+  if (s<60) return s+'s';
+  if (s<3600) return Math.floor(s/60)+'m '+(s%60)+'s';
+  return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';
 }
-function fmtMs(ms) { return ms ? Math.round(ms) + 'ms' : '—'; }
-function fmtUsdc(v) { return v != null ? '$' + parseFloat(v).toFixed(4) : '—'; }
-function fmtUptime(s) {
-  if (s < 60) return s + 's';
-  if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
-  return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
+function fmtTimeLeft(s){
+  if (s==null) return '—';
+  if (s<0)    return 'expired';
+  if (s<60)   return s+'s';
+  if (s<3600) return Math.floor(s/60)+'m';
+  return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';
+}
+function fmtAgo(isoStr) {
+  if (!isoStr) return '—';
+  const diff = (Date.now() - new Date(isoStr).getTime()) / 1000;
+  return fmtUptime(Math.round(diff));
+}
+function resolutionSecsLeft(isoStr) {
+  if (!isoStr) return null;
+  return Math.round((new Date(isoStr).getTime() - Date.now()) / 1000);
 }
 
 async function apiFetch(url, opts={}) {
-  const r = await fetch(url, {
-    ...opts,
-    headers: { 'Content-Type': 'application/json', ...(opts.headers||{}) }
-  });
+  const r = await fetch(url, { ...opts, headers:{'Content-Type':'application/json',...(opts.headers||{})} });
   return r.json();
 }
 
-async function startBot() {
-  const balance = parseFloat(document.getElementById('sim-balance').value) || 1000;
-  const btn = document.getElementById('btn-start');
-  btn.disabled = true;
-  btn.textContent = '⏳ STARTING...';
-  try {
-    await apiFetch('/api/start', {
-      method: 'POST',
-      body: JSON.stringify({ mode, balance })
-    });
-    await poll();
-  } catch(e) {
-    console.error('Start failed:', e);
-    btn.disabled = false;
+// ── Tab switching ──────────────────────────────────────────────────
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.tab-pane').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-'+tab).classList.add('active');
+  document.querySelectorAll('.tab-btn').forEach(el => {
+    if (el.textContent.trim().toLowerCase() === tab) el.classList.add('active');
+  });
+  if (tab === 'bond') {
+    loadBondCities();
+    loadBondConfig();
+    loadBondLogs();
   }
-  btn.textContent = '▶ START';
+}
+
+// ── Bot control (shared) ───────────────────────────────────────────
+async function startBot() {
+  const balance = parseFloat(document.getElementById('sim-balance')?.value)||1000;
+  ['btn-start','bond-btn-start'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) { el.disabled=true; el.textContent='⏳ STARTING...'; }
+  });
+  try {
+    await apiFetch('/api/start', { method:'POST', body:JSON.stringify({mode,balance}) });
+    await poll();
+  } catch(e) { console.error('Start failed:',e); }
+  ['btn-start','bond-btn-start'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = '▶ START';
+  });
 }
 async function stopBot() {
-  await apiFetch('/api/stop', { method: 'POST' });
+  await apiFetch('/api/stop', {method:'POST'});
 }
 function setMode(m) {
   mode = m;
-  document.getElementById('sim-panel').style.display = m === 'sim' ? 'block' : 'none';
+  const sp = document.getElementById('sim-panel');
+  if (sp) sp.style.display = m==='sim'?'block':'none';
   document.getElementById('mode-badge').textContent = m.toUpperCase();
-  document.getElementById('mode-badge').className = 'mode-badge mode-' + m;
-  document.getElementById('balance-refresh-btn').style.display = m === 'live' ? 'inline' : 'none';
+  document.getElementById('mode-badge').className = 'mode-badge mode-'+m;
+  const rb = document.getElementById('balance-refresh-btn');
+  if (rb) rb.style.display = m==='live'?'inline':'none';
 }
 
 async function refreshLiveBalance() {
   const btn = document.getElementById('balance-refresh-btn');
-  btn.textContent = '…';
+  btn.textContent='…';
   try {
     const r = await apiFetch('/api/live-balance');
-    if (r.ok) {
-      document.getElementById('m-balance').textContent = '$' + parseFloat(r.balance).toFixed(2);
-    }
-  } finally {
-    btn.textContent = '↺';
-  }
+    if (r.ok) document.getElementById('m-balance').textContent='$'+parseFloat(r.balance).toFixed(2);
+  } finally { btn.textContent='↺'; }
 }
 
+// ── ARBI metrics ───────────────────────────────────────────────────
 function updateMetrics(d) {
   const m = d.metrics;
   const bal = parseFloat(d.balance);
-  if (initialBalance === null && d.running) initialBalance = bal;
+  if (initialBalance===null && d.running) initialBalance=bal;
 
-  document.getElementById('m-balance').textContent = '$' + bal.toFixed(2);
-  const delta = initialBalance != null ? bal - initialBalance : 0;
+  document.getElementById('m-balance').textContent = '$'+bal.toFixed(2);
+  const delta = initialBalance!=null ? bal-initialBalance : 0;
   document.getElementById('m-balance-delta').textContent =
-    (delta >= 0 ? '+' : '') + '$' + delta.toFixed(4) + ' from start';
+    (delta>=0?'+':'')+'$'+delta.toFixed(4)+' from start';
 
   const netEl = document.getElementById('m-net');
-  netEl.textContent = (m.total_net_usdc >= 0 ? '+' : '') + '$' + m.total_net_usdc.toFixed(4);
-  netEl.className = 'metric-value ' + (m.total_net_usdc >= 0 ? 'green' : 'red');
+  netEl.textContent=(m.total_net_usdc>=0?'+':'')+fmtUsdc(m.total_net_usdc);
+  netEl.className='metric-value '+(m.total_net_usdc>=0?'green':'red');
 
-  document.getElementById('m-1h').textContent = 'last 1h: ' + fmtUsdc(m.net_last_1h);
-  document.getElementById('m-winrate').textContent = m.win_rate + '%';
-  document.getElementById('m-wl').textContent = m.won + 'W / ' + m.lost + 'L';
-  document.getElementById('m-total').textContent = m.total_brackets;
-  document.getElementById('m-open').textContent = m.open_brackets + ' open';
-  document.getElementById('m-spread').textContent = m.avg_spread.toFixed(3) + '%';
-  document.getElementById('m-latency').textContent = m.avg_latency_ms != null ? m.avg_latency_ms.toFixed(0) + 'ms' : '--';
-  document.getElementById('m-fees').textContent = '-$' + m.total_fees_usdc.toFixed(4);
-  document.getElementById('m-gas').textContent = 'gas: $' + m.total_gas_usdc.toFixed(4);
-
+  document.getElementById('m-1h').textContent      = 'last 1h: '+fmtUsdc(m.net_last_1h);
+  document.getElementById('m-winrate').textContent  = m.win_rate+'%';
+  document.getElementById('m-wl').textContent       = m.won+'W / '+m.lost+'L';
+  document.getElementById('m-total').textContent    = m.total_brackets;
+  document.getElementById('m-open').textContent     = m.open_brackets+' open';
+  document.getElementById('m-spread').textContent   = m.avg_spread.toFixed(3)+'%';
+  document.getElementById('m-latency').textContent  = m.avg_latency_ms!=null?m.avg_latency_ms.toFixed(0)+'ms':'--';
+  document.getElementById('m-fees').textContent     = '-$'+m.total_fees_usdc.toFixed(4);
+  document.getElementById('m-gas').textContent      = 'gas: $'+m.total_gas_usdc.toFixed(4);
   if (d.scanner) {
-    document.getElementById('m-markets').textContent = d.running ? (d.scanner.markets_tracked || 0) : '--';
-    document.getElementById('m-reconnects').textContent = 'WS reconnects: ' + (d.scanner.ws_reconnects || 0);
+    document.getElementById('m-markets').textContent    = d.running?(d.scanner.markets_tracked||0):'--';
+    document.getElementById('m-reconnects').textContent = 'WS reconnects: '+(d.scanner.ws_reconnects||0);
   }
-
-  // Running state
   const dot = document.getElementById('status-dot');
-  dot.className = 'status-dot ' + (d.running ? 'dot-running' : 'dot-stopped');
-  document.getElementById('btn-start').disabled = d.running;
-  document.getElementById('btn-stop').disabled = !d.running;
-  document.getElementById('uptime-display').textContent = 'uptime: ' + fmtUptime(d.uptime_s);
+  dot.className='status-dot '+(d.running?'dot-running':'dot-stopped');
+  ['btn-start','bond-btn-start'].forEach(id => {
+    const el=document.getElementById(id); if (el) el.disabled=d.running;
+  });
+  ['btn-stop','bond-btn-stop'].forEach(id => {
+    const el=document.getElementById(id); if (el) el.disabled=!d.running;
+  });
+  document.getElementById('uptime-display').textContent='uptime: '+fmtUptime(d.uptime_s);
+  if (d.running) setMode(d.mode||mode);
 
-  // Mode badge — only sync from server while bot is running;
-  // when stopped the user's local selection should be preserved.
-  if (d.running) setMode(d.mode || mode);
-
-  // PnL chart data
-  const now = new Date().toLocaleTimeString();
-  if (pnlLabels.length > 60) { pnlLabels.shift(); pnlData.shift(); }
-  pnlLabels.push(now);
-  pnlData.push(m.total_net_usdc);
-  if (pnlChart) {
-    pnlChart.data.labels = [...pnlLabels];
-    pnlChart.data.datasets[0].data = [...pnlData];
+  const now=new Date().toLocaleTimeString();
+  if (pnlLabels.length>60){pnlLabels.shift();pnlData.shift();}
+  pnlLabels.push(now); pnlData.push(m.total_net_usdc);
+  if (pnlChart){
+    pnlChart.data.labels=[...pnlLabels];
+    pnlChart.data.datasets[0].data=[...pnlData];
     pnlChart.update('none');
   }
 }
 
-function updateCharts(d) {
-  const allBrackets = (d.open_brackets || []).concat(d.recent_trades || []);
-
-  // Spread distribution: 10 buckets × 0.5% each (covers 0–5%)
-  const sBuckets = new Array(10).fill(0);
-  allBrackets.forEach(b => {
-    if (b.spread != null) {
-      const idx = Math.min(Math.floor(b.spread * 200), 9); // spread*100/%  / 0.5 = *200
-      sBuckets[idx]++;
-    }
-  });
-  if (spreadChart) {
-    spreadChart.data.datasets[0].data = sBuckets;
-    spreadChart.update('none');
-  }
-
-  // Latency distribution: 10 buckets × 10ms each (covers 0–100ms)
-  const lBuckets = new Array(10).fill(0);
-  allBrackets.forEach(b => {
-    if (b.latency_ms != null) {
-      const idx = Math.min(Math.floor(b.latency_ms / 10), 9);
-      lBuckets[idx]++;
-    }
-  });
-  if (latencyChart) {
-    latencyChart.data.datasets[0].data = lBuckets;
-    latencyChart.update('none');
-  }
-
-  // Brackets per hour: 12 buckets, index 0 = current hour, 11 = 11h ago
-  const now = Date.now() / 1000;
-  const hVol = new Array(12).fill(0);
-  allBrackets.forEach(b => {
-    const hoursAgo = Math.floor((now - (b.opened_at || 0)) / 3600);
-    if (hoursAgo >= 0 && hoursAgo < 12) hVol[hoursAgo]++;
-  });
-  if (volChart) {
-    // Reverse so oldest is leftmost (time flows left → right)
-    volChart.data.datasets[0].data = [...hVol].reverse();
-    volChart.update('none');
-  }
+function updateCharts(d){
+  const all=(d.open_brackets||[]).concat(d.recent_trades||[]);
+  const sBuckets=new Array(10).fill(0);
+  all.forEach(b=>{if(b.spread!=null){const i=Math.min(Math.floor(b.spread*200),9);sBuckets[i]++;}});
+  if(spreadChart){spreadChart.data.datasets[0].data=sBuckets;spreadChart.update('none');}
+  const lBuckets=new Array(10).fill(0);
+  all.forEach(b=>{if(b.latency_ms!=null){const i=Math.min(Math.floor(b.latency_ms/10),9);lBuckets[i]++;}});
+  if(latencyChart){latencyChart.data.datasets[0].data=lBuckets;latencyChart.update('none');}
+  const now=Date.now()/1000; const hVol=new Array(12).fill(0);
+  all.forEach(b=>{const h=Math.floor((now-(b.opened_at||0))/3600);if(h>=0&&h<12)hVol[h]++;});
+  if(volChart){volChart.data.datasets[0].data=[...hVol].reverse();volChart.update('none');}
 }
 
-function updateTrades(d) {
+function updateTrades(d){
   updateCharts(d);
-
-  // Open brackets
-  const openTbody = document.getElementById('open-tbody');
-  openTbody.innerHTML = '';
-  (d.open_brackets || []).forEach(b => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td style="color:#888">${b.id}</td>
+  const openTbody=document.getElementById('open-tbody'); openTbody.innerHTML='';
+  (d.open_brackets||[]).forEach(b=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td style="color:#888">${b.id}</td>
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${b.title||''}</td>
-      <td>${b.asset||''}</td>
-      <td>${b.window||''}</td>
-      <td>${b.ask_up!=null ? b.ask_up.toFixed(3) : '—'}</td>
-      <td>${b.ask_down!=null ? b.ask_down.toFixed(3) : '—'}</td>
-      <td class="green">${b.spread!=null ? (b.spread*100).toFixed(3)+'%' : '—'}</td>
+      <td>${b.asset||''}</td><td>${b.window||''}</td>
+      <td>${b.ask_up!=null?b.ask_up.toFixed(3):'—'}</td>
+      <td>${b.ask_down!=null?b.ask_down.toFixed(3):'—'}</td>
+      <td class="green">${b.spread!=null?(b.spread*100).toFixed(3)+'%':'—'}</td>
       <td class="green">${fmtUsdc(b.expected_net)}</td>
       <td>${fmtMs(b.latency_ms)}</td>
-      <td><span class="pill pill-open">OPEN</span></td>
-    `;
+      <td><span class="pill pill-open">OPEN</span></td>`;
     openTbody.appendChild(tr);
   });
-
-  // Recent trades
-  const tbody = document.getElementById('trades-tbody');
-  tbody.innerHTML = '';
-  (d.recent_trades || []).filter(b => b.status !== 'open').forEach(b => {
-    const netColor = (b.actual_net || 0) > 0 ? 'green' : ((b.actual_net || 0) < 0 ? 'red' : '');
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td style="color:#888">${b.id}</td>
+  const tbody=document.getElementById('trades-tbody'); tbody.innerHTML='';
+  (d.recent_trades||[]).filter(b=>b.status!=='open').forEach(b=>{
+    const nc=(b.actual_net||0)>0?'green':((b.actual_net||0)<0?'red':'');
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td style="color:#888">${b.id}</td>
       <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${b.title||''}</td>
-      <td>${b.asset||''}</td>
-      <td>${b.window||''}</td>
-      <td class="green">${b.spread!=null ? (b.spread*100).toFixed(3)+'%' : '—'}</td>
+      <td>${b.asset||''}</td><td>${b.window||''}</td>
+      <td class="green">${b.spread!=null?(b.spread*100).toFixed(3)+'%':'—'}</td>
       <td>${fmtUsdc(b.expected_net)}</td>
-      <td class="${netColor}">${fmtUsdc(b.actual_net)}</td>
+      <td class="${nc}">${fmtUsdc(b.actual_net)}</td>
       <td><span class="pill pill-${b.status||'open'}">${(b.status||'open').toUpperCase()}</span></td>
-      <td style="color:#888">${fmtTime(b.closed_at || b.opened_at)}</td>
-    `;
+      <td style="color:#888">${fmtTime(b.closed_at||b.opened_at)}</td>`;
     tbody.appendChild(tr);
   });
 }
 
-async function loadConfig() {
-  const cfg = await apiFetch('/api/config');
-  const grid = document.getElementById('config-grid');
-  grid.innerHTML = '';
-  const editable = ['bracket_threshold','position_size_usdc','max_concurrent_brackets','cancel_unfilled_after_s'];
-  Object.entries(cfg).forEach(([k, v]) => {
-    const div = document.createElement('div');
-    div.className = 'config-field';
-    div.innerHTML = `<label>${k}</label><input type="number" id="cfg-${k}" value="${v}" ${!editable.includes(k)?'disabled':''} step="0.001">`;
+async function loadConfig(){
+  const cfg=await apiFetch('/api/config');
+  const grid=document.getElementById('config-grid'); grid.innerHTML='';
+  const editable=['bracket_threshold','position_size_usdc','max_concurrent_brackets','cancel_unfilled_after_s'];
+  Object.entries(cfg).forEach(([k,v])=>{
+    const div=document.createElement('div'); div.className='config-field';
+    div.innerHTML=`<label>${k}</label><input type="number" id="cfg-${k}" value="${v}" ${!editable.includes(k)?'disabled':''} step="0.001">`;
     grid.appendChild(div);
   });
 }
-
-async function saveConfig() {
-  const editable = ['bracket_threshold','position_size_usdc','max_concurrent_brackets','cancel_unfilled_after_s'];
-  const update = {};
-  editable.forEach(k => {
-    const el = document.getElementById('cfg-' + k);
-    if (el) update[k] = parseFloat(el.value);
-  });
-  await apiFetch('/api/config', { method: 'POST', body: JSON.stringify(update) });
+async function saveConfig(){
+  const editable=['bracket_threshold','position_size_usdc','max_concurrent_brackets','cancel_unfilled_after_s'];
+  const upd={}; editable.forEach(k=>{const el=document.getElementById('cfg-'+k);if(el)upd[k]=parseFloat(el.value);});
+  await apiFetch('/api/config',{method:'POST',body:JSON.stringify(upd)});
   alert('Config saved');
 }
 
-async function loadLogs() {
-  const logs = await apiFetch('/api/logs?n=50');
-  const el = document.getElementById('log-output');
-  const html = logs.reverse().map(l => {
-    const cls = l.event === 'resolved' && l.actual_net > 0 ? 'log-won'
-               : l.event === 'opened' ? 'log-opened'
-               : l.event === 'cancelled' ? 'log-cancelled' : '';
+async function loadLogs(){
+  const logs=await apiFetch('/api/logs?n=50');
+  const el=document.getElementById('log-output');
+  const html=logs.reverse().map(l=>{
+    const cls=l.event==='resolved'&&l.actual_net>0?'log-won':l.event==='opened'?'log-opened':l.event==='cancelled'?'log-cancelled':'';
     return `<div class="${cls}">[${new Date(l.ts*1000).toLocaleTimeString()}] ${l.event.toUpperCase()} ${l.asset||''} ${l.window||''} spread=${l.spread?((l.spread*100).toFixed(3)+'%'):'?'} net=${l.actual_net!=null?fmtUsdc(l.actual_net):fmtUsdc(l.expected_net)} ${l.sim?'[SIM]':''}</div>`;
   }).join('');
-  if (el.innerHTML !== html) el.innerHTML = html;
+  if(el.innerHTML!==html) el.innerHTML=html;
 }
 
-function initCharts() {
-  const opts = {
-    responsive: true, maintainAspectRatio: false,
-    plugins: { legend: { display: false } },
-    scales: {
-      x: { ticks: { color: '#5a6a82', font: { size: 10 } }, grid: { color: '#2a3348' } },
-      y: { ticks: { color: '#5a6a82', font: { size: 10 } }, grid: { color: '#2a3348' } },
-    }
-  };
-
-  pnlChart = new Chart(document.getElementById('chart-pnl'), {
-    type: 'line',
-    data: { labels: [], datasets: [{ data: [], borderColor: '#22c55e', borderWidth: 1.5, pointRadius: 0, fill: true, backgroundColor: '#22c55e11' }] },
-    options: { ...opts, scales: { ...opts.scales, y: { ...opts.scales.y, ticks: { ...opts.scales.y.ticks, callback: v => '$'+v.toFixed(2) } } } }
-  });
-
-  volChart = new Chart(document.getElementById('chart-volume'), {
-    type: 'bar',
-    data: { labels: Array(12).fill('').map((_,i)=>(11-i)+'h ago'), datasets: [{ data: Array(12).fill(0), backgroundColor: '#3b82f633', borderColor: '#3b82f6', borderWidth: 1 }] },
-    options: opts
-  });
-
-  spreadChart = new Chart(document.getElementById('chart-spread'), {
-    type: 'bar',
-    data: { labels: Array(10).fill('').map((_,i)=>((i*0.5)+0.5).toFixed(1)+'%'), datasets: [{ data: Array(10).fill(0), backgroundColor: '#f59e0b33', borderColor: '#f59e0b', borderWidth: 1 }] },
-    options: { ...opts, plugins: { ...opts.plugins, tooltip: { callbacks: { title: (i) => 'Spread ' + i[0].label } } } }
-  });
-
-  latencyChart = new Chart(document.getElementById('chart-latency'), {
-    type: 'bar',
-    data: { labels: Array(10).fill('').map((_,i)=>((i*10)+10)+'ms'), datasets: [{ data: Array(10).fill(0), backgroundColor: '#8b5cf633', borderColor: '#8b5cf6', borderWidth: 1 }] },
-    options: opts
-  });
+function initCharts(){
+  const opts={responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
+    scales:{x:{ticks:{color:'#5a6a82',font:{size:10}},grid:{color:'#2a3348'}},
+            y:{ticks:{color:'#5a6a82',font:{size:10}},grid:{color:'#2a3348'}}}};
+  pnlChart=new Chart(document.getElementById('chart-pnl'),{type:'line',
+    data:{labels:[],datasets:[{data:[],borderColor:'#22c55e',borderWidth:1.5,pointRadius:0,fill:true,backgroundColor:'#22c55e11'}]},
+    options:{...opts,scales:{...opts.scales,y:{...opts.scales.y,ticks:{...opts.scales.y.ticks,callback:v=>'$'+v.toFixed(2)}}}}});
+  volChart=new Chart(document.getElementById('chart-volume'),{type:'bar',
+    data:{labels:Array(12).fill('').map((_,i)=>(11-i)+'h ago'),datasets:[{data:Array(12).fill(0),backgroundColor:'#3b82f633',borderColor:'#3b82f6',borderWidth:1}]},
+    options:opts});
+  spreadChart=new Chart(document.getElementById('chart-spread'),{type:'bar',
+    data:{labels:Array(10).fill('').map((_,i)=>((i*0.5)+0.5).toFixed(1)+'%'),datasets:[{data:Array(10).fill(0),backgroundColor:'#f59e0b33',borderColor:'#f59e0b',borderWidth:1}]},
+    options:opts});
+  latencyChart=new Chart(document.getElementById('chart-latency'),{type:'bar',
+    data:{labels:Array(10).fill('').map((_,i)=>((i*10)+10)+'ms'),datasets:[{data:Array(10).fill(0),backgroundColor:'#8b5cf633',borderColor:'#8b5cf6',borderWidth:1}]},
+    options:opts});
 }
 
-function fmtTimeLeft(s) {
-  if (s == null) return '—';
-  if (s < 60) return s + 's';
-  if (s < 3600) return Math.floor(s / 60) + 'm';
-  return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+async function loadMarkets(){
+  const data=await apiFetch('/api/markets');
+  marketsData=data; renderMarkets();
 }
-
-async function loadMarkets() {
-  const data = await apiFetch('/api/markets');
-  marketsData = data;
-  renderMarkets();
-}
-
-function renderMarkets() {
-  const search  = (document.getElementById('mkt-search').value || '').toLowerCase();
-  const winFilt = document.getElementById('mkt-window').value;
-  const sortBy  = document.getElementById('mkt-sort').value;
-  const threshold = 0.97; // mirror STRATEGY.bracket_threshold
-
-  let rows = marketsData.filter(m => {
-    if (winFilt && m.window !== winFilt) return false;
-    if (search && !m.asset.toLowerCase().includes(search) && !m.title.toLowerCase().includes(search)) return false;
+function renderMarkets(){
+  const search=(document.getElementById('mkt-search').value||'').toLowerCase();
+  const winFilt=document.getElementById('mkt-window').value;
+  const sortBy=document.getElementById('mkt-sort').value;
+  const threshold=0.97;
+  let rows=marketsData.filter(m=>{
+    if(winFilt&&m.window!==winFilt) return false;
+    if(search&&!m.asset.toLowerCase().includes(search)&&!m.title.toLowerCase().includes(search)) return false;
     return true;
   });
-
-  if (sortBy === 'spread') {
-    rows.sort((a, b) => (b.spread_pct ?? -999) - (a.spread_pct ?? -999));
-  } else if (sortBy === 'asset') {
-    rows.sort((a, b) => a.asset.localeCompare(b.asset) || a.window.localeCompare(b.window));
-  } else if (sortBy === 'time') {
-    rows.sort((a, b) => (a.time_left_s ?? 999999) - (b.time_left_s ?? 999999));
-  }
-
-  document.getElementById('markets-count').textContent =
-    rows.length + ' / ' + marketsData.length + ' markets';
-
-  const tbody = document.getElementById('markets-tbody');
-  tbody.innerHTML = '';
-  rows.forEach(m => {
-    const spreadCls = m.combined != null && m.combined < threshold
-      ? 'spread-hot'
-      : m.combined != null && m.combined < threshold + 0.02
-        ? 'spread-warm' : '';
-    const tr = document.createElement('tr');
-    if (m.stale) tr.className = 'stale-row';
-    tr.innerHTML = `
-      <td><strong>${m.asset}</strong></td>
-      <td style="color:var(--muted)">${m.window}</td>
-      <td>${m.ask_up != null ? m.ask_up.toFixed(4) : '—'}</td>
-      <td>${m.ask_down != null ? m.ask_down.toFixed(4) : '—'}</td>
-      <td>${m.combined != null ? m.combined.toFixed(4) : '—'}</td>
-      <td class="${spreadCls}">${m.spread_pct != null ? m.spread_pct.toFixed(3) + '%' : '—'}</td>
+  if(sortBy==='spread') rows.sort((a,b)=>(b.spread_pct??-999)-(a.spread_pct??-999));
+  else if(sortBy==='asset') rows.sort((a,b)=>a.asset.localeCompare(b.asset)||a.window.localeCompare(b.window));
+  else if(sortBy==='time') rows.sort((a,b)=>(a.time_left_s??999999)-(b.time_left_s??999999));
+  document.getElementById('markets-count').textContent=rows.length+' / '+marketsData.length+' markets';
+  const tbody=document.getElementById('markets-tbody'); tbody.innerHTML='';
+  rows.forEach(m=>{
+    const spreadCls=m.combined!=null&&m.combined<threshold?'spread-hot':m.combined!=null&&m.combined<threshold+0.02?'spread-warm':'';
+    const tr=document.createElement('tr');
+    if(m.stale) tr.className='stale-row';
+    tr.innerHTML=`<td><strong>${m.asset}</strong></td><td style="color:var(--muted)">${m.window}</td>
+      <td>${m.ask_up!=null?m.ask_up.toFixed(4):'—'}</td><td>${m.ask_down!=null?m.ask_down.toFixed(4):'—'}</td>
+      <td>${m.combined!=null?m.combined.toFixed(4):'—'}</td>
+      <td class="${spreadCls}">${m.spread_pct!=null?m.spread_pct.toFixed(3)+'%':'—'}</td>
       <td style="color:var(--muted)">${fmtTimeLeft(m.time_left_s)}</td>
-      <td style="color:var(--muted);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${m.title}</td>
-    `;
+      <td style="color:var(--muted);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${m.title}</td>`;
     tbody.appendChild(tr);
   });
 }
 
-// Poll loop
+// ── Bond dashboard ─────────────────────────────────────────────────
+async function pollBond() {
+  try {
+    const d = await apiFetch('/api/bond/status');
+    updateBondMetrics(d);
+  } catch(e) { console.error('Bond poll error:',e); }
+  try {
+    const r = await apiFetch('/api/bond/positions');
+    bondPositions = r;
+    renderPositions();
+    renderSoldPositions();
+  } catch(e) {}
+}
+
+function updateBondMetrics(d) {
+  document.getElementById('bm-total').textContent       = d.total_positions;
+  document.getElementById('bm-open-count').textContent  = d.open_positions+' open';
+  document.getElementById('bm-capital').textContent     = '$'+parseFloat(d.capital_deployed||0).toFixed(2);
+  const pnlEl = document.getElementById('bm-pnl');
+  const pnl = parseFloat(d.realised_pnl||0);
+  pnlEl.textContent = (pnl>=0?'+':'')+pnl.toFixed(4);
+  pnlEl.className   = 'metric-value '+(pnl>0?'green':pnl<0?'red':'');
+
+  const ts = d.tier_stats || {};
+  for (const [tier, id_wr, id_wl] of [
+    ['CORE','bm-core-wr','bm-core-wl'],
+    ['SECONDARY','bm-sec-wr','bm-sec-wl'],
+    ['WING','bm-wing-wr','bm-wing-wl'],
+  ]) {
+    const t = ts[tier] || {};
+    const el = document.getElementById(id_wr);
+    el.textContent = t.win_rate != null ? t.win_rate+'%' : '—';
+    document.getElementById(id_wl).textContent = (t.wins||0)+'W / '+((t.sold||0)-(t.wins||0))+'L';
+  }
+
+  const c = d.cycle || {};
+  if (c.last_cycle_at) {
+    const ago = Math.round((Date.now()/1000) - c.last_cycle_at);
+    document.getElementById('bond-last-cycle').textContent =
+      `last cycle: ${fmtUptime(ago)} ago · cycle #${c.cycle||'?'} · ${c.cycle_duration_s||'?'}s`;
+  }
+  document.getElementById('bm-markets-scanned').textContent = c.markets_scanned != null ? c.markets_scanned : '—';
+  document.getElementById('bm-opps-found').textContent      = c.opportunities_found != null ? c.opportunities_found+' opps found' : 'markets scanned';
+  document.getElementById('bm-orders-placed').textContent   = c.orders_placed != null ? c.orders_placed : '—';
+
+  // Tier perf rows
+  const rows = document.getElementById('tier-perf-rows'); rows.innerHTML='';
+  for (const [tier, cls] of [['CORE','blue'],['SECONDARY','amber'],['WING','purple']]) {
+    const t = ts[tier] || {open:0,sold:0,wins:0,win_rate:null,pnl:0};
+    const div = document.createElement('div');
+    div.className='tier-row';
+    const wr = t.win_rate!=null ? t.win_rate+'%' : '—';
+    const wrCls = t.win_rate!=null?(t.win_rate>=70?'green':t.win_rate>=50?'amber':'red'):'';
+    div.innerHTML=`<span><span class="pill pill-${tier.toLowerCase()}">${tier}</span></span>
+      <span>${t.open||0}</span><span>${t.sold||0}</span><span>${t.wins||0}</span>
+      <span class="${wrCls}">${wr}</span>
+      <span class="${(t.pnl||0)>=0?'green':'red'}">${(t.pnl||0)>=0?'+':''}$${parseFloat(t.pnl||0).toFixed(4)}</span>`;
+    rows.appendChild(div);
+  }
+}
+
+function renderPositions() {
+  const sortBy = document.getElementById('pos-sort').value;
+  const tierFilt = document.getElementById('pos-tier-filter').value;
+  let open = bondPositions.filter(p => p.status === 'OPEN');
+  if (tierFilt) open = open.filter(p => p.tier === tierFilt);
+  if (sortBy==='time')       open.sort((a,b)=>b.entry_time.localeCompare(a.entry_time));
+  else if (sortBy==='resolution') open.sort((a,b)=>a.resolution_time.localeCompare(b.resolution_time));
+  else if (sortBy==='tier')  open.sort((a,b)=>a.tier.localeCompare(b.tier));
+
+  const tbody = document.getElementById('open-pos-tbody'); tbody.innerHTML='';
+  open.forEach(p => {
+    const capital = (p.shares * p.entry_price).toFixed(4);
+    const resLeft = resolutionSecsLeft(p.resolution_time);
+    const resStr  = fmtTimeLeft(resLeft);
+    const resClass = resLeft!=null&&resLeft<3600*4?'red':resLeft!=null&&resLeft<3600*24?'amber':'';
+    const tr = document.createElement('tr');
+    tr.innerHTML=`<td><strong>${p.city||'?'}</strong></td>
+      <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)">${p.question}</td>
+      <td><span class="pill pill-${(p.tier||'').toLowerCase()}">${p.tier}</span></td>
+      <td>${p.shares}</td>
+      <td>${parseFloat(p.entry_price).toFixed(4)}</td>
+      <td class="amber">$${capital}</td>
+      <td class="${resClass}">${resStr}</td>
+      <td style="color:var(--muted)">${fmtAgo(p.entry_time)}</td>`;
+    tbody.appendChild(tr);
+  });
+  if (!open.length) {
+    tbody.innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:16px;">no open positions</td></tr>';
+  }
+}
+
+function renderSoldPositions() {
+  const sold = bondPositions.filter(p => p.status==='SOLD' || p.status==='RESOLVED')
+    .slice(0,50);
+  const tbody = document.getElementById('sold-pos-tbody'); tbody.innerHTML='';
+  sold.forEach(p => {
+    const exitP = p.exit_price!=null ? parseFloat(p.exit_price) : null;
+    const entryP = parseFloat(p.entry_price);
+    const pnl  = exitP!=null ? (exitP - entryP) * p.shares : null;
+    const pnlStr  = pnl!=null ? (pnl>=0?'+':'')+pnl.toFixed(4) : '—';
+    const pnlClass = pnl!=null?(pnl>0?'green':'red'):'';
+    const tr = document.createElement('tr');
+    tr.innerHTML=`<td><strong>${p.city||'?'}</strong></td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)">${p.question}</td>
+      <td><span class="pill pill-${(p.tier||'').toLowerCase()}">${p.tier}</span></td>
+      <td>${p.shares}</td>
+      <td>${entryP.toFixed(4)}</td>
+      <td>${exitP!=null?exitP.toFixed(4):'—'}</td>
+      <td class="${pnlClass}">${pnlStr}</td>
+      <td><span class="pill pill-${(p.status||'').toLowerCase()}">${p.status}</span></td>
+      <td style="color:var(--muted)">${p.exit_time ? new Date(p.exit_time).toLocaleString() : '—'}</td>`;
+    tbody.appendChild(tr);
+  });
+  if (!sold.length) {
+    tbody.innerHTML='<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:16px;">no sold positions</td></tr>';
+  }
+}
+
+// Bond config
+const BOND_CFG_META = {
+  BOND_MIN_EV_CORE:            { label:'Min EV Core',            step:0.001, desc:'Min expected value per share (CORE tier)' },
+  BOND_MIN_EV_SECONDARY:       { label:'Min EV Secondary',       step:0.001, desc:'Min expected value per share (SECONDARY)' },
+  BOND_CONFIDENCE_FLOOR:       { label:'Confidence Floor',       step:0.01,  desc:'Min forecast probability to enter any position' },
+  BOND_EDGE_FLOOR:             { label:'Edge Floor',             step:0.01,  desc:'Min gap between true probability and ask' },
+  BOND_SHARES_CORE:            { label:'Shares Core',            step:1,     desc:'Shares per CORE buy order' },
+  BOND_SHARES_SECONDARY:       { label:'Shares Secondary',       step:1,     desc:'Shares per SECONDARY buy order' },
+  BOND_SHARES_WING:            { label:'Shares Wing',            step:1,     desc:'Shares per WING buy order' },
+  BOND_MAX_CAPITAL_PER_CLUSTER:{ label:'Max Capital/Cluster $',  step:0.5,   desc:'Max $ across all buckets for one city/date' },
+  BOND_EARLY_EXIT_PRICE:       { label:'Early Exit Price',       step:0.01,  desc:'Sell CORE when price hits this' },
+  BOND_WING_EXIT_MULTIPLIER:   { label:'Wing Exit Multiplier',   step:0.5,   desc:'Sell WING/SEC if price ≥ cost × this' },
+  BOND_WING_MIN_ABS_GAIN:      { label:'Wing Min Abs Gain $',    step:0.25,  desc:'AND absolute gain ≥ this (USD)' },
+  BOND_GAS_FLOOR_HOURS:        { label:'Gas Floor Hours',        step:1,     desc:"Don't exit within N hours of resolution" },
+  BOND_POLL_INTERVAL_SECS:     { label:'Poll Interval (s)',      step:30,    desc:'Seconds between full market scans' },
+  BOND_MAX_MARKETS_PER_RUN:    { label:'Max Orders/Run',         step:10,    desc:'Max orders placed per scan cycle' },
+};
+
+async function loadBondConfig() {
+  try {
+    const cfg = await apiFetch('/api/bond/config');
+    const grid = document.getElementById('bond-config-grid'); grid.innerHTML='';
+    Object.entries(BOND_CFG_META).forEach(([k, meta]) => {
+      const v = cfg[k] ?? '';
+      const div = document.createElement('div'); div.className='config-field';
+      div.innerHTML=`<label>${meta.label}</label>
+        <input type="number" id="bcfg-${k}" value="${v}" step="${meta.step}">
+        <span class="config-desc">${meta.desc}</span>`;
+      grid.appendChild(div);
+    });
+  } catch(e) { console.error('Bond config load failed:',e); }
+}
+
+async function saveBondConfig() {
+  const upd = {};
+  Object.keys(BOND_CFG_META).forEach(k => {
+    const el = document.getElementById('bcfg-'+k);
+    if (el && el.value !== '') upd[k] = parseFloat(el.value);
+  });
+  const statusEl = document.getElementById('bond-cfg-status');
+  try {
+    const r = await apiFetch('/api/bond/config', {method:'POST', body:JSON.stringify(upd)});
+    statusEl.textContent = r.ok ? '✓ saved' : '✗ failed';
+    statusEl.style.color = r.ok ? 'var(--green)' : 'var(--red)';
+  } catch(e) {
+    statusEl.textContent = '✗ error';
+    statusEl.style.color = 'var(--red)';
+  }
+  setTimeout(() => { statusEl.textContent=''; }, 3000);
+}
+
+// City manager
+async function loadBondCities() {
+  try {
+    const r = await apiFetch('/api/bond/cities');
+    bondCities  = r.cities  || {};
+    bondAliases = r.aliases || {};
+    renderCities();
+    renderAliases();
+  } catch(e) { console.error('Bond cities load failed:',e); }
+}
+
+function renderCities() {
+  const tbody = document.getElementById('cities-tbody'); tbody.innerHTML='';
+  Object.entries(bondCities).sort((a,b)=>a[0].localeCompare(b[0])).forEach(([name,[lat,lon]])=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML=`<td><strong>${name}</strong></td>
+      <td style="color:var(--muted)">${parseFloat(lat).toFixed(4)}</td>
+      <td style="color:var(--muted)">${parseFloat(lon).toFixed(4)}</td>
+      <td><div class="inline-actions">
+        <button class="btn-xs btn-xs-danger" onclick="removeCity('${name.replace(/'/g,"\\'")}')">✕ REMOVE</button>
+      </div></td>`;
+    tbody.appendChild(tr);
+  });
+  if (!Object.keys(bondCities).length) {
+    tbody.innerHTML='<tr><td colspan="4" style="color:var(--muted);padding:10px;">no cities configured</td></tr>';
+  }
+}
+
+function renderAliases() {
+  const tbody = document.getElementById('aliases-tbody'); tbody.innerHTML='';
+  Object.entries(bondAliases).sort((a,b)=>a[0].localeCompare(b[0])).forEach(([alias,canonical])=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML=`<td style="color:var(--amber)">${alias}</td>
+      <td style="color:var(--text)">${canonical}</td>
+      <td><button class="btn-xs btn-xs-danger" onclick="removeAlias('${alias.replace(/'/g,"\\'")}')">✕</button></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function addCity() {
+  const name = document.getElementById('new-city-name').value.trim();
+  const lat  = parseFloat(document.getElementById('new-city-lat').value);
+  const lon  = parseFloat(document.getElementById('new-city-lon').value);
+  if (!name || isNaN(lat) || isNaN(lon)) { alert('Name, lat and lon are required'); return; }
+  bondCities[name] = [lat, lon];
+  await saveCities();
+  document.getElementById('new-city-name').value='';
+  document.getElementById('new-city-lat').value='';
+  document.getElementById('new-city-lon').value='';
+  renderCities();
+}
+async function removeCity(name) {
+  if (!confirm(`Remove ${name}?`)) return;
+  delete bondCities[name];
+  await saveCities();
+  renderCities();
+}
+async function addAlias() {
+  const from = document.getElementById('new-alias-from').value.trim();
+  const to   = document.getElementById('new-alias-to').value.trim();
+  if (!from || !to) { alert('Both alias and canonical name are required'); return; }
+  bondAliases[from] = to;
+  await saveAliases();
+  document.getElementById('new-alias-from').value='';
+  document.getElementById('new-alias-to').value='';
+  renderAliases();
+}
+async function removeAlias(alias) {
+  delete bondAliases[alias];
+  await saveAliases();
+  renderAliases();
+}
+async function saveCities() {
+  await apiFetch('/api/bond/cities', {method:'POST', body:JSON.stringify({cities:bondCities})});
+}
+async function saveAliases() {
+  await apiFetch('/api/bond/cities', {method:'POST', body:JSON.stringify({aliases:bondAliases})});
+}
+
+// Bond log
+async function loadBondLogs() {
+  try {
+    const r = await apiFetch('/api/bond/logs?n=200');
+    const el = document.getElementById('bond-log-output');
+    const lines = (r.lines || []).reverse();
+    const html = lines.map(line => {
+      let cls = '';
+      if (line.includes('BOND_EXIT_TRIGGERED')) cls='log-exit';
+      else if (line.includes('BOND_ORDER_PLACED')) cls='log-buy';
+      else if (line.includes('ERROR') || line.includes('FAILED')) cls='log-error';
+      else if (line.includes('BOND_EXIT_SKIPPED')) cls='log-skip';
+      return `<div class="${cls}">${line}</div>`;
+    }).join('');
+    el.innerHTML = html || '<div style="color:var(--muted)">no log entries yet</div>';
+  } catch(e) { console.error('Bond logs load failed:',e); }
+}
+
+// ── Main poll loop ─────────────────────────────────────────────────
 async function poll() {
   try {
     const d = await apiFetch('/api/status');
     updateMetrics(d);
     updateTrades(d);
-  } catch (e) { console.error('Poll error:', e); }
-  try { await loadLogs(); } catch(e) {}
-  try { await loadMarkets(); } catch(e) {}
+  } catch(e) { console.error('Poll error:',e); }
+
+  if (currentTab === 'arbi') {
+    try { await loadLogs(); } catch(e) {}
+    try { await loadMarkets(); } catch(e) {}
+  } else {
+    try { await pollBond(); } catch(e) {}
+  }
 }
 
 document.addEventListener('DOMContentLoaded', async () => {

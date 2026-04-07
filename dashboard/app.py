@@ -11,6 +11,7 @@ import base64
 import secrets
 from pathlib import Path
 
+import config as _config
 from aiohttp import web
 
 from config import DASHBOARD_SECRET, SIM, STRATEGY
@@ -18,6 +19,19 @@ from config import DASHBOARD_SECRET, SIM, STRATEGY
 log = logging.getLogger("dashboard")
 
 DASHBOARD_DIR = Path(__file__).parent
+
+
+def _load_bond_ledger() -> list[dict]:
+    """Read bond position ledger from disk. Returns empty list on any error."""
+    try:
+        ledger_path = Path(_config.BOND_LEDGER_FILE)
+        if not ledger_path.exists():
+            return []
+        data = json.loads(ledger_path.read_text(encoding="utf-8"))
+        return data.get("positions", [])
+    except Exception as exc:
+        log.debug(f"dashboard: failed to read bond ledger: {exc}")
+        return []
 
 
 async def _fetch_live_balance() -> float | None:
@@ -192,6 +206,150 @@ async def create_app(state):
         except FileNotFoundError:
             return web.json_response([])
 
+    # ── Bond API routes ──────────────────────────────────────────
+
+    @_auth_required
+    async def api_bond_status(request):
+        """Bond mode status: cycle stats + position summary from ledger."""
+        bond_stats = state.get_bond_stats()
+        positions  = _load_bond_ledger()
+        open_pos   = [p for p in positions if p["status"] == "OPEN"]
+        sold_pos   = [p for p in positions if p["status"] == "SOLD"]
+
+        capital_deployed = sum(p["shares"] * p["entry_price"] for p in open_pos)
+        realised_pnl = sum(
+            (p["exit_price"] - p["entry_price"]) * p["shares"]
+            for p in sold_pos
+            if p.get("exit_price") is not None
+        )
+
+        tier_stats: dict = {}
+        for tier in ("CORE", "SECONDARY", "WING"):
+            tier_sold = [p for p in sold_pos if p["tier"] == tier and p.get("exit_price") is not None]
+            wins      = [p for p in tier_sold if p["exit_price"] > p["entry_price"]]
+            tier_stats[tier] = {
+                "open":     len([p for p in open_pos   if p["tier"] == tier]),
+                "sold":     len(tier_sold),
+                "wins":     len(wins),
+                "win_rate": round(len(wins) / len(tier_sold) * 100, 1) if tier_sold else None,
+                "pnl":      round(sum((p["exit_price"] - p["entry_price"]) * p["shares"] for p in tier_sold), 4),
+            }
+
+        return web.json_response({
+            "running":          state.is_running(),
+            "uptime_s":         state.get_dashboard_data().get("uptime_s", 0),
+            "cycle":            bond_stats,
+            "total_positions":  len(positions),
+            "open_positions":   len(open_pos),
+            "sold_positions":   len(sold_pos),
+            "capital_deployed": round(capital_deployed, 4),
+            "realised_pnl":     round(realised_pnl, 4),
+            "tier_stats":       tier_stats,
+        })
+
+    @_auth_required
+    async def api_bond_positions(request):
+        """Full position ledger."""
+        positions = _load_bond_ledger()
+        status_filter = request.rel_url.query.get("status")
+        if status_filter:
+            positions = [p for p in positions if p["status"] == status_filter.upper()]
+        # Sort newest first
+        positions.sort(key=lambda p: p.get("entry_time", ""), reverse=True)
+        return web.json_response(positions[:200])
+
+    @_auth_required
+    async def api_bond_config_get(request):
+        """Return current BOND_* config values."""
+        return web.json_response({
+            "BOND_MIN_EV_CORE":            _config.BOND_MIN_EV_CORE,
+            "BOND_MIN_EV_SECONDARY":       _config.BOND_MIN_EV_SECONDARY,
+            "BOND_CONFIDENCE_FLOOR":       _config.BOND_CONFIDENCE_FLOOR,
+            "BOND_EDGE_FLOOR":             _config.BOND_EDGE_FLOOR,
+            "BOND_SHARES_CORE":            _config.BOND_SHARES_CORE,
+            "BOND_SHARES_SECONDARY":       _config.BOND_SHARES_SECONDARY,
+            "BOND_SHARES_WING":            _config.BOND_SHARES_WING,
+            "BOND_MAX_CAPITAL_PER_CLUSTER": _config.BOND_MAX_CAPITAL_PER_CLUSTER,
+            "BOND_EARLY_EXIT_PRICE":       _config.BOND_EARLY_EXIT_PRICE,
+            "BOND_WING_EXIT_MULTIPLIER":   _config.BOND_WING_EXIT_MULTIPLIER,
+            "BOND_WING_MIN_ABS_GAIN":      _config.BOND_WING_MIN_ABS_GAIN,
+            "BOND_GAS_FLOOR_HOURS":        _config.BOND_GAS_FLOOR_HOURS,
+            "BOND_POLL_INTERVAL_SECS":     _config.BOND_POLL_INTERVAL_SECS,
+            "BOND_MAX_MARKETS_PER_RUN":    _config.BOND_MAX_MARKETS_PER_RUN,
+        })
+
+    @_auth_required
+    async def api_bond_config_set(request):
+        """Live-update BOND_* numeric parameters."""
+        data = await request.json()
+        _float_keys = {
+            "BOND_MIN_EV_CORE", "BOND_MIN_EV_SECONDARY", "BOND_CONFIDENCE_FLOOR",
+            "BOND_EDGE_FLOOR", "BOND_MAX_CAPITAL_PER_CLUSTER",
+            "BOND_EARLY_EXIT_PRICE", "BOND_WING_EXIT_MULTIPLIER", "BOND_WING_MIN_ABS_GAIN",
+        }
+        _int_keys = {
+            "BOND_GAS_FLOOR_HOURS", "BOND_SHARES_CORE", "BOND_SHARES_SECONDARY",
+            "BOND_SHARES_WING", "BOND_POLL_INTERVAL_SECS", "BOND_MAX_MARKETS_PER_RUN",
+        }
+        updated = {}
+        for k, v in data.items():
+            if k in _float_keys:
+                val = float(v)
+                setattr(_config, k, val)
+                updated[k] = val
+            elif k in _int_keys:
+                val = int(v)
+                setattr(_config, k, val)
+                updated[k] = val
+        if updated:
+            from config_override import save_overrides
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, lambda: save_overrides(updated))
+        log.info(f"Bond config updated: {updated}")
+        return web.json_response({"ok": True, "updated": updated})
+
+    @_auth_required
+    async def api_bond_cities_get(request):
+        """Return current city list and aliases."""
+        return web.json_response({
+            "cities":  {k: list(v) for k, v in _config.BOND_CITIES.items()},
+            "aliases": _config.BOND_CITY_ALIASES,
+        })
+
+    @_auth_required
+    async def api_bond_cities_set(request):
+        """Replace city list and/or aliases in-memory and persist."""
+        data = await request.json()
+        updated = {}
+
+        if "cities" in data:
+            new_cities = {k: tuple(v) for k, v in data["cities"].items()}
+            _config.BOND_CITIES = new_cities
+            updated["BOND_CITIES"] = new_cities
+
+        if "aliases" in data:
+            _config.BOND_CITY_ALIASES = data["aliases"]
+            updated["BOND_CITY_ALIASES"] = data["aliases"]
+
+        if updated:
+            from config_override import save_overrides
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, lambda: save_overrides(updated))
+
+        log.info(f"Bond cities/aliases updated — cities={len(_config.BOND_CITIES)} aliases={len(_config.BOND_CITY_ALIASES)}")
+        return web.json_response({"ok": True})
+
+    @_auth_required
+    async def api_bond_logs(request):
+        """Return last N lines of bond log file."""
+        n = int(request.rel_url.query.get("n", 200))
+        try:
+            log_path = Path(_config.BOND_LOG_FILE)
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            return web.json_response({"lines": lines[-n:]})
+        except FileNotFoundError:
+            return web.json_response({"lines": []})
+
     # ── Static dashboard HTML ────────────────────────────────────
 
     async def dashboard_html(request):
@@ -223,6 +381,14 @@ async def create_app(state):
     app.router.add_get("/api/trades",   api_trades)
     app.router.add_get("/api/markets",  api_markets)
     app.router.add_get("/api/logs",     api_logs)
+    # Bond routes
+    app.router.add_get("/api/bond/status",    api_bond_status)
+    app.router.add_get("/api/bond/positions", api_bond_positions)
+    app.router.add_get("/api/bond/config",    api_bond_config_get)
+    app.router.add_post("/api/bond/config",   api_bond_config_set)
+    app.router.add_get("/api/bond/cities",    api_bond_cities_get)
+    app.router.add_post("/api/bond/cities",   api_bond_cities_set)
+    app.router.add_get("/api/bond/logs",      api_bond_logs)
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()

@@ -59,6 +59,7 @@ class StateManager:
         self._trader_stats: dict = {}
         self._redeemer_stats: dict = {}
         self._markets_snapshot: list = []
+        self._bond_stats: dict = {}
 
     # ── Balance ──────────────────────────────────────────────────
 
@@ -161,6 +162,12 @@ class StateManager:
 
     def get_markets(self) -> list:
         return self._markets_snapshot
+
+    def update_bond_stats(self, stats: dict) -> None:
+        self._bond_stats = stats
+
+    def get_bond_stats(self) -> dict:
+        return self._bond_stats
 
     # ── Metrics snapshot for dashboard ──────────────────────────
 

@@ -622,6 +622,8 @@ class Trader:
                     "shares": shares_down,
                     "limit_down_maker": limit_down_maker,
                     "posted_at": time.time(),
+                    "token_id": opp.market.token_id_down,
+                    "bid_down": opp.bid_down,
                 }
                 log.info(
                     f"[MAKER] {opp.market.asset} {opp.market.window} | "
@@ -996,23 +998,33 @@ class Trader:
                         return True
                     else:
                         # DOWN filled but UP failed — emergency exit (same as normal partial fill)
-                        log.warning(f"[{b.id}] DOWN GTC filled but UP FOK failed — emergency exit")
+                        log.warning(
+                            f"[{b.id}] Partial fill — DOWN filled (GTC), UP cancelled "
+                            f"[err={up_err or 'none'} msg={up_msg or 'none'}] | "
+                            f"dn: sh={down_gtc_shares:.4f}@{down_gtc_limit:.3f} | "
+                            f"up: ask={b.leg_up.price:.3f} lim={limit_up:.3f} sh={shares_up:.4f} | "
+                            f"age={b.age_ms:.0f}ms. Initiating emergency exit."
+                        )
                         b.leg_up.status = OrderStatus.CANCELLED
                         b.status = "partial_fill"
                         self._log_trade(b, "partial_fill")
                         self.risk.mark_partial_fill(cid)
                         asyncio.get_running_loop().create_task(self._emergency_exit(b))
-                        return True
+                        return False
 
                 except Exception as e:
-                    log.warning(f"[{b.id}] Exception submitting UP after DOWN GTC fill: {e}")
+                    log.warning(
+                        f"[{b.id}] Partial fill — DOWN filled (GTC), UP exception | "
+                        f"dn: sh={down_gtc_shares:.4f}@{down_gtc_limit:.3f} | "
+                        f"err={e} age={b.age_ms:.0f}ms. Initiating emergency exit."
+                    )
                     # Mark DOWN as filled for emergency exit
                     b.leg_down.status = OrderStatus.FILLED
                     b.status = "partial_fill"
                     self._log_trade(b, "partial_fill")
                     self.risk.mark_partial_fill(cid)
                     asyncio.get_running_loop().create_task(self._emergency_exit(b))
-                    return True
+                    return False
 
             if use_parallel:
                 dn_id, dn_status, dn_err, dn_msg, up_id, up_status, up_err, up_msg = (
@@ -1429,6 +1441,24 @@ class Trader:
         filled_leg = b.leg_up if b.leg_up.status == OrderStatus.FILLED else b.leg_down
         bid_price  = b.bid_up  if filled_leg is b.leg_up else b.bid_down
 
+        # Refresh bid from live scanner data — the detection-time bid may be stale or 0.0
+        # (bid defaults to 0.0 if no bid WS event was received before detection).
+        if self._scanner is not None:
+            live_ps = self._scanner.get_price_state(filled_leg.token_id)
+            if live_ps is not None and live_ps.bid > 0:
+                if live_ps.bid != bid_price:
+                    log.info(
+                        f"[{b.id}] Emergency exit bid refreshed: "
+                        f"{bid_price:.3f} → {live_ps.bid:.3f} ({filled_leg.side})"
+                    )
+                bid_price = live_ps.bid
+
+        if bid_price == 0.0:
+            log.warning(
+                f"[{b.id}] Emergency exit: bid_price=0 for {filled_leg.side} "
+                f"(no bid data from WS) — exiting at minimum price 0.01"
+            )
+
         exit_price = round(bid_price * (1.0 - STRATEGY.emergency_exit_slippage_pct), 2)
         exit_price = max(exit_price, 0.01)
         # Use the ACTUAL submitted shares (after limit revalidation in _live_place),
@@ -1551,27 +1581,179 @@ class Trader:
         self._open_brackets.pop(b.id, None)
 
     async def _cleanup_down_gtc(self) -> None:
-        """Periodically cancel resting DOWN GTCs that haven't been claimed."""
+        """Periodically cancel resting DOWN GTCs that haven't been claimed.
+
+        Critical: if a GTC fills before the bracket threshold fires (or if the threshold
+        is never reached again), the filled DOWN position would otherwise be stranded
+        indefinitely with no corresponding UP and no emergency exit.  This loop detects
+        that case and initiates an orphan exit so we never hold a naked DOWN position.
+        """
         while True:
             await asyncio.sleep(5.0)
             now = time.time()
             expired = []
 
-            for cid, pending in self._pending_down_gtc.items():
+            for cid, pending in list(self._pending_down_gtc.items()):
                 age = now - pending["posted_at"]
                 if age > MAKER.down_gtc_timeout_s:
                     expired.append(cid)
+                    loop = asyncio.get_running_loop()
+                    order_id = pending["order_id"]
+
+                    # First, check actual order status before attempting cancel.
+                    # If the order filled while we weren't looking (no bracket fired to
+                    # claim it), we need to emergency-exit the stranded DOWN position.
+                    order_filled = False
                     try:
-                        loop = asyncio.get_running_loop()
-                        await loop.run_in_executor(
-                            None, self._client.cancel_order, pending["order_id"]
+                        order_status = await loop.run_in_executor(
+                            None, self._client.get_order, order_id
                         )
-                        log.info(f"[MAKER] Cancelled expired DOWN GTC {pending['order_id']}")
+                        status = (order_status.get("status") or "").lower() if isinstance(order_status, dict) else ""
+                        if status in ("matched", "filled"):
+                            order_filled = True
                     except Exception as e:
-                        log.debug(f"[MAKER] Error cancelling expired DOWN GTC: {e}")
+                        log.debug(f"[MAKER] Could not fetch status for GTC {order_id}: {e}")
+
+                    if order_filled:
+                        log.warning(
+                            f"[MAKER] GTC DOWN filled but unclaimed (age={age:.0f}s) — "
+                            f"orphan exit for {order_id} sh={pending['shares']:.2f}"
+                        )
+                        loop.create_task(self._emergency_exit_orphan_gtc(cid, pending))
+                    else:
+                        # Order is still open (or status unknown) — cancel it
+                        try:
+                            await loop.run_in_executor(
+                                None, self._client.cancel_order, order_id
+                            )
+                            log.info(f"[MAKER] Cancelled expired DOWN GTC {order_id}")
+                        except Exception as e:
+                            log.debug(f"[MAKER] Error cancelling expired DOWN GTC {order_id}: {e}")
 
             for cid in expired:
-                del self._pending_down_gtc[cid]
+                self._pending_down_gtc.pop(cid, None)
+
+    async def _emergency_exit_orphan_gtc(self, cid: str, pending: dict) -> None:
+        """Exit a stranded DOWN position from a GTC that filled without a bracket claiming it.
+
+        This handles the case where _cleanup_down_gtc detects a filled-but-unclaimed GTC.
+        We don't have a full Bracket object, so we sell the position directly using
+        the stored token_id, shares, and live bid from the scanner.
+        """
+        from py_clob_client.clob_types import OrderArgs, OrderType
+
+        token_id = pending.get("token_id")
+        if not token_id:
+            log.error(f"[MAKER] Orphan exit failed for {cid[:12]}: no token_id in pending dict")
+            return
+
+        exit_shares = pending["shares"]
+        # Try to get live bid from scanner; fall back to stored detection-time bid
+        bid_price = pending.get("bid_down", 0.0)
+        if self._scanner is not None:
+            live_ps = self._scanner.get_price_state(token_id)
+            if live_ps is not None and live_ps.bid > 0:
+                bid_price = live_ps.bid
+
+        if bid_price == 0.0:
+            log.warning(f"[MAKER] Orphan exit: no bid data for {token_id[:16]} — using 0.01")
+
+        exit_price = round(bid_price * (1.0 - STRATEGY.emergency_exit_slippage_pct), 2)
+        exit_price = max(exit_price, 0.01)
+        exit_shares_valid = _clob_valid_shares(exit_shares, exit_price)
+
+        log.warning(
+            f"[MAKER] Orphan exit: selling {exit_shares_valid:.2f} DOWN @ {exit_price:.3f} "
+            f"(bid={bid_price:.3f}) for {token_id[:16]}…"
+        )
+
+        loop = asyncio.get_running_loop()
+        _RETRY_DELAYS = [3.0, 5.0, 8.0, 12.0]
+
+        for attempt, delay in enumerate([0.0] + _RETRY_DELAYS, start=1):
+            if delay:
+                log.info(f"[MAKER] Orphan exit retry {attempt} in {delay:.0f}s")
+                await asyncio.sleep(delay)
+            try:
+                signed_exit = await loop.run_in_executor(
+                    self._sign_executor, self._client.create_order,
+                    OrderArgs(token_id=token_id, price=exit_price,
+                              size=exit_shares_valid, side="SELL"),
+                )
+                resp = await loop.run_in_executor(
+                    self._sign_executor, self._client.post_order,
+                    signed_exit, OrderType.GTC,
+                )
+                status   = (resp.get("status")  or "").lower() if isinstance(resp, dict) else ""
+                order_id = (resp.get("orderID") or "")          if isinstance(resp, dict) else ""
+
+                if status in ("matched", "live", "open"):
+                    realised_loss = (pending["limit_down_maker"] - exit_price) * exit_shares_valid
+                    log.info(
+                        f"[MAKER] Orphan exit {'filled' if status == 'matched' else 'resting'} "
+                        f"@ {exit_price:.3f} (attempt {attempt}) order={order_id} "
+                        f"| est_loss=${realised_loss:.4f}"
+                    )
+                    self.state.update_balance(-realised_loss)
+                    record = {
+                        "event": "orphan_gtc_exit",
+                        "ts": time.time(),
+                        "condition_id": cid,
+                        "token_id": token_id,
+                        "shares": exit_shares_valid,
+                        "entry_price": pending["limit_down_maker"],
+                        "exit_price": exit_price,
+                        "est_loss": realised_loss,
+                        "order_id": order_id,
+                        "status": status,
+                    }
+                    try:
+                        with open(TRADE_LOG, "a") as f:
+                            f.write(json.dumps(record) + "\n")
+                    except Exception:
+                        pass
+                    return
+
+                err_str = str(resp)
+                if "not enough balance" in err_str.lower():
+                    m = re.search(r'balance:\s*(\d+)', err_str)
+                    if m:
+                        actual_micro = int(m.group(1))
+                        if actual_micro == 0:
+                            log.info(f"[MAKER] Orphan exit: token not yet settled — waiting")
+                        elif actual_micro < round(exit_shares_valid * 1_000_000):
+                            exit_shares_valid = _clob_valid_shares(actual_micro / 1_000_000, exit_price)
+
+            except Exception as e:
+                log.warning(f"[MAKER] Orphan exit attempt {attempt} failed: {e}")
+                err_str = str(e)
+                if "not enough balance" in err_str.lower():
+                    m = re.search(r'balance:\s*(\d+)', err_str)
+                    if m:
+                        actual_micro = int(m.group(1))
+                        if actual_micro == 0:
+                            log.info(f"[MAKER] Orphan exit: token not yet settled — waiting")
+                        elif actual_micro < round(exit_shares_valid * 1_000_000):
+                            exit_shares_valid = _clob_valid_shares(actual_micro / 1_000_000, exit_price)
+
+        log.error(
+            f"[MAKER] ORPHAN EXIT FAILED after {len(_RETRY_DELAYS)+1} attempts — "
+            f"stranded DOWN position {exit_shares_valid:.2f}sh @ {pending['limit_down_maker']:.3f} "
+            f"in market {cid[:12]}. Will resolve at market close."
+        )
+        record = {
+            "event": "orphan_gtc_stranded",
+            "ts": time.time(),
+            "condition_id": cid,
+            "token_id": token_id,
+            "shares": exit_shares_valid,
+            "entry_price": pending["limit_down_maker"],
+        }
+        try:
+            with open(TRADE_LOG, "a") as f:
+                f.write(json.dumps(record) + "\n")
+        except Exception:
+            pass
 
     async def _sim_place(self, b: Bracket) -> bool:
         """Simulate order placement with realistic latency and fill probability."""
@@ -1736,20 +1918,34 @@ class Trader:
             "latency_ms": b.latency_ms,
             "age_ms": b.age_ms,
             "sim": b.sim_mode,
-            # Detailed leg info for debugging partial fills and execution details
+            # Submitted shares (after presign/depth revalidation) — may differ from leg.shares
+            "submitted_shares_up": b.submitted_shares_up,
+            "submitted_shares_down": b.submitted_shares_down,
+            # Bid prices at detection time (used for emergency exit pricing)
+            "bid_up": b.bid_up,
+            "bid_down": b.bid_down,
+            # Leg details — includes both detection-time prices and actual fill prices
             "leg_up": {
                 "status": b.leg_up.status.value,
                 "order_id": b.leg_up.order_id,
-                "price": b.leg_up.price,
-                "shares": b.leg_up.shares,
+                "ask_price": b.leg_up.price,
+                "limit_price": b.limit_up,
+                "shares_requested": b.leg_up.shares,
+                "shares_submitted": b.submitted_shares_up,
                 "fill_price": b.leg_up.fill_price,
+                "placed_at": b.leg_up.placed_at,
+                "filled_at": b.leg_up.filled_at,
             },
             "leg_down": {
                 "status": b.leg_down.status.value,
                 "order_id": b.leg_down.order_id,
-                "price": b.leg_down.price,
-                "shares": b.leg_down.shares,
+                "ask_price": b.leg_down.price,
+                "limit_price": b.limit_down,
+                "shares_requested": b.leg_down.shares,
+                "shares_submitted": b.submitted_shares_down,
                 "fill_price": b.leg_down.fill_price,
+                "placed_at": b.leg_down.placed_at,
+                "filled_at": b.leg_down.filled_at,
             },
         }
         try:
