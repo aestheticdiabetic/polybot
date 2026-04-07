@@ -6,13 +6,18 @@ polling 20 cities every 6 minutes.
 
 Responses are cached for 30 minutes to avoid redundant calls within a
 scan cycle.
+
+Rate limiting strategy:
+- Batch all dates for a city into a single API call (date range fetch)
+- Strict serialized rate limiter: min 1.5s between requests (~40 req/min)
+- This reduces ~130 individual requests to ~60 city-range requests
 """
 import asyncio
 import logging
 import math
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from typing import Optional
 
 import aiohttp
@@ -22,6 +27,10 @@ log = logging.getLogger("bond.weather")
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 CACHE_TTL_SECS = 1800  # 30 minutes
+
+# Minimum seconds between consecutive API requests (serial rate limiter).
+# 1.5s = ~40 req/min, well within Open-Meteo free tier.
+_MIN_REQUEST_INTERVAL = 1.5
 
 
 class UnknownCityError(ValueError):
@@ -37,23 +46,21 @@ class ForecastResult:
     confidence_interval_c: float  # ±°C (std dev of hourly spread around daily max)
 
 
-# ── Cache: (lat, lon, date_str) → (fetched_at_unix, raw_api_response) ─
+# ── Cache: (lat, lon, start_date_str, end_date_str) → (fetched_at_unix, raw) ─
 _cache: dict[tuple, tuple[float, dict]] = {}
 _cache_lock = asyncio.Lock()
 
-# Limit concurrent Open-Meteo requests to avoid 429 rate limiting.
-# Free tier has no documented per-second limit but even moderate bursts
-# trigger 429s. 2 concurrent with a small inter-request delay is safe.
-_OPEN_METEO_CONCURRENCY = 2
-_fetch_sem: Optional[asyncio.Semaphore] = None
+# Serial rate limiter: only one request in-flight at a time, with mandatory
+# gap between releases. This prevents burst-triggering 429s.
+_rate_lock: Optional[asyncio.Lock] = None
+_last_request_time: float = 0.0
 
 
-def _get_sem() -> asyncio.Semaphore:
-    """Lazily create semaphore on first use (must be on the running event loop)."""
-    global _fetch_sem
-    if _fetch_sem is None:
-        _fetch_sem = asyncio.Semaphore(_OPEN_METEO_CONCURRENCY)
-    return _fetch_sem
+def _get_rate_lock() -> asyncio.Lock:
+    global _rate_lock
+    if _rate_lock is None:
+        _rate_lock = asyncio.Lock()
+    return _rate_lock
 
 
 async def get_forecast(city: str, target_date: date) -> ForecastResult:
@@ -71,15 +78,17 @@ async def get_all_forecasts(
     city_date_pairs: list[tuple[str, date]],
 ) -> dict[tuple[str, date], ForecastResult]:
     """
-    Batch-fetch forecasts for all (city, date) pairs concurrently.
+    Batch-fetch forecasts for all (city, date) pairs.
+    Groups dates by city so each city requires only ONE API call (date range).
     De-dupes identical requests. Returns dict keyed by (canonical_city, date).
     Unknown cities are logged and skipped (not raised).
     """
     # Open-Meteo free tier only supports forecasts up to 16 days ahead
     max_forecast_date = date.today() + timedelta(days=16)
 
-    # Resolve and de-dupe
-    resolved: dict[tuple[str, date], tuple[str, float, float]] = {}
+    # Resolve cities and filter out-of-range dates
+    # loc_key → (canonical, lat, lon, set of dates)
+    loc_map: dict[tuple[float, float], tuple[str, float, float, set[date]]] = {}
     skipped_future = 0
     for city, d in city_date_pairs:
         if d > max_forecast_date:
@@ -87,30 +96,45 @@ async def get_all_forecasts(
             continue
         try:
             canonical, lat, lon = _resolve_city(city)
-            resolved[(canonical, d)] = (canonical, lat, lon)
         except UnknownCityError:
             log.warning(f"weather: skipping unknown city '{city}'")
+            continue
+        loc_key = (round(lat, 4), round(lon, 4))
+        if loc_key not in loc_map:
+            loc_map[loc_key] = (canonical, lat, lon, set())
+        loc_map[loc_key][3].add(d)
 
     if skipped_future:
         log.info(f"weather: skipped {skipped_future} pairs with dates beyond 16-day forecast window")
 
-    log.info(f"BOND_WEATHER_FETCH unique_pairs={len(resolved)} (concurrency={_OPEN_METEO_CONCURRENCY})")
+    unique_pairs = sum(len(v[3]) for v in loc_map.values())
+    log.info(
+        f"BOND_WEATHER_FETCH unique_pairs={unique_pairs} "
+        f"city_requests={len(loc_map)} (serial, {_MIN_REQUEST_INTERVAL}s interval)"
+    )
 
-    # Fetch concurrently (throttled by semaphore inside _fetch_open_meteo)
-    async def _fetch_one(key: tuple[str, date]) -> tuple[tuple[str, date], Optional[ForecastResult]]:
-        canonical, d = key
-        _, lat, lon = resolved[key]
+    # Fetch one range per city (serial to respect rate limits)
+    results: dict[tuple[str, date], ForecastResult] = {}
+    failed = 0
+
+    for canonical, lat, lon, dates in loc_map.values():
+        start_d = min(dates)
+        end_d = max(dates)
         try:
-            raw = await _fetch_open_meteo(lat, lon, d)
-            return key, _parse_forecast(canonical, d, raw)
+            raw = await _fetch_open_meteo_range(lat, lon, start_d, end_d)
+            for d in dates:
+                try:
+                    result = _parse_forecast_from_range(canonical, d, raw)
+                    results[(canonical, d)] = result
+                except Exception as exc:
+                    log.warning(f"weather: failed to parse {canonical} {d}: {exc}")
+                    failed += 1
         except Exception as exc:
-            log.warning(f"weather: failed to fetch {canonical} {d}: {exc}")
-            return key, None
+            log.warning(f"weather: failed to fetch {canonical} {start_d}–{end_d}: {exc}")
+            failed += len(dates)
 
-    tasks = [_fetch_one(k) for k in resolved]
-    pairs = await asyncio.gather(*tasks)
-    results = {k: v for k, v in pairs if v is not None}
-    log.info(f"BOND_WEATHER_DONE fetched={len(results)} failed={len(resolved)-len(results)}")
+    fetched = unique_pairs - failed
+    log.info(f"BOND_WEATHER_DONE fetched={fetched} failed={failed}")
     return results
 
 
@@ -203,17 +227,17 @@ def _resolve_city(city_name: str) -> tuple[str, float, float]:
     raise UnknownCityError(f"Cannot resolve city '{city_name}' to coordinates")
 
 
-async def _fetch_open_meteo(lat: float, lon: float, target_date: date) -> dict:
+async def _fetch_open_meteo_range(lat: float, lon: float, start_date: date, end_date: date) -> dict:
     """
-    GET https://api.open-meteo.com/v1/forecast
-    Params: latitude, longitude, daily=temperature_2m_max,
-            hourly=temperature_2m, timezone=auto,
-            start_date, end_date (same day)
-    Cached for CACHE_TTL_SECS. Throttled to _OPEN_METEO_CONCURRENCY concurrent
-    requests; retries up to 3 times on 429 with exponential backoff.
+    Fetch a date range from Open-Meteo in a single API call.
+    Uses a serial rate limiter (min _MIN_REQUEST_INTERVAL between requests).
+    Cached for CACHE_TTL_SECS. Retries on 429 with exponential backoff.
     """
-    date_str = target_date.isoformat()
-    cache_key = (round(lat, 4), round(lon, 4), date_str)
+    global _last_request_time
+
+    start_str = start_date.isoformat()
+    end_str = end_date.isoformat()
+    cache_key = (round(lat, 4), round(lon, 4), start_str, end_str)
 
     async with _cache_lock:
         if cache_key in _cache:
@@ -227,56 +251,86 @@ async def _fetch_open_meteo(lat: float, lon: float, target_date: date) -> dict:
         "daily":      "temperature_2m_max",
         "hourly":     "temperature_2m",
         "timezone":   "auto",
-        "start_date": date_str,
-        "end_date":   date_str,
+        "start_date": start_str,
+        "end_date":   end_str,
     }
 
-    timeout = aiohttp.ClientTimeout(total=15)
-    backoff = 1.0
-    async with _get_sem():
-        for attempt in range(4):
+    timeout = aiohttp.ClientTimeout(total=20)
+
+    # Serial rate limiter: enforce minimum gap between requests
+    async with _get_rate_lock():
+        now = time.monotonic()
+        gap = now - _last_request_time
+        if gap < _MIN_REQUEST_INTERVAL:
+            await asyncio.sleep(_MIN_REQUEST_INTERVAL - gap)
+
+        for attempt in range(5):
             try:
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.get(OPEN_METEO_URL, params=params) as resp:
                         if resp.status == 429:
-                            wait = backoff * (2 ** attempt)
-                            log.debug(f"Open-Meteo 429 at ({lat:.2f},{lon:.2f}) {date_str} — retry in {wait:.1f}s")
+                            wait = _MIN_REQUEST_INTERVAL * (2 ** attempt)
+                            log.warning(
+                                f"Open-Meteo 429 at ({lat:.2f},{lon:.2f}) "
+                                f"{start_str}–{end_str} — retry in {wait:.1f}s (attempt {attempt+1}/5)"
+                            )
                             await asyncio.sleep(wait)
                             continue
                         resp.raise_for_status()
                         data = await resp.json()
                         break
             except aiohttp.ClientResponseError as exc:
-                if exc.status == 429 and attempt < 3:
-                    wait = backoff * (2 ** attempt)
-                    log.debug(f"Open-Meteo 429 (exc) — retry in {wait:.1f}s")
+                if exc.status == 429 and attempt < 4:
+                    wait = _MIN_REQUEST_INTERVAL * (2 ** attempt)
+                    log.warning(f"Open-Meteo 429 (exc) — retry in {wait:.1f}s")
                     await asyncio.sleep(wait)
                     continue
                 raise
         else:
-            raise RuntimeError("Open-Meteo rate limit: max retries exceeded (429)")
+            raise RuntimeError(f"Open-Meteo rate limit: max retries exceeded (429) for ({lat:.2f},{lon:.2f})")
+
+        _last_request_time = time.monotonic()
 
     async with _cache_lock:
         _cache[cache_key] = (time.monotonic(), data)
 
-    # Brief pause after each successful fetch to keep request rate low.
-    # With concurrency=2 and 0.5s pause, sustained rate is ~4 req/s.
-    await asyncio.sleep(0.5)
-
     return data
 
 
-def _parse_forecast(city: str, target_date: date, raw: dict) -> ForecastResult:
+async def _fetch_open_meteo(lat: float, lon: float, target_date: date) -> dict:
+    """Single-date fetch (used by get_forecast). Wraps the range fetcher."""
+    return await _fetch_open_meteo_range(lat, lon, target_date, target_date)
+
+
+def _parse_forecast_from_range(city: str, target_date: date, raw: dict) -> ForecastResult:
     """
-    Extract daily_max_c and hourly_spread from Open-Meteo response.
-    Computes confidence_interval_c as std dev of hourly temps for the day.
+    Extract daily_max_c and hourly_spread for target_date from a (possibly
+    multi-day) Open-Meteo range response. Computes confidence_interval_c as
+    std dev of the day's hourly temps.
     """
+    date_str = target_date.isoformat()
+
     try:
-        daily_max_c: float = raw["daily"]["temperature_2m_max"][0]
-    except (KeyError, IndexError, TypeError) as exc:
+        daily_times: list[str] = raw["daily"]["time"]
+        daily_maxes: list[float] = raw["daily"]["temperature_2m_max"]
+    except (KeyError, TypeError) as exc:
         raise ValueError(f"Unexpected Open-Meteo response shape for {city}: {exc}") from exc
 
-    hourly_temps: list[float] = raw.get("hourly", {}).get("temperature_2m", [])
+    try:
+        day_idx = daily_times.index(date_str)
+        daily_max_c: float = daily_maxes[day_idx]
+    except (ValueError, IndexError) as exc:
+        raise ValueError(f"Date {date_str} not found in response for {city}: {exc}") from exc
+
+    hourly_times: list[str] = raw.get("hourly", {}).get("time", [])
+    hourly_temps_all: list[float] = raw.get("hourly", {}).get("temperature_2m", [])
+
+    # Extract only the 24 hourly values that belong to target_date
+    hourly_temps = [
+        t for ts, t in zip(hourly_times, hourly_temps_all)
+        if ts.startswith(date_str)
+    ]
+
     if not hourly_temps:
         return ForecastResult(
             city=city,
@@ -286,8 +340,6 @@ def _parse_forecast(city: str, target_date: date, raw: dict) -> ForecastResult:
             confidence_interval_c=1.5,
         )
 
-    # Use 6-hour window around daily max for confidence interval
-    # Full 24 hourly values; std dev gives natural spread
     n = len(hourly_temps)
     mean = sum(hourly_temps) / n
     variance = sum((t - mean) ** 2 for t in hourly_temps) / n
@@ -300,3 +352,8 @@ def _parse_forecast(city: str, target_date: date, raw: dict) -> ForecastResult:
         hourly_spread=hourly_temps,
         confidence_interval_c=max(std, 0.5),
     )
+
+
+def _parse_forecast(city: str, target_date: date, raw: dict) -> ForecastResult:
+    """Wrapper for single-date responses (backward compat with get_forecast)."""
+    return _parse_forecast_from_range(city, target_date, raw)
