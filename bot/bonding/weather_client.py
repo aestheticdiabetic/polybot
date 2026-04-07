@@ -42,9 +42,9 @@ _cache: dict[tuple, tuple[float, dict]] = {}
 _cache_lock = asyncio.Lock()
 
 # Limit concurrent Open-Meteo requests to avoid 429 rate limiting.
-# Free tier has no documented per-second limit but bursts of >10 concurrent
-# requests reliably trigger 429s. 5 concurrent is safe and still fast.
-_OPEN_METEO_CONCURRENCY = 5
+# Free tier has no documented per-second limit but even moderate bursts
+# trigger 429s. 2 concurrent with a small inter-request delay is safe.
+_OPEN_METEO_CONCURRENCY = 2
 _fetch_sem: Optional[asyncio.Semaphore] = None
 
 
@@ -258,6 +258,10 @@ async def _fetch_open_meteo(lat: float, lon: float, target_date: date) -> dict:
 
     async with _cache_lock:
         _cache[cache_key] = (time.monotonic(), data)
+
+    # Brief pause after each successful fetch to keep request rate low.
+    # With concurrency=2 and 0.5s pause, sustained rate is ~4 req/s.
+    await asyncio.sleep(0.5)
 
     return data
 
