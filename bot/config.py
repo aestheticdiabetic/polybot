@@ -147,7 +147,8 @@ BOND_LEDGER_FILE = os.getenv("BOND_LEDGER_FILE", "/app/logs/bonding_positions.js
 # Entry thresholds
 BOND_MIN_EV_CORE       = 0.02   # min expected value per share, core tier
 BOND_MIN_EV_SECONDARY  = 0.01   # min EV, secondary tier
-BOND_CONFIDENCE_FLOOR  = 0.70   # min forecast probability to enter any position
+BOND_CONFIDENCE_FLOOR  = 0.20   # min forecast probability to enter CORE tier
+                                 # (ensemble model: 30 members → max ~33% per 2°F bucket)
 BOND_EDGE_FLOOR        = 0.15   # min gap between true probability and market ask
 
 # Position sizing

@@ -1,24 +1,26 @@
 """
-weather_client.py — Fetch city temperature forecasts from Open-Meteo.
+weather_client.py — Fetch city temperature forecasts from Open-Meteo ensemble API.
+
+Uses the GFS Seamless ensemble model (30 members) to obtain a true empirical
+probability distribution over daily maximum temperatures, replacing the previous
+Gaussian approximation that was inflated by diurnal spread.
 
 No API key required. Free tier limits:
   - 10,000 calls/day
   -  5,000 calls/hour
   -    600 calls/minute
 
-Rate limiting strategy:
-- Disk-persistent cache (2h TTL at /app/data/weather_cache.json) survives
-  restarts, so a full city refresh only happens once every 2 hours.
+Rate limiting notes:
+- Ensemble requests fetch `temperature_2m_max` + 30 member variables = 31 vars.
+  Open-Meteo counts this as ~3.1 API calls per request (>10 vars threshold).
+- Disk-persistent cache (2h TTL) keeps daily usage well under 10k even at scale.
 - Batch all dates for a city into a single API call (date range fetch).
 - Strict serial rate limiter: min 3s between requests (~20 req/min).
-- Sliding-window counters enforce all three Open-Meteo limits hard.
-- Together these reduce daily API calls from ~6,000 to ~300-400.
 """
 import asyncio
 import collections
 import json
 import logging
-import math
 import os
 import time
 from dataclasses import dataclass
@@ -30,14 +32,15 @@ import config as _config
 
 log = logging.getLogger("bond.weather")
 
-OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
+OPEN_METEO_ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
+ENSEMBLE_MODEL = "gfs_seamless"  # 30 members, global coverage, free tier
 
 # In-memory TTL: re-check if data is older than 30 min within a session
 MEM_CACHE_TTL_SECS  = 1800   # 30 minutes
 # Disk TTL: don't re-fetch from API if disk entry is fresher than 2 hours
 DISK_CACHE_TTL_SECS = 7200   # 2 hours
 
-DISK_CACHE_PATH = os.environ.get("WEATHER_CACHE_PATH", "/app/data/weather_cache.json")
+DISK_CACHE_PATH = os.environ.get("WEATHER_CACHE_PATH", "/app/data/ensemble_cache.json")
 
 # Minimum seconds between consecutive API requests.
 # 3s = ~20 req/min — well under the 600/min Open-Meteo limit.
@@ -49,7 +52,6 @@ _LIMIT_PER_HOUR   = 5_000
 _LIMIT_PER_DAY    = 10_000
 
 # Timestamps of every successful API call in the last 24 hours.
-# Entries older than 24 hours are pruned before each new request.
 _api_call_log: collections.deque[float] = collections.deque()
 
 
@@ -61,9 +63,8 @@ class UnknownCityError(ValueError):
 class ForecastResult:
     city: str
     target_date: date
-    daily_max_c: float            # predicted daily high (°C)
-    hourly_spread: list[float]    # hourly temps for the target day
-    confidence_interval_c: float  # ±°C (std dev of hourly spread around daily max)
+    daily_max_c: float          # ensemble control run daily high (°C)
+    ensemble_members: list[float]  # daily max from each ensemble member (°C)
 
 
 # ── In-memory cache: (lat, lon, start_date_str, end_date_str) → (fetched_at, raw) ─
@@ -91,7 +92,6 @@ def _check_limits() -> None:
     """
     now = time.time()
     cutoff_day = now - 86400
-    # Drop entries outside the 24-hour window
     while _api_call_log and _api_call_log[0] < cutoff_day:
         _api_call_log.popleft()
 
@@ -115,20 +115,17 @@ def _check_limits() -> None:
             "Backing off."
         )
 
-    # Log a warning when approaching limits (within 10%)
-    if day_count  >= _LIMIT_PER_DAY   * 0.9:
+    if day_count >= _LIMIT_PER_DAY * 0.9:
         log.warning(f"Open-Meteo daily budget at {day_count}/{_LIMIT_PER_DAY} — approaching limit")
     elif hour_count >= _LIMIT_PER_HOUR * 0.9:
         log.warning(f"Open-Meteo hourly budget at {hour_count}/{_LIMIT_PER_HOUR} — approaching limit")
 
 
 def _record_api_call() -> None:
-    """Record a completed API call in the sliding-window log."""
     _api_call_log.append(time.time())
 
 
 def _load_disk_cache() -> None:
-    """Load persisted weather cache from disk into memory (called once on first use)."""
     global _disk_cache_loaded
     if _disk_cache_loaded:
         return
@@ -154,7 +151,6 @@ def _load_disk_cache() -> None:
 
 
 def _save_disk_cache() -> None:
-    """Persist current in-memory cache to disk (best-effort, atomic write)."""
     try:
         os.makedirs(os.path.dirname(DISK_CACHE_PATH), exist_ok=True)
         now = time.time()
@@ -173,29 +169,25 @@ def _save_disk_cache() -> None:
 
 async def get_forecast(city: str, target_date: date) -> ForecastResult:
     """
-    Return forecast for a single city on target_date.
-    Resolves city aliases, fetches from Open-Meteo (cached 30 min).
+    Return ensemble forecast for a single city on target_date.
     Raises UnknownCityError if city cannot be resolved.
     """
     canonical, lat, lon = _resolve_city(city)
-    raw = await _fetch_open_meteo(lat, lon, target_date)
-    return _parse_forecast(canonical, target_date, raw)
+    raw = await _fetch_ensemble_range(lat, lon, target_date, target_date)
+    return _parse_ensemble_from_range(canonical, target_date, raw)
 
 
 async def get_all_forecasts(
     city_date_pairs: list[tuple[str, date]],
 ) -> dict[tuple[str, date], ForecastResult]:
     """
-    Batch-fetch forecasts for all (city, date) pairs.
+    Batch-fetch ensemble forecasts for all (city, date) pairs.
     Groups dates by city so each city requires only ONE API call (date range).
     De-dupes identical requests. Returns dict keyed by (canonical_city, date).
     Unknown cities are logged and skipped (not raised).
     """
-    # Open-Meteo free tier only supports forecasts up to 16 days ahead
     max_forecast_date = date.today() + timedelta(days=16)
 
-    # Resolve cities and filter out-of-range dates
-    # loc_key → (canonical, lat, lon, set of dates)
     loc_map: dict[tuple[float, float], tuple[str, float, float, set[date]]] = {}
     skipped_future = 0
     for city, d in city_date_pairs:
@@ -218,10 +210,9 @@ async def get_all_forecasts(
     unique_pairs = sum(len(v[3]) for v in loc_map.values())
     log.info(
         f"BOND_WEATHER_FETCH unique_pairs={unique_pairs} "
-        f"city_requests={len(loc_map)} (serial, {_MIN_REQUEST_INTERVAL}s interval)"
+        f"city_requests={len(loc_map)} model={ENSEMBLE_MODEL} (serial, {_MIN_REQUEST_INTERVAL}s interval)"
     )
 
-    # Fetch one range per city (serial to respect rate limits)
     results: dict[tuple[str, date], ForecastResult] = {}
     failed = 0
 
@@ -229,10 +220,10 @@ async def get_all_forecasts(
         start_d = min(dates)
         end_d = max(dates)
         try:
-            raw = await _fetch_open_meteo_range(lat, lon, start_d, end_d)
+            raw = await _fetch_ensemble_range(lat, lon, start_d, end_d)
             for d in dates:
                 try:
-                    result = _parse_forecast_from_range(canonical, d, raw)
+                    result = _parse_ensemble_from_range(canonical, d, raw)
                     results[(canonical, d)] = result
                 except Exception as exc:
                     log.warning(f"weather: failed to parse {canonical} {d}: {exc}")
@@ -252,24 +243,17 @@ def prob_in_range(
     temp_max: float,
 ) -> float:
     """
-    Return probability (0–1) that the day's high falls in [temp_min, temp_max].
+    Return empirical probability (0–1) that the day's high falls in [temp_min, temp_max].
 
-    Uses a Gaussian approximation:
-      mean = forecast.daily_max_c
-      std  = forecast.confidence_interval_c  (or 1.0 if too tight)
-
-    P(a < X < b) = 0.5 * [erf((b-mu)/(std*√2)) - erf((a-mu)/(std*√2))]
-    Implemented via math.erf — no scipy dependency.
+    Counts ensemble members whose predicted daily maximum falls within the range.
+    With 30 GFS members the resolution is 1/30 ≈ 3.3 percentage points.
+    Falls back to 0.0 if no members are available.
     """
-    mu  = forecast.daily_max_c
-    std = max(forecast.confidence_interval_c, 1.0)  # floor at 1°C
-    sqrt2 = math.sqrt(2)
-
-    def _phi(x: float) -> float:
-        return 0.5 * (1.0 + math.erf(x / sqrt2))
-
-    p = _phi((temp_max - mu) / std) - _phi((temp_min - mu) / std)
-    return max(0.0, min(1.0, p))
+    members = forecast.ensemble_members
+    if not members:
+        return 0.0
+    count = sum(1 for m in members if temp_min <= m <= temp_max)
+    return count / len(members)
 
 
 def celsius_to_fahrenheit(c: float) -> float:
@@ -283,10 +267,8 @@ def fahrenheit_to_celsius(f: float) -> float:
 async def geocode_city(name: str) -> tuple[str, float, float]:
     """
     Resolve a city name to (display_name, lat, lon) using Open-Meteo geocoding.
-    Free API, no key required.
+    Free API, no key required. Goes through the shared rate limiter.
     Raises UnknownCityError if no results found.
-    Goes through the shared rate limiter so geocoding calls count against
-    the same Open-Meteo budget as forecast calls.
     """
     global _last_request_time
 
@@ -327,18 +309,15 @@ def _resolve_city(city_name: str) -> tuple[str, float, float]:
     cities  = _config.BOND_CITIES
     aliases = _config.BOND_CITY_ALIASES
 
-    # Direct match
     if city_name in cities:
         lat, lon = cities[city_name]
         return city_name, lat, lon
 
-    # Alias lookup
     canonical = aliases.get(city_name)
     if canonical and canonical in cities:
         lat, lon = cities[canonical]
         return canonical, lat, lon
 
-    # Case-insensitive fallback
     lower = city_name.lower()
     for name, coords in cities.items():
         if name.lower() == lower:
@@ -351,15 +330,16 @@ def _resolve_city(city_name: str) -> tuple[str, float, float]:
     raise UnknownCityError(f"Cannot resolve city '{city_name}' to coordinates")
 
 
-async def _fetch_open_meteo_range(lat: float, lon: float, start_date: date, end_date: date) -> dict:
+async def _fetch_ensemble_range(
+    lat: float, lon: float, start_date: date, end_date: date
+) -> dict:
     """
-    Fetch a date range from Open-Meteo in a single API call.
-    Checks disk cache on first call (DISK_CACHE_TTL_SECS), then in-memory
-    (MEM_CACHE_TTL_SECS). Uses serial rate limiter between live requests.
+    Fetch GFS ensemble daily max temperatures for a date range.
+    Checks disk cache (DISK_CACHE_TTL_SECS), then in-memory (MEM_CACHE_TTL_SECS).
+    Uses serial rate limiter between live requests.
     """
     global _last_request_time
 
-    # Load disk cache once per process startup
     _load_disk_cache()
 
     start_str = start_date.isoformat()
@@ -369,7 +349,6 @@ async def _fetch_open_meteo_range(lat: float, lon: float, start_date: date, end_
     async with _cache_lock:
         if cache_key in _cache:
             fetched_at, data = _cache[cache_key]
-            # In-memory: honour MEM_CACHE_TTL (wall clock)
             if time.time() - fetched_at < MEM_CACHE_TTL_SECS:
                 return data
 
@@ -377,7 +356,7 @@ async def _fetch_open_meteo_range(lat: float, lon: float, start_date: date, end_
         "latitude":   lat,
         "longitude":  lon,
         "daily":      "temperature_2m_max",
-        "hourly":     "temperature_2m",
+        "models":     ENSEMBLE_MODEL,
         "timezone":   "auto",
         "start_date": start_str,
         "end_date":   end_str,
@@ -385,23 +364,23 @@ async def _fetch_open_meteo_range(lat: float, lon: float, start_date: date, end_
 
     timeout = aiohttp.ClientTimeout(total=20)
 
-    # Serial rate limiter: enforce minimum gap and sliding-window budgets
     async with _get_rate_lock():
         gap = time.time() - _last_request_time
         if gap < _MIN_REQUEST_INTERVAL:
             await asyncio.sleep(_MIN_REQUEST_INTERVAL - gap)
 
-        # Raises RuntimeError if any Open-Meteo limit would be exceeded
         _check_limits()
 
         for attempt in range(5):
             try:
                 async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.get(OPEN_METEO_URL, params=params) as resp:
+                    async with session.get(
+                        OPEN_METEO_ENSEMBLE_URL, params=params
+                    ) as resp:
                         if resp.status == 429:
                             wait = _MIN_REQUEST_INTERVAL * (2 ** attempt)
                             log.warning(
-                                f"Open-Meteo 429 at ({lat:.2f},{lon:.2f}) "
+                                f"Open-Meteo ensemble 429 at ({lat:.2f},{lon:.2f}) "
                                 f"{start_str}–{end_str} — retry in {wait:.1f}s (attempt {attempt+1}/5)"
                             )
                             await asyncio.sleep(wait)
@@ -412,12 +391,14 @@ async def _fetch_open_meteo_range(lat: float, lon: float, start_date: date, end_
             except aiohttp.ClientResponseError as exc:
                 if exc.status == 429 and attempt < 4:
                     wait = _MIN_REQUEST_INTERVAL * (2 ** attempt)
-                    log.warning(f"Open-Meteo 429 (exc) — retry in {wait:.1f}s")
+                    log.warning(f"Open-Meteo ensemble 429 (exc) — retry in {wait:.1f}s")
                     await asyncio.sleep(wait)
                     continue
                 raise
         else:
-            raise RuntimeError(f"Open-Meteo rate limit: max retries exceeded (429) for ({lat:.2f},{lon:.2f})")
+            raise RuntimeError(
+                f"Open-Meteo ensemble rate limit: max retries exceeded for ({lat:.2f},{lon:.2f})"
+            )
 
         _last_request_time = time.time()
         _record_api_call()
@@ -430,63 +411,48 @@ async def _fetch_open_meteo_range(lat: float, lon: float, start_date: date, end_
     return data
 
 
-async def _fetch_open_meteo(lat: float, lon: float, target_date: date) -> dict:
-    """Single-date fetch (used by get_forecast). Wraps the range fetcher."""
-    return await _fetch_open_meteo_range(lat, lon, target_date, target_date)
-
-
-def _parse_forecast_from_range(city: str, target_date: date, raw: dict) -> ForecastResult:
+def _parse_ensemble_from_range(city: str, target_date: date, raw: dict) -> ForecastResult:
     """
-    Extract daily_max_c and hourly_spread for target_date from a (possibly
-    multi-day) Open-Meteo range response. Computes confidence_interval_c as
-    std dev of the day's hourly temps.
+    Extract ensemble daily max temperatures for target_date from an Open-Meteo
+    ensemble response. Collects the control run value and all member values.
+
+    Member keys follow the pattern: temperature_2m_max_member{N:02d}
+    The control run is keyed as: temperature_2m_max
     """
     date_str = target_date.isoformat()
+    daily = raw.get("daily", {})
 
-    try:
-        daily_times: list[str] = raw["daily"]["time"]
-        daily_maxes: list[float] = raw["daily"]["temperature_2m_max"]
-    except (KeyError, TypeError) as exc:
-        raise ValueError(f"Unexpected Open-Meteo response shape for {city}: {exc}") from exc
+    times: list[str] = daily.get("time", [])
+    if date_str not in times:
+        raise ValueError(f"Date {date_str} not found in ensemble response for {city}")
 
-    try:
-        day_idx = daily_times.index(date_str)
-        daily_max_c: float = daily_maxes[day_idx]
-    except (ValueError, IndexError) as exc:
-        raise ValueError(f"Date {date_str} not found in response for {city}: {exc}") from exc
+    day_idx = times.index(date_str)
 
-    hourly_times: list[str] = raw.get("hourly", {}).get("time", [])
-    hourly_temps_all: list[float] = raw.get("hourly", {}).get("temperature_2m", [])
+    control_series = daily.get("temperature_2m_max")
+    if not control_series:
+        raise ValueError(f"Missing temperature_2m_max in ensemble response for {city}")
+    daily_max_c: float = control_series[day_idx]
 
-    # Extract only the 24 hourly values that belong to target_date
-    hourly_temps = [
-        t for ts, t in zip(hourly_times, hourly_temps_all)
-        if ts.startswith(date_str)
-    ]
+    # Collect all member series dynamically (member01, member02, ...)
+    members: list[float] = []
+    for key, series in daily.items():
+        if key.startswith("temperature_2m_max_member") and isinstance(series, list):
+            val = series[day_idx]
+            if val is not None:
+                members.append(float(val))
 
-    if not hourly_temps:
-        return ForecastResult(
-            city=city,
-            target_date=target_date,
-            daily_max_c=daily_max_c,
-            hourly_spread=[daily_max_c],
-            confidence_interval_c=1.5,
-        )
+    if not members:
+        log.warning(f"weather: no ensemble members found for {city} {date_str}, using control only")
+        members = [daily_max_c]
 
-    n = len(hourly_temps)
-    mean = sum(hourly_temps) / n
-    variance = sum((t - mean) ** 2 for t in hourly_temps) / n
-    std = math.sqrt(variance) if variance > 0 else 1.0
+    log.debug(
+        f"weather: {city} {date_str} control={daily_max_c:.1f}°C "
+        f"members={len(members)} range=[{min(members):.1f}, {max(members):.1f}]°C"
+    )
 
     return ForecastResult(
         city=city,
         target_date=target_date,
         daily_max_c=daily_max_c,
-        hourly_spread=hourly_temps,
-        confidence_interval_c=max(std, 0.5),
+        ensemble_members=members,
     )
-
-
-def _parse_forecast(city: str, target_date: date, raw: dict) -> ForecastResult:
-    """Wrapper for single-date responses (backward compat with get_forecast)."""
-    return _parse_forecast_from_range(city, target_date, raw)
