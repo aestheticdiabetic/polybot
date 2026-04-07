@@ -1,20 +1,20 @@
 """
 weather_client.py — Fetch city temperature forecasts from Open-Meteo.
 
-No API key required. Free tier covers 10,000 calls/day — sufficient for
-polling 20 cities every 6 minutes.
-
-Responses are cached for 30 minutes to avoid redundant calls within a
-scan cycle.
+No API key required. Free tier covers 10,000 calls/day.
 
 Rate limiting strategy:
-- Batch all dates for a city into a single API call (date range fetch)
-- Strict serialized rate limiter: min 1.5s between requests (~40 req/min)
-- This reduces ~130 individual requests to ~60 city-range requests
+- Disk-persistent cache (2h TTL at /app/data/weather_cache.json) survives
+  restarts, so a full city refresh only happens once every 2 hours.
+- Batch all dates for a city into a single API call (date range fetch).
+- Strict serial rate limiter: min 3s between requests (~20 req/min).
+- Together these reduce daily API calls from ~6,000 to ~300-400.
 """
 import asyncio
+import json
 import logging
 import math
+import os
 import time
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -26,11 +26,17 @@ import config as _config
 log = logging.getLogger("bond.weather")
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
-CACHE_TTL_SECS = 1800  # 30 minutes
 
-# Minimum seconds between consecutive API requests (serial rate limiter).
-# 1.5s = ~40 req/min, well within Open-Meteo free tier.
-_MIN_REQUEST_INTERVAL = 1.5
+# In-memory TTL: re-check if data is older than 30 min within a session
+MEM_CACHE_TTL_SECS  = 1800   # 30 minutes
+# Disk TTL: don't re-fetch from API if disk entry is fresher than 2 hours
+DISK_CACHE_TTL_SECS = 7200   # 2 hours
+
+DISK_CACHE_PATH = os.environ.get("WEATHER_CACHE_PATH", "/app/data/weather_cache.json")
+
+# Minimum seconds between consecutive API requests.
+# 3s = ~20 req/min — conservative enough to avoid 429s under normal conditions.
+_MIN_REQUEST_INTERVAL = 3.0
 
 
 class UnknownCityError(ValueError):
@@ -46,12 +52,12 @@ class ForecastResult:
     confidence_interval_c: float  # ±°C (std dev of hourly spread around daily max)
 
 
-# ── Cache: (lat, lon, start_date_str, end_date_str) → (fetched_at_unix, raw) ─
+# ── In-memory cache: (lat, lon, start_date_str, end_date_str) → (fetched_at, raw) ─
 _cache: dict[tuple, tuple[float, dict]] = {}
 _cache_lock = asyncio.Lock()
+_disk_cache_loaded = False
 
-# Serial rate limiter: only one request in-flight at a time, with mandatory
-# gap between releases. This prevents burst-triggering 429s.
+# Serial rate limiter
 _rate_lock: Optional[asyncio.Lock] = None
 _last_request_time: float = 0.0
 
@@ -61,6 +67,50 @@ def _get_rate_lock() -> asyncio.Lock:
     if _rate_lock is None:
         _rate_lock = asyncio.Lock()
     return _rate_lock
+
+
+def _load_disk_cache() -> None:
+    """Load persisted weather cache from disk into memory (called once on first use)."""
+    global _disk_cache_loaded
+    if _disk_cache_loaded:
+        return
+    _disk_cache_loaded = True
+    try:
+        with open(DISK_CACHE_PATH) as f:
+            saved: dict = json.load(f)
+        now = time.time()
+        loaded = 0
+        for key_str, entry in saved.items():
+            age = now - entry.get("fetched_at", 0)
+            if age < DISK_CACHE_TTL_SECS:
+                parts = key_str.split("|")
+                key = (float(parts[0]), float(parts[1]), parts[2], parts[3])
+                _cache[key] = (entry["fetched_at"], entry["data"])
+                loaded += 1
+        if loaded:
+            log.info(f"weather: loaded {loaded} entries from disk cache ({DISK_CACHE_PATH})")
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        log.warning(f"weather: failed to load disk cache: {exc}")
+
+
+def _save_disk_cache() -> None:
+    """Persist current in-memory cache to disk (best-effort, atomic write)."""
+    try:
+        os.makedirs(os.path.dirname(DISK_CACHE_PATH), exist_ok=True)
+        now = time.time()
+        to_save: dict = {}
+        for key, (fetched_at, data) in _cache.items():
+            if now - fetched_at < DISK_CACHE_TTL_SECS:
+                key_str = f"{key[0]}|{key[1]}|{key[2]}|{key[3]}"
+                to_save[key_str] = {"fetched_at": fetched_at, "data": data}
+        tmp = DISK_CACHE_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(to_save, f)
+        os.replace(tmp, DISK_CACHE_PATH)
+    except Exception as exc:
+        log.warning(f"weather: failed to save disk cache: {exc}")
 
 
 async def get_forecast(city: str, target_date: date) -> ForecastResult:
@@ -230,10 +280,13 @@ def _resolve_city(city_name: str) -> tuple[str, float, float]:
 async def _fetch_open_meteo_range(lat: float, lon: float, start_date: date, end_date: date) -> dict:
     """
     Fetch a date range from Open-Meteo in a single API call.
-    Uses a serial rate limiter (min _MIN_REQUEST_INTERVAL between requests).
-    Cached for CACHE_TTL_SECS. Retries on 429 with exponential backoff.
+    Checks disk cache on first call (DISK_CACHE_TTL_SECS), then in-memory
+    (MEM_CACHE_TTL_SECS). Uses serial rate limiter between live requests.
     """
     global _last_request_time
+
+    # Load disk cache once per process startup
+    _load_disk_cache()
 
     start_str = start_date.isoformat()
     end_str = end_date.isoformat()
@@ -242,7 +295,8 @@ async def _fetch_open_meteo_range(lat: float, lon: float, start_date: date, end_
     async with _cache_lock:
         if cache_key in _cache:
             fetched_at, data = _cache[cache_key]
-            if time.monotonic() - fetched_at < CACHE_TTL_SECS:
+            # In-memory: honour MEM_CACHE_TTL (wall clock)
+            if time.time() - fetched_at < MEM_CACHE_TTL_SECS:
                 return data
 
     params = {
@@ -259,8 +313,7 @@ async def _fetch_open_meteo_range(lat: float, lon: float, start_date: date, end_
 
     # Serial rate limiter: enforce minimum gap between requests
     async with _get_rate_lock():
-        now = time.monotonic()
-        gap = now - _last_request_time
+        gap = time.time() - _last_request_time
         if gap < _MIN_REQUEST_INTERVAL:
             await asyncio.sleep(_MIN_REQUEST_INTERVAL - gap)
 
@@ -289,11 +342,13 @@ async def _fetch_open_meteo_range(lat: float, lon: float, start_date: date, end_
         else:
             raise RuntimeError(f"Open-Meteo rate limit: max retries exceeded (429) for ({lat:.2f},{lon:.2f})")
 
-        _last_request_time = time.monotonic()
+        _last_request_time = time.time()
 
+    now = time.time()
     async with _cache_lock:
-        _cache[cache_key] = (time.monotonic(), data)
+        _cache[cache_key] = (now, data)
 
+    _save_disk_cache()
     return data
 
 

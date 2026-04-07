@@ -31,12 +31,15 @@ _WING_ASK_MIN = 0.001
 class ScoredOpportunity:
     market: MarketCandidate
     forecast: ForecastResult
-    prob: float    # true probability from forecast (0–1)
-    ev: float      # expected value per share = prob*1.0 - best_ask
-    edge: float    # prob - best_ask (true vs implied probability gap)
-    tier: str      # CORE | SECONDARY | WING
-    shares: int    # number of shares to buy
-    capital: float # total cost basis = shares * best_ask
+    prob: float          # true probability from forecast (0–1)
+    ev: float            # expected value per share = prob*1.0 - best_ask
+    edge: float          # prob - best_ask (true vs implied probability gap)
+    tier: str            # CORE | SECONDARY | WING
+    shares: int          # total target shares
+    capital: float       # total cost basis = shares * best_ask
+    shares_immediate: int  # shares to buy now via FOK (available at profitable prices)
+    shares_limit: int      # shares to queue as GTC limit order
+    limit_price: float     # price for the GTC limit order (= best_ask at scan time)
 
 
 def score_all(
@@ -117,6 +120,19 @@ def score_market(
         return None
 
     shares = _shares_for_tier(tier)
+
+    # Compute fill split: how many shares are immediately available at profitable
+    # prices vs how many need a resting GTC limit order.
+    # max_profitable_price = highest price where we still satisfy the edge floor.
+    max_profitable_price = prob - _config.BOND_EDGE_FLOOR
+    shares_immediate, shares_limit = _compute_fill_split(
+        market.ask_book, shares, max_profitable_price
+    )
+
+    # Need at least something to do
+    if shares_immediate == 0 and shares_limit == 0:
+        return None
+
     capital = round(shares * ask, 4)
 
     return ScoredOpportunity(
@@ -128,6 +144,9 @@ def score_market(
         tier=tier,
         shares=shares,
         capital=capital,
+        shares_immediate=shares_immediate,
+        shares_limit=shares_limit,
+        limit_price=ask,
     )
 
 
@@ -149,6 +168,27 @@ def assign_tier(ask: float, ev: float, prob: float) -> Optional[str]:
             return TIER_WING
 
     return None
+
+
+def _compute_fill_split(
+    ask_book: list,
+    shares_wanted: int,
+    max_profitable_price: float,
+) -> tuple[int, int]:
+    """
+    Given the ask book and target share count, compute how many shares can be
+    filled immediately (at or below max_profitable_price) vs queued as a limit.
+
+    Returns (shares_immediate, shares_limit).
+    When ask_book is empty (Gamma-embedded price, depth unknown), all shares are
+    attempted immediately via FOK — old behaviour.
+    """
+    if not ask_book:
+        return shares_wanted, 0
+    available = sum(size for price, size in ask_book if price <= max_profitable_price)
+    shares_immediate = min(shares_wanted, int(available))
+    shares_limit = shares_wanted - shares_immediate
+    return shares_immediate, shares_limit
 
 
 def _shares_for_tier(tier: str) -> int:

@@ -67,8 +67,12 @@ async def run_bonding_loop(state: StateManager) -> None:
         funder=FUNDER_ADDRESS,
     )
 
-    exit_mgr = ExitManager(bond_client)
+    from bonding.order_tracker import PendingOrderTracker
+
+    exit_mgr     = ExitManager(bond_client)
+    order_tracker = PendingOrderTracker(bond_client, exit_mgr)
     asyncio.get_running_loop().create_task(exit_mgr.run())
+    asyncio.get_running_loop().create_task(order_tracker.run())
 
     state.set_running(True)
     log.info(
@@ -92,7 +96,7 @@ async def run_bonding_loop(state: StateManager) -> None:
 
             placed = 0
             for opp in opps[:BOND_MAX_MARKETS_PER_RUN]:
-                await _place_bond_order(bond_client, exit_mgr, opp, OrderArgs, OrderType)
+                await _place_bond_order(bond_client, exit_mgr, order_tracker, opp, OrderArgs, OrderType)
                 placed += 1
 
             state.update_bond_stats({
@@ -115,48 +119,98 @@ async def run_bonding_loop(state: StateManager) -> None:
     log.info("BOND mode stopped cleanly")
 
 
-async def _place_bond_order(client, exit_mgr, opp, OrderArgs, OrderType) -> None:
-    """Place a single FOK buy order for one bonding opportunity."""
+async def _place_bond_order(client, exit_mgr, order_tracker, opp, OrderArgs, OrderType) -> None:
+    """
+    Execute a bonding opportunity using a two-phase fill:
+
+    1. FOK for shares_immediate — buys what's available in the book right now.
+    2. GTC limit for shares_limit — queues a resting buy at limit_price for
+       the remainder. The PendingOrderTracker monitors these and cancels them
+       if the edge deteriorates.
+    """
     from datetime import datetime, timezone
     from bonding.exit_manager import BondPosition
+    from bonding.order_tracker import PendingOrder
     loop = asyncio.get_running_loop()
 
-    order_args = OrderArgs(
-        token_id=opp.market.token_id,
-        price=opp.market.best_ask,
-        size=opp.shares,
-        side="BUY",
-    )
-    try:
-        signed = await loop.run_in_executor(None, client.create_order, order_args)
-        await loop.run_in_executor(
-            None, lambda: client.post_order(signed, OrderType.FOK)
-        )
-        log.info(
-            f"BOND_ORDER_PLACED city={opp.market.city} date={opp.market.target_date} "
-            f"tier={opp.tier} shares={opp.shares} price={opp.market.best_ask:.4f} "
-            f"ev={opp.ev:.4f} edge={opp.edge:.4f}"
-        )
-        pos = BondPosition(
-            market_id=opp.market.market_id,
+    # ── Phase 1: immediate FOK fill ───────────────────────────────
+    if opp.shares_immediate > 0:
+        fok_args = OrderArgs(
             token_id=opp.market.token_id,
-            question=opp.market.question,
-            city=opp.market.city,
-            outcome="YES",
-            tier=opp.tier,
-            shares=opp.shares,
-            entry_price=opp.market.best_ask,
-            entry_time=datetime.now(timezone.utc).isoformat(),
-            resolution_time=opp.market.resolution_time.isoformat(),
-            status="OPEN",
+            price=opp.market.best_ask,
+            size=opp.shares_immediate,
+            side="BUY",
         )
-        await exit_mgr.add_position(pos)
+        try:
+            signed = await loop.run_in_executor(None, client.create_order, fok_args)
+            await loop.run_in_executor(
+                None, lambda: client.post_order(signed, OrderType.FOK)
+            )
+            log.info(
+                f"BOND_FOK_PLACED city={opp.market.city} date={opp.market.target_date} "
+                f"tier={opp.tier} shares={opp.shares_immediate} "
+                f"price={opp.market.best_ask:.4f} ev={opp.ev:.4f}"
+            )
+            pos = BondPosition(
+                market_id=opp.market.market_id,
+                token_id=opp.market.token_id,
+                question=opp.market.question,
+                city=opp.market.city,
+                outcome="YES",
+                tier=opp.tier,
+                shares=opp.shares_immediate,
+                entry_price=opp.market.best_ask,
+                entry_time=datetime.now(timezone.utc).isoformat(),
+                resolution_time=opp.market.resolution_time.isoformat(),
+                status="OPEN",
+            )
+            await exit_mgr.add_position(pos)
+        except Exception as exc:
+            log.warning(
+                f"BOND_FOK_FAILED city={opp.market.city} tier={opp.tier} "
+                f"market={opp.market.market_id[:8]} error={exc}"
+            )
 
-    except Exception as exc:
-        log.warning(
-            f"BOND_ORDER_FAILED city={opp.market.city} tier={opp.tier} "
-            f"market={opp.market.market_id[:8]} error={exc}"
+    # ── Phase 2: GTC limit for remainder ─────────────────────────
+    if opp.shares_limit > 0:
+        gtc_args = OrderArgs(
+            token_id=opp.market.token_id,
+            price=opp.limit_price,
+            size=opp.shares_limit,
+            side="BUY",
         )
+        try:
+            signed = await loop.run_in_executor(None, client.create_order, gtc_args)
+            result = await loop.run_in_executor(
+                None, lambda: client.post_order(signed, OrderType.GTC)
+            )
+            order_id = (result or {}).get("orderID") or (result or {}).get("order_id", "")
+            if order_id:
+                pending = PendingOrder(
+                    order_id=order_id,
+                    market_id=opp.market.market_id,
+                    token_id=opp.market.token_id,
+                    question=opp.market.question,
+                    city=opp.market.city,
+                    tier=opp.tier,
+                    shares=opp.shares_limit,
+                    limit_price=opp.limit_price,
+                    prob_at_placement=opp.prob,
+                    placed_at=datetime.now(timezone.utc).isoformat(),
+                    resolution_time=opp.market.resolution_time.isoformat(),
+                    status="PENDING",
+                )
+                await order_tracker.add_order(pending)
+            else:
+                log.warning(
+                    f"BOND_GTC_NO_ORDER_ID city={opp.market.city} "
+                    f"result={result}"
+                )
+        except Exception as exc:
+            log.warning(
+                f"BOND_GTC_FAILED city={opp.market.city} tier={opp.tier} "
+                f"market={opp.market.market_id[:8]} error={exc}"
+            )
 
 
 async def run_paper_loop(state: StateManager) -> None:

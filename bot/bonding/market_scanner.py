@@ -6,7 +6,7 @@ Read-only. Parses natural language market questions to extract structured data
 """
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Optional
 
@@ -43,6 +43,7 @@ class MarketCandidate:
     unit: str                  # "C" or "F"
     best_ask: float            # current best ask for YES outcome
     resolution_time: datetime
+    ask_book: list = field(default_factory=list)  # [(price, size), ...] ascending; empty = depth unknown
 
 
 async def scan_weather_markets() -> list[MarketCandidate]:
@@ -84,11 +85,17 @@ async def scan_weather_markets() -> list[MarketCandidate]:
             fail_token += 1
             continue
 
-        # Use Gamma-embedded price if available; fall back to CLOB orderbook
+        # Use Gamma-embedded price if available; fall back to CLOB orderbook.
+        # When using Gamma price we have no depth info — ask_book stays empty.
         if gamma_price is not None and 0.0 < gamma_price < 1.0:
             best_ask = gamma_price
+            ask_book: list = []
         else:
-            best_ask = await _get_best_ask(token_id)
+            ask_book = await _get_ask_book(token_id)
+            if not ask_book:
+                fail_ask += 1
+                continue
+            best_ask = ask_book[0][0]
 
         if best_ask <= 0.0 or best_ask >= 1.0:
             fail_ask += 1
@@ -111,6 +118,7 @@ async def scan_weather_markets() -> list[MarketCandidate]:
             unit=parsed.get("unit", "C"),
             best_ask=best_ask,
             resolution_time=resolution_time,
+            ask_book=ask_book,
         ))
 
     log.info(
@@ -415,10 +423,11 @@ def _extract_yes_token_and_price(market: dict) -> tuple[Optional[str], Optional[
     return token_id, price
 
 
-async def _get_best_ask(token_id: str) -> float:
+async def _get_ask_book(token_id: str) -> list[tuple[float, float]]:
     """
-    Fetch current best ask for the YES token from CLOB order book.
-    Returns 0.0 on failure (scorer will reject it).
+    Fetch the full ask side of the CLOB order book for a token.
+    Returns a list of (price, size) tuples sorted ascending by price.
+    Returns [] on failure or empty book.
     """
     timeout = aiohttp.ClientTimeout(total=5)
     try:
@@ -429,11 +438,19 @@ async def _get_best_ask(token_id: str) -> float:
                 resp.raise_for_status()
                 data = await resp.json()
                 asks = data.get("asks", [])
-                if asks:
-                    return float(asks[0]["price"])
+                if not asks:
+                    return []
+                book: list[tuple[float, float]] = []
+                for a in asks:
+                    try:
+                        book.append((float(a["price"]), float(a.get("size", 0))))
+                    except (KeyError, ValueError):
+                        continue
+                book.sort(key=lambda x: x[0])
+                return book
     except Exception as exc:
         log.debug(f"scanner: orderbook fetch failed for {token_id[:12]}...: {exc}")
-    return 0.0
+    return []
 
 
 def _parse_resolution_time(market: dict) -> Optional[datetime]:
