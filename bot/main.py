@@ -26,7 +26,7 @@ _log_handlers = [
     logging.StreamHandler(sys.stdout),
     logging.FileHandler(LOG_FILE),
 ]
-if BOT_MODE == "BOND":
+if BOT_MODE in ("BOND", "PAPER"):
     os.makedirs(os.path.dirname(BOND_LOG_FILE), exist_ok=True)
     _log_handlers.append(logging.FileHandler(BOND_LOG_FILE))
 
@@ -159,6 +159,38 @@ async def _place_bond_order(client, exit_mgr, opp, OrderArgs, OrderType) -> None
         )
 
 
+async def run_paper_loop(state: StateManager) -> None:
+    """PAPER mode — runs paper_sim scan cycles, controlled via dashboard Start/Stop."""
+    from bonding.paper_sim import run_cycle
+    from config import BOND_POLL_INTERVAL_SECS
+
+    state.set_running(True)
+    log.info(f"PolyBot PAPER mode starting — poll_interval={BOND_POLL_INTERVAL_SECS}s")
+
+    cycle = 0
+    while state.is_running():
+        cycle += 1
+        cycle_start = time.time()
+        try:
+            found = await run_cycle()
+            state.update_bond_stats({
+                "cycle":              cycle,
+                "last_cycle_at":      time.time(),
+                "cycle_duration_s":   round(time.time() - cycle_start, 1),
+                "markets_scanned":    found,
+                "opportunities_found": found,
+                "orders_placed":      0,  # paper mode — no real orders
+            })
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            log.error(f"Paper sim loop error: {exc}", exc_info=True)
+        await asyncio.sleep(BOND_POLL_INTERVAL_SECS)
+
+    state.set_running(False)
+    log.info("PAPER mode stopped cleanly")
+
+
 async def run_bot(state: StateManager):
     """Main bot loop."""
     trader   = Trader(state)
@@ -228,8 +260,14 @@ async def main():
         loop.add_signal_handler(sig, handle_stop)
 
     # Select loop based on BOT_MODE
-    _bot_runner = run_bonding_loop if BOT_MODE == "BOND" else run_bot
-    log.info(f"BOT_MODE={BOT_MODE} — using {'bonding' if BOT_MODE == 'BOND' else 'arbitrage'} loop")
+    if BOT_MODE == "BOND":
+        _bot_runner = run_bonding_loop
+    elif BOT_MODE == "PAPER":
+        _bot_runner = run_paper_loop
+    else:
+        _bot_runner = run_bot
+    _mode_name = {"BOND": "bonding", "PAPER": "paper sim"}.get(BOT_MODE, "arbitrage")
+    log.info(f"BOT_MODE={BOT_MODE} — using {_mode_name} loop")
 
     # Start bot if AUTO_START env var is set
     if os.getenv("AUTO_START", "false").lower() == "true":

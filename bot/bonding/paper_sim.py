@@ -23,7 +23,8 @@ from pathlib import Path
 from bonding.market_scanner import scan_weather_markets
 from bonding.opportunity_scorer import score_all
 from bonding.weather_client import get_all_forecasts
-from config import BOND_MAX_MARKETS_PER_RUN, BOND_POLL_INTERVAL_SECS, LOG_LEVEL
+import config as _config
+from config import LOG_LEVEL
 
 # ── Logging ───────────────────────────────────────────────────────
 logging.basicConfig(
@@ -52,7 +53,7 @@ async def run_cycle() -> int:
     city_date_pairs = list({(m.city, m.target_date) for m in markets})
     forecasts = await get_all_forecasts(city_date_pairs)
 
-    opps = score_all(markets, forecasts)[:BOND_MAX_MARKETS_PER_RUN]
+    opps = score_all(markets, forecasts)[:_config.BOND_MAX_MARKETS_PER_RUN]
 
     ts = datetime.now(timezone.utc).isoformat()
     for opp in opps:
@@ -87,7 +88,7 @@ async def run_cycle() -> int:
 
 async def run() -> None:
     log.info(f"Paper simulation started — logging to {PAPER_LOG}")
-    log.info(f"Poll interval: {BOND_POLL_INTERVAL_SECS}s | Max per cycle: {BOND_MAX_MARKETS_PER_RUN}")
+    log.info(f"Poll interval: {_config.BOND_POLL_INTERVAL_SECS}s | Max per cycle: {_config.BOND_MAX_MARKETS_PER_RUN}")
     cycle = 0
     while True:
         cycle += 1
@@ -96,7 +97,7 @@ async def run() -> None:
             await run_cycle()
         except Exception as exc:
             log.error(f"paper_sim: cycle {cycle} failed: {exc}", exc_info=True)
-        await asyncio.sleep(BOND_POLL_INTERVAL_SECS)
+        await asyncio.sleep(_config.BOND_POLL_INTERVAL_SECS)
 
 
 def analyse(log_path: str = str(PAPER_LOG)) -> None:
