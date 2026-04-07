@@ -12,7 +12,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import aiohttp
@@ -75,14 +75,24 @@ async def get_all_forecasts(
     De-dupes identical requests. Returns dict keyed by (canonical_city, date).
     Unknown cities are logged and skipped (not raised).
     """
+    # Open-Meteo free tier only supports forecasts up to 16 days ahead
+    max_forecast_date = date.today() + timedelta(days=16)
+
     # Resolve and de-dupe
     resolved: dict[tuple[str, date], tuple[str, float, float]] = {}
+    skipped_future = 0
     for city, d in city_date_pairs:
+        if d > max_forecast_date:
+            skipped_future += 1
+            continue
         try:
             canonical, lat, lon = _resolve_city(city)
             resolved[(canonical, d)] = (canonical, lat, lon)
         except UnknownCityError:
             log.warning(f"weather: skipping unknown city '{city}'")
+
+    if skipped_future:
+        log.info(f"weather: skipped {skipped_future} pairs with dates beyond 16-day forecast window")
 
     log.info(f"BOND_WEATHER_FETCH unique_pairs={len(resolved)} (concurrency={_OPEN_METEO_CONCURRENCY})")
 
@@ -244,10 +254,7 @@ async def _fetch_open_meteo(lat: float, lon: float, target_date: date) -> dict:
                     continue
                 raise
         else:
-            raise aiohttp.ClientResponseError(
-                request_info=None, history=(), status=429,
-                message="Open-Meteo rate limit: max retries exceeded",
-            )
+            raise RuntimeError("Open-Meteo rate limit: max retries exceeded (429)")
 
     async with _cache_lock:
         _cache[cache_key] = (time.monotonic(), data)
