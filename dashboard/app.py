@@ -46,11 +46,17 @@ def _load_paper_trades(n: int = 10000) -> list[dict]:
 
 def _extract_yes_outcome(market_data: dict) -> str | None:
     """
-    Return "YES" or "NO" if the market has fully resolved, None if still open.
-    Checks tokens[].winner first (most reliable), then falls back to a top-level
-    resolution string.
+    Return "YES" or "NO" if the market has effectively resolved, None if still open.
+
+    NegRisk weather markets (the majority here) never set resolved=True or
+    tokens[].winner. Instead outcomePrices snaps to ~1.0/~0.0 once the result
+    is known. We detect that: find the outcome whose price >= 0.99 and return
+    whether it is the "Yes" outcome.
+
+    Both 'outcomes' and 'outcomePrices' are JSON-encoded strings in the Gamma
+    API response, not native lists.
     """
-    # Primary: tokens list with winner flag
+    # Shape 1: tokens list with explicit winner flag (non-NegRisk markets)
     tokens = market_data.get("tokens", [])
     for tok in tokens:
         if str(tok.get("outcome", "")).lower() in ("yes", "1"):
@@ -59,12 +65,25 @@ def _extract_yes_outcome(market_data: dict) -> str | None:
                 return "YES"
             if winner is False:
                 return "NO"
-    # Fallback: top-level resolution field
+
+    # Shape 2: top-level resolution string
     resolution = str(market_data.get("resolution", "")).upper()
-    if resolution == "YES":
-        return "YES"
-    if resolution == "NO":
-        return "NO"
+    if resolution in ("YES", "NO"):
+        return resolution
+
+    # Shape 3: outcomePrices snapped to ~1.0 (NegRisk / weather markets)
+    # Both fields arrive as JSON-encoded strings, e.g. '["Yes","No"]'
+    try:
+        raw_outcomes = market_data.get("outcomes", "[]")
+        raw_prices   = market_data.get("outcomePrices", "[]")
+        outcomes = json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
+        prices   = json.loads(raw_prices)   if isinstance(raw_prices,   str) else raw_prices
+        for outcome, price in zip(outcomes, prices):
+            if float(price) >= 0.99:
+                return "YES" if str(outcome).lower() in ("yes", "1") else "NO"
+    except Exception:
+        pass
+
     return None
 
 

@@ -282,8 +282,12 @@ class ExitManager:
     def _yes_resolution_price(self, market_data: dict) -> float:
         """
         Return the actual payout price for the YES token (1.0 = win, 0.0 = loss).
-        Falls back to 0.0 if the winner cannot be determined.
+
+        NegRisk weather markets never set tokens[].winner or resolved=True.
+        Instead outcomePrices snaps to ~1.0/~0.0 once the result is known.
+        Both 'outcomes' and 'outcomePrices' arrive as JSON-encoded strings.
         """
+        # Shape 1: tokens list with explicit winner flag
         tokens = market_data.get("tokens", [])
         for tok in tokens:
             if str(tok.get("outcome", "")).lower() in ("yes", "1"):
@@ -292,11 +296,25 @@ class ExitManager:
                     return 1.0
                 if winner is False:
                     return 0.0
-        # Fallback: check top-level resolution field some markets use
+
+        # Shape 2: top-level resolution string
         resolution = str(market_data.get("resolution", "")).upper()
         if resolution == "YES":
             return 1.0
         if resolution == "NO":
             return 0.0
+
+        # Shape 3: outcomePrices snapped to ~1.0 (NegRisk / weather markets)
+        try:
+            raw_outcomes = market_data.get("outcomes", "[]")
+            raw_prices   = market_data.get("outcomePrices", "[]")
+            outcomes = json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
+            prices   = json.loads(raw_prices)   if isinstance(raw_prices,   str) else raw_prices
+            for outcome, price in zip(outcomes, prices):
+                if float(price) >= 0.99:
+                    return 1.0 if str(outcome).lower() in ("yes", "1") else 0.0
+        except Exception:
+            pass
+
         log.debug("exit_mgr: could not determine YES winner from market data, defaulting to 0.0")
         return 0.0
