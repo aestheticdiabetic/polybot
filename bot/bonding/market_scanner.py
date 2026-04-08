@@ -60,15 +60,24 @@ async def scan_weather_markets() -> list[MarketCandidate]:
     log.info(f"BOND_GAMMA_FETCH total_raw={len(raw_markets)}")
 
     candidates: list[MarketCandidate] = []
-    fail_parse  = 0
-    fail_city   = 0
-    fail_token  = 0
-    fail_ask    = 0
-    fail_time   = 0
+    fail_parse    = 0
+    fail_city     = 0
+    fail_token    = 0
+    fail_ask      = 0
+    fail_time     = 0
+    skip_prefilter = 0
     unknown_cities: dict[str, int] = {}
 
     for m in raw_markets:
         question = m.get("question", "")
+
+        # Fast pre-filter: Gamma's tag_slug filter is unreliable and returns
+        # non-weather markets. Skip anything that can't possibly be a temperature
+        # market before running the expensive regex parser.
+        if "°" not in question and "temperature" not in question.lower():
+            skip_prefilter += 1
+            continue
+
         parsed = parse_market_question(question)
         if parsed is None:
             fail_parse += 1
@@ -150,7 +159,7 @@ async def scan_weather_markets() -> list[MarketCandidate]:
         ))
 
     log.info(
-        f"BOND_SCAN_COMPLETE total={len(raw_markets)} "
+        f"BOND_SCAN_COMPLETE total={len(raw_markets)} skip_prefilter={skip_prefilter} "
         f"fail_parse={fail_parse} fail_city={fail_city} "
         f"fail_token={fail_token} fail_ask={fail_ask} fail_time={fail_time} "
         f"qualifying={len(candidates)}"
