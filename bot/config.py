@@ -162,6 +162,7 @@ BOND_EARLY_EXIT_PRICE     = 0.97  # sell core when price hits this
 BOND_WING_EXIT_MULTIPLIER = 5.0   # sell wing if price >= cost × this
 BOND_WING_MIN_ABS_GAIN    = 1.00  # AND absolute gain >= this value (USD)
 BOND_GAS_FLOOR_HOURS      = 4     # don't exit within N hours of resolution
+BOND_MIN_ENTRY_HOURS      = 6     # don't enter new positions within N hours of resolution
 
 # Scanner settings
 BOND_POLL_INTERVAL_SECS  = 60    # seconds between REST market discovery scans (WS handles real-time pricing)

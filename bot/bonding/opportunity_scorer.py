@@ -6,6 +6,7 @@ position tier (CORE / SECONDARY / WING), and enforces per-cluster capital caps.
 """
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional
 
 import config as _config
@@ -90,6 +91,18 @@ def score_market(
     Score YES and NO sides of a market. Returns the higher-EV side, or None if
     neither meets tier criteria. Never returns both sides (prevents same-market hedging).
     """
+    # Skip markets resolving too soon — our weather model can lag real-world
+    # observations by enough to give false 100% confidence near expiry.
+    hours_to_resolution = (
+        market.resolution_time - datetime.now(timezone.utc)
+    ).total_seconds() / 3600
+    if hours_to_resolution < _config.BOND_MIN_ENTRY_HOURS:
+        log.info(
+            f"scorer: {market.city} {market.target_date} — "
+            f"{hours_to_resolution:.1f}/{_config.BOND_MIN_ENTRY_HOURS}h before resolution: skipping"
+        )
+        return None
+
     temp_min, temp_max = _convert_temps(market)
     if temp_min is None or temp_max is None:
         return None

@@ -54,7 +54,7 @@ def load_overrides() -> None:
             "BOND_EARLY_EXIT_PRICE", "BOND_WING_EXIT_MULTIPLIER", "BOND_WING_MIN_ABS_GAIN",
         }
         _bond_int = {
-            "BOND_GAS_FLOOR_HOURS", "BOND_SHARES_CORE", "BOND_SHARES_SECONDARY",
+            "BOND_GAS_FLOOR_HOURS", "BOND_MIN_ENTRY_HOURS", "BOND_SHARES_CORE", "BOND_SHARES_SECONDARY",
             "BOND_SHARES_WING", "BOND_POLL_INTERVAL_SECS", "BOND_MAX_MARKETS_PER_RUN",
         }
         for key in _bond_float:

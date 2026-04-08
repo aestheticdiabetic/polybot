@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime, timezone
 
 import websockets
 
@@ -235,14 +236,31 @@ class BondPriceFeed:
         if forecast is None:
             return
 
-        opp = score_market(market, forecast)
-        # Only fire if the scored side matches the token that triggered this event.
-        # Prevents a YES price tick from firing a NO order (or vice versa).
-        if opp is not None and opp.token_id == asset_id:
-            self.mark_cooldown(asset_id)
-            self.stats["opportunities_fired"] += 1
+        # If the market is within the entry time gate, suppress until after resolution.
+        import config as _config
+        hours_to_resolution = (
+            market.resolution_time - datetime.now(timezone.utc)
+        ).total_seconds() / 3600
+        if hours_to_resolution < _config.BOND_MIN_ENTRY_HOURS:
+            suppress_secs = max(hours_to_resolution * 3600 + 300, 300)
+            self._cooldowns[asset_id] = time.time() - COOLDOWN_SECS + suppress_secs
             log.info(
-                f"feed: WS opportunity city={market.city} date={market.target_date} "
-                f"outcome={opp.outcome} ask={updated_ask:.4f} ev={opp.ev:.4f} tier={opp.tier}"
+                f"feed: {market.city} {market.target_date} — "
+                f"{hours_to_resolution:.1f}/{_config.BOND_MIN_ENTRY_HOURS}h before resolution: "
+                f"skipping (suppressed {suppress_secs/3600:.1f}h)"
             )
-            await self._on_opportunity(opp)
+            return
+
+        opp = score_market(market, forecast)
+        # Always cooldown after scoring — prevents re-evaluating the same token on every tick.
+        self.mark_cooldown(asset_id)
+        # Only fire if scored side matches the token that triggered this event.
+        # Prevents a YES price tick from firing a NO order (or vice versa).
+        if opp is None or opp.token_id != asset_id:
+            return
+        self.stats["opportunities_fired"] += 1
+        log.info(
+            f"feed: WS opportunity city={market.city} date={market.target_date} "
+            f"outcome={opp.outcome} ask={updated_ask:.4f} ev={opp.ev:.4f} tier={opp.tier}"
+        )
+        await self._on_opportunity(opp)
