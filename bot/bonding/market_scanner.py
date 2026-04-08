@@ -390,6 +390,26 @@ def _extract_temp_bucket(question: str) -> tuple[str, Optional[float], Optional[
         lower = -30.0 if unit == "C" else -20.0
         return unit, lower, val
 
+    # "X°C or higher" / "be X°C or higher" — must come before exact match
+    m = re.search(
+        r"(?:be\s+)?(\d+(?:\.\d+)?)\s*°?\s*([CF])\s+or\s+(?:higher|above|more)\b",
+        question, re.IGNORECASE,
+    )
+    if m:
+        val, unit = float(m.group(1)), m.group(2).upper()
+        upper = 45.0 if unit == "C" else 120.0
+        return unit, val, upper
+
+    # "X°C or below" / "be X°C or below" — must come before exact match
+    m = re.search(
+        r"(?:be\s+)?(\d+(?:\.\d+)?)\s*°?\s*([CF])\s+or\s+(?:below|lower|less)\b",
+        question, re.IGNORECASE,
+    )
+    if m:
+        val, unit = float(m.group(1)), m.group(2).upper()
+        lower = -30.0 if unit == "C" else -20.0
+        return unit, lower, val
+
     # Exact: "be 22°C" / "22°C"
     m = re.search(r"(?:be\s+)?(\d+(?:\.\d+)?)\s*°?\s*([CF])\b", question, re.IGNORECASE)
     if m:
