@@ -1244,9 +1244,14 @@ async function checkPaperResolutions() {
   try {
     const r = await apiFetch('/api/bond/paper-check', {method:'POST'});
     if (r.ok) {
-      status.textContent = `Checked ${r.checked} pending — ${r.resolved} newly resolved`;
-      status.style.color = r.resolved > 0 ? 'var(--green)' : 'var(--muted)';
-      if (r.resolved > 0) await refreshPaperSim();
+      const totalResolved = (r.paper_resolved || 0) + (r.live_resolved || 0);
+      const parts = [];
+      if (r.paper_resolved > 0) parts.push(`${r.paper_resolved} paper`);
+      if (r.live_resolved  > 0) parts.push(`${r.live_resolved} live`);
+      const resolvedStr = parts.length ? parts.join(', ') : '0';
+      status.textContent = `Checked ${r.checked} pending — ${resolvedStr} newly resolved`;
+      status.style.color = totalResolved > 0 ? 'var(--green)' : 'var(--muted)';
+      if (totalResolved > 0) await refreshPaperSim();
     } else {
       status.textContent = `Error: ${r.error || 'unknown'}`;
       status.style.color = 'var(--red)';
