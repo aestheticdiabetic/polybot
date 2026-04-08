@@ -471,6 +471,7 @@ async def create_app(state):
     @_auth_required
     async def api_bond_paper_stats(request):
         """Aggregated paper sim stats with P&L projection for a given starting balance."""
+        from datetime import datetime as _dt, timezone as _tz
         starting_balance = float(request.rel_url.query.get("balance", 1000))
         records = _load_paper_trades()
 
@@ -480,12 +481,32 @@ async def create_app(state):
                 "total_capital": 0, "total_projected_profit": 0,
                 "scaled_projected_profit": 0, "starting_balance": starting_balance,
                 "scale_factor": 0, "actual_pnl": 0, "resolved_count": 0,
+                "entry_time_stats": {}, "side_stats": {},
             })
 
+        def _is_win(r: dict) -> bool:
+            """A bet wins if the market resolved in the direction we bet,
+            or if we sold early with a profit."""
+            outcome = r.get("outcome")
+            if outcome == "SOLD":
+                return (r.get("pnl") or 0) > 0
+            return outcome is not None and outcome == r.get("side")
+
+        def _is_resolved(r: dict) -> bool:
+            return r.get("outcome") is not None
+
+        def _hours_before_resolution(r: dict) -> float | None:
+            try:
+                entry = _dt.fromisoformat(r["ts"].replace("Z", "+00:00"))
+                res   = _dt.fromisoformat(r["resolution_time"].replace("Z", "+00:00"))
+                return max(0.0, (res - entry).total_seconds() / 3600)
+            except Exception:
+                return None
+
         # Approximate cycle count by distinct timestamp values
-        # (all records in one run_cycle() share the same ts)
         cycles = len(set(r.get("ts", "") for r in records))
 
+        # ── Tier stats ────────────────────────────────────────────────
         tier_stats: dict = {}
         for tier in ("CORE", "SECONDARY", "WING"):
             tr_list = [r for r in records if r.get("tier") == tier]
@@ -493,13 +514,14 @@ async def create_app(state):
                 tier_stats[tier] = {
                     "count": 0, "capital": 0, "avg_ask": None,
                     "avg_prob": None, "avg_ev": None, "projected_profit": 0,
-                    "resolved": 0, "wins": 0, "win_rate": None,
+                    "resolved": 0, "wins": 0, "win_rate": None, "actual_pnl": 0,
                 }
                 continue
             total_cap   = sum(r.get("capital", 0) for r in tr_list)
             proj_profit = sum(r.get("ev", 0) * r.get("shares", 0) for r in tr_list)
-            resolved    = [r for r in tr_list if r.get("outcome") is not None]
-            wins        = [r for r in resolved if r.get("outcome") == "YES"]
+            resolved    = [r for r in tr_list if _is_resolved(r)]
+            wins        = [r for r in resolved if _is_win(r)]
+            tier_actual = sum(r.get("pnl", 0) for r in tr_list if r.get("pnl") is not None)
             tier_stats[tier] = {
                 "count":            len(tr_list),
                 "capital":          round(total_cap, 4),
@@ -510,13 +532,53 @@ async def create_app(state):
                 "resolved":         len(resolved),
                 "wins":             len(wins),
                 "win_rate":         round(len(wins) / len(resolved) * 100, 1) if resolved else None,
+                "actual_pnl":       round(tier_actual, 4),
             }
 
-        total_capital         = sum(r.get("capital", 0) for r in records)
+        # ── Entry time stats (bucketed by hours before resolution) ─────
+        _BUCKETS = [
+            ("0-10h",  0,   10),
+            ("10-20h", 10,  20),
+            ("20-30h", 20,  30),
+            ("30-48h", 30,  48),
+            ("48h+",   48,  float("inf")),
+        ]
+        entry_time_stats: dict = {}
+        for label, lo, hi in _BUCKETS:
+            bucket = []
+            for r in records:
+                h = _hours_before_resolution(r)
+                if h is not None and lo <= h < hi:
+                    bucket.append(r)
+            resolved_b = [r for r in bucket if _is_resolved(r)]
+            wins_b     = [r for r in resolved_b if _is_win(r)]
+            entry_time_stats[label] = {
+                "count":      len(bucket),
+                "resolved":   len(resolved_b),
+                "wins":       len(wins_b),
+                "win_rate":   round(len(wins_b) / len(resolved_b) * 100, 1) if resolved_b else None,
+                "actual_pnl": round(sum(r.get("pnl", 0) for r in bucket if r.get("pnl") is not None), 4),
+            }
+
+        # ── YES vs NO side stats ──────────────────────────────────────
+        side_stats: dict = {}
+        for side_val in ("YES", "NO"):
+            side_list = [r for r in records if r.get("side") == side_val]
+            resolved_s = [r for r in side_list if _is_resolved(r)]
+            wins_s     = [r for r in resolved_s if _is_win(r)]
+            side_stats[side_val] = {
+                "count":      len(side_list),
+                "resolved":   len(resolved_s),
+                "wins":       len(wins_s),
+                "win_rate":   round(len(wins_s) / len(resolved_s) * 100, 1) if resolved_s else None,
+                "actual_pnl": round(sum(r.get("pnl", 0) for r in side_list if r.get("pnl") is not None), 4),
+            }
+
+        total_capital          = sum(r.get("capital", 0) for r in records)
         total_projected_profit = sum(r.get("ev", 0) * r.get("shares", 0) for r in records)
-        scale                 = min(1.0, starting_balance / total_capital) if total_capital > 0 else 0
-        resolved_records      = [r for r in records if r.get("pnl") is not None]
-        actual_pnl            = sum(r.get("pnl", 0) for r in resolved_records)
+        scale                  = min(1.0, starting_balance / total_capital) if total_capital > 0 else 0
+        resolved_records       = [r for r in records if r.get("pnl") is not None]
+        actual_pnl             = sum(r.get("pnl", 0) for r in resolved_records)
 
         return web.json_response({
             "total":                    len(records),
@@ -529,6 +591,8 @@ async def create_app(state):
             "actual_pnl":               round(actual_pnl, 4),
             "resolved_count":           len(resolved_records),
             "tier_stats":               tier_stats,
+            "entry_time_stats":         entry_time_stats,
+            "side_stats":               side_stats,
         })
 
     @_auth_required
@@ -598,10 +662,12 @@ async def create_app(state):
             if mid in outcome_map and r.get("outcome") is None:
                 r = dict(r)
                 r["outcome"] = outcome_map[mid]
-                shares = r.get("shares", 0)
-                ask    = r.get("ask", 0)
+                shares   = r.get("shares", 0)
+                ask      = r.get("ask", 0)
+                side     = r.get("side", "YES")
+                market_won = outcome_map[mid] == side  # did the market resolve in our direction?
                 r["pnl"] = round(
-                    (1.0 - ask) * shares if outcome_map[mid] == "YES" else -ask * shares, 4
+                    (1.0 - ask) * shares if market_won else -ask * shares, 4
                 )
                 paper_resolved += 1
             updated_paper.append(r)

@@ -560,7 +560,7 @@
   <!-- Tier breakdown -->
   <div class="section">
     <div class="section-title">Tier Analysis</div>
-    <div style="display:grid;grid-template-columns:80px 60px 80px 70px 70px 70px 80px 80px 80px;gap:8px;padding:0 0 8px;border-bottom:1px solid var(--border);">
+    <div style="display:grid;grid-template-columns:80px 60px 80px 70px 70px 70px 80px 80px 80px 80px;gap:8px;padding:0 0 8px;border-bottom:1px solid var(--border);">
       <span class="tier-header">TIER</span>
       <span class="tier-header">COUNT</span>
       <span class="tier-header">CAPITAL</span>
@@ -568,10 +568,39 @@
       <span class="tier-header">AVG PROB</span>
       <span class="tier-header">AVG EV</span>
       <span class="tier-header">PROJ PROFIT</span>
+      <span class="tier-header">ACTUAL PnL</span>
       <span class="tier-header">RESOLVED</span>
       <span class="tier-header">WIN RATE</span>
     </div>
     <div id="paper-tier-rows"></div>
+  </div>
+
+  <!-- Entry time statistics -->
+  <div class="section">
+    <div class="section-title">Entry Time Statistics</div>
+    <div style="display:grid;grid-template-columns:80px 60px 70px 60px 80px 80px;gap:8px;padding:0 0 8px;border-bottom:1px solid var(--border);">
+      <span class="tier-header">ENTRY</span>
+      <span class="tier-header">BETS</span>
+      <span class="tier-header">RESOLVED</span>
+      <span class="tier-header">WINS</span>
+      <span class="tier-header">WIN RATE</span>
+      <span class="tier-header">ACTUAL PnL</span>
+    </div>
+    <div id="entry-time-rows"></div>
+  </div>
+
+  <!-- YES vs NO statistics -->
+  <div class="section">
+    <div class="section-title">YES vs NO Bets</div>
+    <div style="display:grid;grid-template-columns:60px 60px 70px 60px 80px 80px;gap:8px;padding:0 0 8px;border-bottom:1px solid var(--border);">
+      <span class="tier-header">SIDE</span>
+      <span class="tier-header">BETS</span>
+      <span class="tier-header">RESOLVED</span>
+      <span class="tier-header">WINS</span>
+      <span class="tier-header">WIN RATE</span>
+      <span class="tier-header">ACTUAL PnL</span>
+    </div>
+    <div id="side-stat-rows"></div>
   </div>
 
   <!-- Recent opportunities table -->
@@ -1304,12 +1333,13 @@ function updatePaperStats(s) {
   // Tier rows
   const rows = document.getElementById('paper-tier-rows'); rows.innerHTML = '';
   for (const [tier, cls] of [['CORE','blue'],['SECONDARY','amber'],['WING','purple']]) {
-    const t = ts[tier] || {count:0,capital:0,avg_ask:null,avg_prob:null,avg_ev:null,projected_profit:0,resolved:0,wins:0,win_rate:null};
+    const t = ts[tier] || {count:0,capital:0,avg_ask:null,avg_prob:null,avg_ev:null,projected_profit:0,actual_pnl:0,resolved:0,wins:0,win_rate:null};
     const div = document.createElement('div');
-    div.style.cssText = 'display:grid;grid-template-columns:80px 60px 80px 70px 70px 70px 80px 80px 80px;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:12px;';
+    div.style.cssText = 'display:grid;grid-template-columns:80px 60px 80px 70px 70px 70px 80px 80px 80px 80px;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:12px;';
     const wr    = t.win_rate != null ? t.win_rate + '%' : '—';
     const wrCls = t.win_rate != null ? (t.win_rate >= 70 ? 'green' : t.win_rate >= 50 ? 'amber' : 'red') : '';
     const pp    = parseFloat(t.projected_profit || 0);
+    const ap    = parseFloat(t.actual_pnl || 0);
     div.innerHTML = `<span><span class="pill pill-${tier.toLowerCase()}">${tier}</span></span>
       <span>${t.count || 0}</span>
       <span class="amber">$${parseFloat(t.capital||0).toFixed(2)}</span>
@@ -1317,9 +1347,48 @@ function updatePaperStats(s) {
       <span>${t.avg_prob != null ? (t.avg_prob*100).toFixed(1)+'%' : '—'}</span>
       <span class="${(t.avg_ev||0)>0?'green':''}">${t.avg_ev != null ? t.avg_ev.toFixed(4) : '—'}</span>
       <span class="${pp>=0?'green':'red'}">${pp>=0?'+':''}$${pp.toFixed(4)}</span>
+      <span class="${ap>0?'green':ap<0?'red':''}">${ap>=0?'+':''}$${ap.toFixed(4)}</span>
       <span style="color:var(--muted)">${t.resolved || 0}</span>
       <span class="${wrCls}">${wr}${t.resolved?` (${t.wins||0}/${t.resolved})`:''}</span>`;
     rows.appendChild(div);
+  }
+
+  // Entry time rows
+  const etRows = document.getElementById('entry-time-rows'); etRows.innerHTML = '';
+  const et = s.entry_time_stats || {};
+  for (const label of ['0-10h','10-20h','20-30h','30-48h','48h+']) {
+    const b = et[label] || {count:0,resolved:0,wins:0,win_rate:null,actual_pnl:0};
+    const div = document.createElement('div');
+    div.style.cssText = 'display:grid;grid-template-columns:80px 60px 70px 60px 80px 80px;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:12px;';
+    const wr    = b.win_rate != null ? b.win_rate + '%' : '—';
+    const wrCls = b.win_rate != null ? (b.win_rate >= 70 ? 'green' : b.win_rate >= 50 ? 'amber' : 'red') : '';
+    const ap    = parseFloat(b.actual_pnl || 0);
+    div.innerHTML = `<span style="color:var(--text)">${label}</span>
+      <span>${b.count}</span>
+      <span style="color:var(--muted)">${b.resolved}</span>
+      <span>${b.wins}</span>
+      <span class="${wrCls}">${wr}${b.resolved ? ` (${b.wins}/${b.resolved})` : ''}</span>
+      <span class="${ap>0?'green':ap<0?'red':''}">${ap>=0?'+':''}$${ap.toFixed(4)}</span>`;
+    etRows.appendChild(div);
+  }
+
+  // YES vs NO rows
+  const sideRows = document.getElementById('side-stat-rows'); sideRows.innerHTML = '';
+  const ss = s.side_stats || {};
+  for (const [sideVal, pillCls] of [['YES','green'],['NO','red']]) {
+    const b = ss[sideVal] || {count:0,resolved:0,wins:0,win_rate:null,actual_pnl:0};
+    const div = document.createElement('div');
+    div.style.cssText = 'display:grid;grid-template-columns:60px 60px 70px 60px 80px 80px;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:12px;';
+    const wr    = b.win_rate != null ? b.win_rate + '%' : '—';
+    const wrCls = b.win_rate != null ? (b.win_rate >= 70 ? 'green' : b.win_rate >= 50 ? 'amber' : 'red') : '';
+    const ap    = parseFloat(b.actual_pnl || 0);
+    div.innerHTML = `<span class="${pillCls}" style="font-weight:600">${sideVal}</span>
+      <span>${b.count}</span>
+      <span style="color:var(--muted)">${b.resolved}</span>
+      <span>${b.wins}</span>
+      <span class="${wrCls}">${wr}${b.resolved ? ` (${b.wins}/${b.resolved})` : ''}</span>
+      <span class="${ap>0?'green':ap<0?'red':''}">${ap>=0?'+':''}$${ap.toFixed(4)}</span>`;
+    sideRows.appendChild(div);
   }
 }
 
