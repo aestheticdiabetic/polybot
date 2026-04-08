@@ -389,6 +389,30 @@ docker compose up -d
 - Rotate Polymarket API keys periodically
 - Monitor USDC balance — set `max_wallet_exposure_pct` conservatively
 
+### Revoking the Claude SSH Key
+
+The `claude_vps` key grants Claude Code direct SSH access to the VPS. To revoke it:
+
+```bash
+# On the VPS, remove the key from authorized_keys
+ssh angus@204.168.169.190
+nano ~/.ssh/authorized_keys
+# Delete the line containing "claude_vps" and save
+```
+
+Or as a one-liner from your local machine:
+
+```bash
+ssh angus@204.168.169.190 "sed -i '/claude_vps/d' ~/.ssh/authorized_keys"
+```
+
+Optionally delete the local key files too:
+
+```bash
+del C:\Users\Angus\.ssh\claude_vps
+del C:\Users\Angus\.ssh\claude_vps.pub
+```
+
 ---
 
 ## Disclaimer

@@ -45,8 +45,9 @@ ENSEMBLE_MODEL           = "gfs_seamless"  # 30 members, global coverage, free t
 NEARTERM_THRESHOLD_DAYS = 2
 
 # ── Cache TTLs ────────────────────────────────────────────────────────────────
-DISK_CACHE_TTL_SECS      = 7200   # 2 hours — ensemble data
-NEARTERM_CACHE_TTL_SECS  = 3600   # 1 hour  — near-term hourly data
+DISK_CACHE_TTL_SECS               = 7200   # 2 hours — ensemble data
+NEARTERM_CACHE_TTL_SECS           = 3600   # 1 hour  — near-term hourly data (tomorrow)
+NEARTERM_CACHE_TTL_SAME_DAY_SECS  = 900    # 15 min  — same-day (market underway; stale = false signals)
 
 DISK_CACHE_PATH          = os.environ.get("WEATHER_CACHE_PATH",  "/app/data/ensemble_cache.json")
 NEARTERM_DISK_CACHE_PATH = os.environ.get("NEARTERM_CACHE_PATH", "/app/data/nearterm_cache.json")
@@ -56,6 +57,12 @@ NEARTERM_DISK_CACHE_PATH = os.environ.get("NEARTERM_CACHE_PATH", "/app/data/near
 NEARTERM_SIGMA_SAME_DAY = 1.0   # same-day (observed hours give hard running-max floor)
 NEARTERM_SIGMA_NEXT_DAY = 1.5   # next-day (full day still ahead)
 NEARTERM_MEMBERS        = 100   # synthetic member count (finer resolution than 30)
+
+# Post-peak decay: starts at 14:00 local, fully converged by 16:00 local.
+# At full decay forecast_max = running_max and sigma = 0, so markets where the
+# target temp hasn't been reached yet get probability 0 (hard skip).
+_POST_PEAK_HOUR_LOCAL  = 14
+_POST_PEAK_DECAY_HOURS = 2.0  # 14:00 → 16:00
 
 # Minimum seconds between consecutive API requests (~20 req/min, well under 600/min limit)
 _MIN_REQUEST_INTERVAL = 3.0
@@ -430,7 +437,7 @@ async def _fetch_nearterm_hourly(lat: float, lon: float, target_date: date) -> d
     Fetch hourly temperature_2m for a single day from Open-Meteo forecast API.
     Updated every 1-2 hours — much fresher than the 6-hourly GFS ensemble.
     Past hours in the response are model-analysis (observation-blended).
-    Uses the shared serial rate limiter and 1-hour disk cache.
+    Uses the shared serial rate limiter. Cache TTL: 15 min same-day, 1 hour tomorrow.
     """
     global _last_request_time
 
@@ -438,16 +445,18 @@ async def _fetch_nearterm_hourly(lat: float, lon: float, target_date: date) -> d
 
     cache_key = (round(lat, 4), round(lon, 4), target_date.isoformat())
 
+    ttl = NEARTERM_CACHE_TTL_SAME_DAY_SECS if target_date == date.today() else NEARTERM_CACHE_TTL_SECS
     async with _nearterm_cache_lock:
         if cache_key in _nearterm_cache:
             fetched_at, data = _nearterm_cache[cache_key]
-            if time.time() - fetched_at < NEARTERM_CACHE_TTL_SECS:
+            if time.time() - fetched_at < ttl:
                 return data
 
     params = {
         "latitude":   lat,
         "longitude":  lon,
         "hourly":     "temperature_2m",
+        "current":    "temperature_2m",   # real-time reading (~15-min intervals)
         "timezone":   "auto",
         "start_date": target_date.isoformat(),
         "end_date":   target_date.isoformat(),
@@ -541,6 +550,31 @@ def _parse_nearterm_forecast(city: str, target_date: date, raw: dict) -> Forecas
         ]
         running_max = max(observed) if observed else None
         sigma = NEARTERM_SIGMA_SAME_DAY
+
+        # Incorporate real-time current temperature (Open-Meteo ~15-min refresh).
+        # More recent than the hourly model-analysis values; use as additional floor.
+        raw_ct = (raw.get("current") or {}).get("temperature_2m")
+        if raw_ct is not None:
+            try:
+                ct = float(raw_ct)
+                running_max = max(running_max, ct) if running_max is not None else ct
+            except (TypeError, ValueError):
+                pass
+
+        # Post-peak decay: 14:00–16:00 local. Linearly weights forecast_max toward
+        # running_max and sigma toward 0. At full decay (16:00+): all synthetic
+        # members equal running_max — market is skipped if target not yet reached.
+        if running_max is not None and current_hour_local >= _POST_PEAK_HOUR_LOCAL:
+            hours_past_peak = current_hour_local - _POST_PEAK_HOUR_LOCAL
+            decay_weight = min(hours_past_peak / _POST_PEAK_DECAY_HOURS, 1.0)
+            forecast_max = (1.0 - decay_weight) * forecast_max + decay_weight * running_max
+            forecast_max = max(running_max, forecast_max)
+            sigma *= (1.0 - decay_weight)
+            log.debug(
+                f"weather nearterm: {city} {date_str} post-peak decay "
+                f"hour={current_hour_local} weight={decay_weight:.2f} "
+                f"→ forecast_max={forecast_max:.1f}°C sigma={sigma:.2f}"
+            )
     else:
         sigma = NEARTERM_SIGMA_NEXT_DAY
 
