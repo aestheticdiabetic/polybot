@@ -5,6 +5,7 @@ Computes expected value per share for each market candidate, assigns a
 position tier (CORE / SECONDARY / WING), and enforces per-cluster capital caps.
 """
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -15,6 +16,11 @@ from bonding.market_scanner import MarketCandidate
 from bonding.weather_client import ForecastResult, prob_in_range, fahrenheit_to_celsius
 
 log = logging.getLogger("bond.scorer")
+
+# REST-scan suppression cache: (city, target_date) → suppressed_until (Unix timestamp).
+# Set when score_market skips a market due to the time gate, so the REST scan avoids
+# re-evaluating the same market every 60 s until local midnight passes.
+_scan_suppressions: dict[tuple, float] = {}
 
 TIER_CORE      = "CORE"
 TIER_SECONDARY = "SECONDARY"
@@ -92,6 +98,11 @@ def score_market(
     Score YES and NO sides of a market. Returns the higher-EV side, or None if
     neither meets tier criteria. Never returns both sides (prevents same-market hedging).
     """
+    # Fast-path: skip markets already suppressed by a previous time-gate check.
+    # Suppression expires at local midnight so no re-evaluation until the day turns over.
+    if time.time() < _scan_suppressions.get((market.city, market.target_date), 0.0):
+        return None
+
     # Skip markets where the target day is nearly over — our weather model assimilates
     # real-time observations during the local afternoon and becomes artificially certain.
     # We compute hours until LOCAL midnight (not UTC midnight) so the gate fires at the
@@ -118,10 +129,14 @@ def score_market(
     ).astimezone(timezone.utc)
     hours_to_day_end = (end_of_day_utc - datetime.now(timezone.utc)).total_seconds() / 3600
     if 0 < hours_to_day_end < _config.BOND_MIN_ENTRY_HOURS:
+        _scan_suppressions[(market.city, market.target_date)] = (
+            time.time() + hours_to_day_end * 3600
+        )
         log.info(
             f"scorer: {market.city} {market.target_date} — "
             f"{hours_to_day_end:.1f}h until local midnight "
-            f"(gate={_config.BOND_MIN_ENTRY_HOURS}h): skipping"
+            f"(gate={_config.BOND_MIN_ENTRY_HOURS}h): skipping, suppressed for "
+            f"{hours_to_day_end:.1f}h"
         )
         return None
 

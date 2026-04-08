@@ -15,6 +15,7 @@ import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import websockets
 
@@ -236,22 +237,42 @@ class BondPriceFeed:
         if forecast is None:
             return
 
-        # If the target day is nearly over, suppress until after day end.
-        # Gamma's end_date_iso is a date label (midnight start-of-day UTC), not the actual
-        # resolution timestamp, so we compute hours to end-of-day from target_date directly.
+        # If the target day is nearly over, suppress until after local day end.
+        # Use the city's IANA timezone so the gate fires at the same point in the
+        # local day regardless of UTC offset (mirrors the scorer logic exactly).
         import config as _config
+        tz_name = _config.BOND_CITY_TIMEZONES.get(market.city)
+        if not tz_name:
+            log.warning(
+                f"feed: {market.city} {market.target_date} — no timezone configured, skipping "
+                f"(add to BOND_CITY_TIMEZONES in config.py)"
+            )
+            suppress_secs = 300
+            self._cooldowns[asset_id] = time.time() - COOLDOWN_SECS + suppress_secs
+            return
+        try:
+            city_tz = ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            log.warning(
+                f"feed: {market.city} {market.target_date} — invalid timezone '{tz_name}', skipping"
+            )
+            suppress_secs = 300
+            self._cooldowns[asset_id] = time.time() - COOLDOWN_SECS + suppress_secs
+            return
+        next_day = market.target_date + timedelta(days=1)
         end_of_day_utc = datetime(
-            *((market.target_date + timedelta(days=1)).timetuple()[:6]),
-            tzinfo=timezone.utc,
-        )
+            next_day.year, next_day.month, next_day.day, 0, 0, 0,
+            tzinfo=city_tz,
+        ).astimezone(timezone.utc)
         hours_to_day_end = (end_of_day_utc - datetime.now(timezone.utc)).total_seconds() / 3600
         if 0 < hours_to_day_end < _config.BOND_MIN_ENTRY_HOURS:
             suppress_secs = max(hours_to_day_end * 3600 + 300, 300)
             self._cooldowns[asset_id] = time.time() - COOLDOWN_SECS + suppress_secs
             log.info(
                 f"feed: {market.city} {market.target_date} — "
-                f"{hours_to_day_end:.1f}/{_config.BOND_MIN_ENTRY_HOURS}h before day end: "
-                f"skipping (suppressed {suppress_secs/3600:.1f}h)"
+                f"{hours_to_day_end:.1f}h until local midnight "
+                f"(gate={_config.BOND_MIN_ENTRY_HOURS}h): "
+                f"suppressed {suppress_secs/3600:.1f}h"
             )
             return
 
