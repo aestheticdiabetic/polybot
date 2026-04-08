@@ -6,7 +6,7 @@ position tier (CORE / SECONDARY / WING), and enforces per-cluster capital caps.
 """
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import config as _config
@@ -91,15 +91,19 @@ def score_market(
     Score YES and NO sides of a market. Returns the higher-EV side, or None if
     neither meets tier criteria. Never returns both sides (prevents same-market hedging).
     """
-    # Skip markets resolving too soon — our weather model can lag real-world
-    # observations by enough to give false 100% confidence near expiry.
-    hours_to_resolution = (
-        market.resolution_time - datetime.now(timezone.utc)
-    ).total_seconds() / 3600
-    if hours_to_resolution < _config.BOND_MIN_ENTRY_HOURS:
+    # Skip markets where the target day is nearly over — our weather model can lag
+    # real-world observations near end-of-day, giving false 100% confidence.
+    # Gamma's end_date_iso is a date label (midnight start-of-day UTC), not the actual
+    # resolution timestamp, so we compute hours to end-of-day from target_date directly.
+    end_of_day_utc = datetime(
+        *((market.target_date + timedelta(days=1)).timetuple()[:6]),
+        tzinfo=timezone.utc,
+    )
+    hours_to_day_end = (end_of_day_utc - datetime.now(timezone.utc)).total_seconds() / 3600
+    if 0 < hours_to_day_end < _config.BOND_MIN_ENTRY_HOURS:
         log.info(
             f"scorer: {market.city} {market.target_date} — "
-            f"{hours_to_resolution:.1f}/{_config.BOND_MIN_ENTRY_HOURS}h before resolution: skipping"
+            f"{hours_to_day_end:.1f}/{_config.BOND_MIN_ENTRY_HOURS}h before day end: skipping"
         )
         return None
 

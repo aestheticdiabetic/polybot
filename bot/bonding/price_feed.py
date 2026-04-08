@@ -14,7 +14,7 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import websockets
 
@@ -236,17 +236,21 @@ class BondPriceFeed:
         if forecast is None:
             return
 
-        # If the market is within the entry time gate, suppress until after resolution.
+        # If the target day is nearly over, suppress until after day end.
+        # Gamma's end_date_iso is a date label (midnight start-of-day UTC), not the actual
+        # resolution timestamp, so we compute hours to end-of-day from target_date directly.
         import config as _config
-        hours_to_resolution = (
-            market.resolution_time - datetime.now(timezone.utc)
-        ).total_seconds() / 3600
-        if hours_to_resolution < _config.BOND_MIN_ENTRY_HOURS:
-            suppress_secs = max(hours_to_resolution * 3600 + 300, 300)
+        end_of_day_utc = datetime(
+            *((market.target_date + timedelta(days=1)).timetuple()[:6]),
+            tzinfo=timezone.utc,
+        )
+        hours_to_day_end = (end_of_day_utc - datetime.now(timezone.utc)).total_seconds() / 3600
+        if 0 < hours_to_day_end < _config.BOND_MIN_ENTRY_HOURS:
+            suppress_secs = max(hours_to_day_end * 3600 + 300, 300)
             self._cooldowns[asset_id] = time.time() - COOLDOWN_SECS + suppress_secs
             log.info(
                 f"feed: {market.city} {market.target_date} — "
-                f"{hours_to_resolution:.1f}/{_config.BOND_MIN_ENTRY_HOURS}h before resolution: "
+                f"{hours_to_day_end:.1f}/{_config.BOND_MIN_ENTRY_HOURS}h before day end: "
                 f"skipping (suppressed {suppress_secs/3600:.1f}h)"
             )
             return
