@@ -44,6 +44,30 @@ def _load_paper_trades(n: int = 10000) -> list[dict]:
         return []
 
 
+def _extract_yes_outcome(market_data: dict) -> str | None:
+    """
+    Return "YES" or "NO" if the market has fully resolved, None if still open.
+    Checks tokens[].winner first (most reliable), then falls back to a top-level
+    resolution string.
+    """
+    # Primary: tokens list with winner flag
+    tokens = market_data.get("tokens", [])
+    for tok in tokens:
+        if str(tok.get("outcome", "")).lower() in ("yes", "1"):
+            winner = tok.get("winner")
+            if winner is True:
+                return "YES"
+            if winner is False:
+                return "NO"
+    # Fallback: top-level resolution field
+    resolution = str(market_data.get("resolution", "")).upper()
+    if resolution == "YES":
+        return "YES"
+    if resolution == "NO":
+        return "NO"
+    return None
+
+
 def _load_bond_ledger() -> list[dict]:
     """Read bond position ledger from disk. Returns empty list on any error."""
     try:
@@ -491,74 +515,136 @@ async def create_app(state):
     @_auth_required
     async def api_bond_paper_check_resolutions(request):
         """
-        Check Gamma API for outcomes on paper trades whose resolution_time has passed
-        and outcome is still null. Updates the JSONL file in-place.
+        Check Gamma API for outcomes on:
+          - Paper trades whose resolution_time has passed and outcome is still null
+          - Live bonding positions that are still OPEN but past their resolution_time
+
+        Uses tokens[].winner for reliable YES/NO detection (same logic as ExitManager).
+        Updates both the paper trades JSONL and the bonding ledger in-place.
         """
         import aiohttp as _aiohttp
         from datetime import datetime, timezone as _tz
+        from pathlib import Path as _Path
 
-        records = _load_paper_trades()
         now = datetime.now(_tz.utc)
-        pending = [
-            r for r in records
+
+        # ── Collect market IDs that need resolution ───────────────────
+        paper_records = _load_paper_trades()
+        pending_paper = [
+            r for r in paper_records
             if r.get("outcome") is None
             and r.get("resolution_time")
             and datetime.fromisoformat(r["resolution_time"].replace("Z", "+00:00")) < now
         ]
 
-        if not pending:
-            return web.json_response({"ok": True, "checked": 0, "resolved": 0})
+        live_positions = _load_bond_ledger()
+        pending_live = [
+            p for p in live_positions
+            if p.get("status") == "OPEN"
+            and p.get("resolution_time")
+            and datetime.fromisoformat(p["resolution_time"].replace("Z", "+00:00")) < now
+        ]
 
-        # Fetch outcomes for each market
-        resolved_count = 0
+        all_market_ids = {r["market_id"] for r in pending_paper if r.get("market_id")}
+        all_market_ids |= {p["market_id"] for p in pending_live if p.get("market_id")}
+
+        if not all_market_ids:
+            return web.json_response({"ok": True, "checked": 0,
+                                      "paper_resolved": 0, "live_resolved": 0})
+
+        # ── Fetch outcomes from Gamma API ─────────────────────────────
+        # outcome_map: market_id -> "YES" | "NO" (only present if fully resolved)
         outcome_map: dict[str, str] = {}
         timeout = _aiohttp.ClientTimeout(total=10)
         async with _aiohttp.ClientSession(timeout=timeout) as session:
-            for r in pending[:50]:  # cap at 50 per call
-                mid = r.get("market_id", "")
-                if not mid or mid in outcome_map:
-                    continue
+            for mid in list(all_market_ids)[:50]:  # cap at 50 per call
                 try:
                     async with session.get(
                         f"https://gamma-api.polymarket.com/markets/{mid}"
                     ) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            # resolved = True means market settled
-                            if data.get("resolved"):
-                                # outcome 1 = YES resolved, 0 = NO resolved
-                                winners = data.get("outcomePrices", [])
-                                if winners:
-                                    outcome_map[mid] = "YES" if float(winners[0]) >= 0.99 else "NO"
+                        if resp.status != 200:
+                            continue
+                        data = await resp.json()
+                        outcome = _extract_yes_outcome(data)
+                        if outcome is not None:
+                            outcome_map[mid] = outcome
                 except Exception:
                     pass
 
-        if not outcome_map:
-            return web.json_response({"ok": True, "checked": len(pending), "resolved": 0})
-
-        # Update records and rewrite file
-        updated = []
-        for r in records:
+        # ── Update paper trades ───────────────────────────────────────
+        paper_resolved = 0
+        updated_paper = []
+        for r in paper_records:
             mid = r.get("market_id", "")
             if mid in outcome_map and r.get("outcome") is None:
                 r = dict(r)
                 r["outcome"] = outcome_map[mid]
                 shares = r.get("shares", 0)
                 ask    = r.get("ask", 0)
-                r["pnl"] = round((1.0 - ask) * shares if outcome_map[mid] == "YES" else -ask * shares, 4)
-                resolved_count += 1
-            updated.append(r)
+                r["pnl"] = round(
+                    (1.0 - ask) * shares if outcome_map[mid] == "YES" else -ask * shares, 4
+                )
+                paper_resolved += 1
+            updated_paper.append(r)
 
-        try:
-            tmp = PAPER_LOG.with_suffix(".tmp")
-            tmp.write_text("\n".join(json.dumps(rec) for rec in updated) + "\n", encoding="utf-8")
-            tmp.replace(PAPER_LOG)
-        except Exception as exc:
-            log.error(f"paper trades file update failed: {exc}")
-            return web.json_response({"ok": False, "error": str(exc)})
+        if paper_resolved:
+            try:
+                tmp = PAPER_LOG.with_suffix(".tmp")
+                tmp.write_text(
+                    "\n".join(json.dumps(rec) for rec in updated_paper) + "\n",
+                    encoding="utf-8",
+                )
+                tmp.replace(PAPER_LOG)
+            except Exception as exc:
+                log.error(f"paper trades file update failed: {exc}")
+                return web.json_response({"ok": False, "error": str(exc)})
 
-        log.info(f"paper-check-resolutions: checked={len(pending)} resolved={resolved_count}")
-        return web.json_response({"ok": True, "checked": len(pending), "resolved": resolved_count})
+        # ── Update live bonding ledger ────────────────────────────────
+        live_resolved = 0
+        ledger_path = _Path(_config.BOND_LEDGER_FILE)
+        if pending_live and ledger_path.exists():
+            try:
+                ledger_data = json.loads(ledger_path.read_text(encoding="utf-8"))
+                positions = ledger_data.get("positions", [])
+                for p in positions:
+                    mid = p.get("market_id", "")
+                    if (
+                        p.get("status") == "OPEN"
+                        and mid in outcome_map
+                        and p.get("resolution_time")
+                        and datetime.fromisoformat(
+                            p["resolution_time"].replace("Z", "+00:00")
+                        ) < now
+                    ):
+                        exit_price = 1.0 if outcome_map[mid] == "YES" else 0.0
+                        p["status"]     = "RESOLVED"
+                        p["exit_price"] = exit_price
+                        p["exit_time"]  = now.isoformat()
+                        live_resolved += 1
+                        log.info(
+                            f"dashboard-check-resolutions: RESOLVED market={mid[:8]} "
+                            f"outcome={outcome_map[mid]} exit_price={exit_price:.1f} "
+                            f"pnl={round((exit_price - p.get('entry_price', 0)) * p.get('shares', 0), 4):+.4f}"
+                        )
+                if live_resolved:
+                    tmp = ledger_path.with_suffix(".tmp")
+                    tmp.write_text(json.dumps(ledger_data, indent=2), encoding="utf-8")
+                    tmp.replace(ledger_path)
+            except Exception as exc:
+                log.error(f"bond ledger update failed: {exc}")
+                return web.json_response({"ok": False, "error": str(exc)})
+
+        total_checked = len(pending_paper) + len(pending_live)
+        log.info(
+            f"check-resolutions: checked={total_checked} "
+            f"paper_resolved={paper_resolved} live_resolved={live_resolved}"
+        )
+        return web.json_response({
+            "ok":            True,
+            "checked":       total_checked,
+            "paper_resolved": paper_resolved,
+            "live_resolved":  live_resolved,
+        })
 
     # ── Static dashboard HTML ────────────────────────────────────
 
