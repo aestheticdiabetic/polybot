@@ -486,11 +486,13 @@ async def create_app(state):
 
         def _is_win(r: dict) -> bool:
             """A bet wins if the market resolved in the direction we bet,
-            or if we sold early with a profit."""
+            or if we sold early with a profit. Records without a 'side' field
+            pre-date NO bets and were always YES bets."""
             outcome = r.get("outcome")
             if outcome == "SOLD":
                 return (r.get("pnl") or 0) > 0
-            return outcome is not None and outcome == r.get("side")
+            side = r.get("side") or "YES"
+            return outcome is not None and outcome == side
 
         def _is_resolved(r: dict) -> bool:
             return r.get("outcome") is not None
@@ -662,9 +664,9 @@ async def create_app(state):
             if mid in outcome_map and r.get("outcome") is None:
                 r = dict(r)
                 r["outcome"] = outcome_map[mid]
-                shares   = r.get("shares", 0)
-                ask      = r.get("ask", 0)
-                side     = r.get("side", "YES")
+                shares     = r.get("shares", 0)
+                ask        = r.get("ask", 0)
+                side       = r.get("side") or "YES"  # pre-NO-bet records had no side field
                 market_won = outcome_map[mid] == side  # did the market resolve in our direction?
                 r["pnl"] = round(
                     (1.0 - ask) * shares if market_won else -ask * shares, 4
