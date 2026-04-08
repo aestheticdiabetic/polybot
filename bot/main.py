@@ -39,13 +39,23 @@ log = logging.getLogger("main")
 
 
 async def run_bonding_loop(state: StateManager) -> None:
-    """BOND mode main loop — weather market bonding strategy."""
+    """BOND mode main loop — weather market bonding strategy.
+
+    Architecture:
+    - REST scan every BOND_POLL_INTERVAL_SECS (60s) discovers new/closed markets
+      and refreshes weather forecasts (cached 1-2h, so no extra meteo calls).
+    - A persistent WebSocket connection (BondPriceFeed) subscribes to all weather
+      market token IDs and scores opportunities on every price tick — no polling delay.
+    - REST scan also does a scoring pass as a fallback for markets with no recent WS events.
+    - Per-token cooldown (5 min) prevents duplicate orders from both paths firing at once.
+    """
     from py_clob_client.client import ClobClient
     from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
     from bonding.weather_client import get_all_forecasts
     from bonding.market_scanner import scan_weather_markets
     from bonding.opportunity_scorer import score_all
     from bonding.exit_manager import ExitManager, BondPosition
+    from bonding.price_feed import BondPriceFeed
     from config import (
         CLOB_HOST, CHAIN_ID, PRIVATE_KEY, FUNDER_ADDRESS,
         API_KEY, API_SECRET, API_PASSPHRASE,
@@ -69,15 +79,22 @@ async def run_bonding_loop(state: StateManager) -> None:
 
     from bonding.order_tracker import PendingOrderTracker
 
-    exit_mgr     = ExitManager(bond_client)
+    exit_mgr      = ExitManager(bond_client)
     order_tracker = PendingOrderTracker(bond_client, exit_mgr)
     asyncio.get_running_loop().create_task(exit_mgr.run())
     asyncio.get_running_loop().create_task(order_tracker.run())
 
+    # WS price feed — fires on_opportunity whenever a price tick creates an edge
+    async def _on_ws_opportunity(opp):
+        await _place_bond_order(bond_client, exit_mgr, order_tracker, opp, OrderArgs, OrderType)
+
+    feed = BondPriceFeed(on_opportunity=_on_ws_opportunity)
+    feed_task = asyncio.get_running_loop().create_task(feed.run())
+
     state.set_running(True)
     log.info(
         f"PolyBot BOND mode starting — "
-        f"poll_interval={BOND_POLL_INTERVAL_SECS}s | "
+        f"discovery_interval={BOND_POLL_INTERVAL_SECS}s (WS for real-time prices) | "
         f"max_per_run={BOND_MAX_MARKETS_PER_RUN}"
     )
 
@@ -92,12 +109,19 @@ async def run_bonding_loop(state: StateManager) -> None:
             city_date_pairs = list({(m.city, m.target_date) for m in markets})
             forecasts = await get_all_forecasts(city_date_pairs)
 
-            opps = score_all(markets, forecasts)
+            # Update WS feed — resubscribes automatically if market set changed
+            feed.update_markets(markets, forecasts)
 
+            # Fallback REST scoring pass: catches markets with no recent WS events
+            opps = score_all(markets, forecasts)
             placed = 0
             for opp in opps[:BOND_MAX_MARKETS_PER_RUN]:
-                await _place_bond_order(bond_client, exit_mgr, order_tracker, opp, OrderArgs, OrderType)
-                placed += 1
+                if not feed.is_on_cooldown(opp.market.token_id):
+                    await _place_bond_order(
+                        bond_client, exit_mgr, order_tracker, opp, OrderArgs, OrderType
+                    )
+                    feed.mark_cooldown(opp.market.token_id)
+                    placed += 1
 
             state.update_bond_stats({
                 "cycle": cycle,
@@ -106,15 +130,20 @@ async def run_bonding_loop(state: StateManager) -> None:
                 "markets_scanned": len(markets),
                 "opportunities_found": len(opps),
                 "orders_placed": placed,
+                "ws_price_events": feed.stats["price_events"],
+                "ws_opportunities": feed.stats["opportunities_fired"],
+                "ws_reconnects": feed.stats["ws_reconnects"],
             })
 
         except asyncio.CancelledError:
+            feed_task.cancel()
             break
         except Exception as exc:
             log.error(f"Bonding loop error: {exc}", exc_info=True)
 
         await asyncio.sleep(BOND_POLL_INTERVAL_SECS)
 
+    await feed.stop()
     state.set_running(False)
     log.info("BOND mode stopped cleanly")
 

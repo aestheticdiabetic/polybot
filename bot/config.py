@@ -164,7 +164,7 @@ BOND_WING_MIN_ABS_GAIN    = 2.00  # AND absolute gain >= this value (USD)
 BOND_GAS_FLOOR_HOURS      = 4     # don't exit within N hours of resolution
 
 # Scanner settings
-BOND_POLL_INTERVAL_SECS  = 360   # seconds between full market scans
+BOND_POLL_INTERVAL_SECS  = 60    # seconds between REST market discovery scans (WS handles real-time pricing)
 BOND_MAX_MARKETS_PER_RUN = 150   # max orders placed per scan cycle
 
 # City list with (lat, lon) — extend as forecast accuracy is validated
