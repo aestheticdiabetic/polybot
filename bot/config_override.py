@@ -10,7 +10,7 @@ from pathlib import Path
 
 log = logging.getLogger("config_override")
 
-OVERRIDE_FILE = Path("/app/config.override.env")
+OVERRIDE_FILE = Path("/app/data/config.override.env")
 
 
 def load_overrides() -> None:

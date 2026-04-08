@@ -85,6 +85,12 @@ async def scan_weather_markets() -> list[MarketCandidate]:
             fail_token += 1
             continue
 
+        # Debug: log the outcomes/prices shape so we can verify YES/NO ordering
+        log.debug(
+            f"scanner: market={m.get('id','?')} outcomes={m.get('outcomes')} "
+            f"outcomePrices={m.get('outcomePrices')} gamma_price={gamma_price}"
+        )
+
         # Use Gamma-embedded price if available; fall back to CLOB orderbook.
         # When using Gamma price we have no depth info — ask_book stays empty.
         if gamma_price is not None and 0.0 < gamma_price < 1.0:
@@ -394,22 +400,46 @@ def _extract_yes_token_and_price(market: dict) -> tuple[Optional[str], Optional[
                     pass
             break
 
-    # Shape 2: clob_token_ids list (index 0 = YES by convention)
+    # Determine YES index from the outcomes array — do NOT assume index 0 = YES.
+    # Polymarket typically uses ["Yes", "No"] but this can vary.
+    outcomes = market.get("outcomes", [])
+    yes_idx = 0  # default fallback
+    for i, o in enumerate(outcomes):
+        if str(o).lower() in ("yes", "1"):
+            yes_idx = i
+            break
+
+    # Shape 2: clob_token_ids list — parallel to outcomes
     if not token_id:
         clob_ids = market.get("clobTokenIds") or market.get("clob_token_ids", [])
-        if clob_ids:
+        if len(clob_ids) > yes_idx:
+            token_id = clob_ids[yes_idx]
+        elif clob_ids:
+            log.warning(
+                f"scanner: clobTokenIds has {len(clob_ids)} entries but yes_idx={yes_idx} "
+                f"for market {market.get('id', '?')} — falling back to index 0"
+            )
             token_id = clob_ids[0]
 
-    # Price fallback: outcomePrices parallel to outcomes (index 0 = YES)
+    # Price fallback: outcomePrices parallel to outcomes
     if price is None:
         outcome_prices = market.get("outcomePrices", [])
-        if outcome_prices:
+        if len(outcome_prices) > yes_idx:
+            try:
+                price = float(outcome_prices[yes_idx])
+            except (ValueError, TypeError):
+                pass
+        elif outcome_prices:
+            log.warning(
+                f"scanner: outcomePrices has {len(outcome_prices)} entries but yes_idx={yes_idx} "
+                f"for market {market.get('id', '?')} — falling back to index 0"
+            )
             try:
                 price = float(outcome_prices[0])
             except (ValueError, TypeError):
                 pass
 
-    # Price fallback 2: top-level price/lastPrice fields
+    # Price fallback 2: top-level price/lastPrice fields (ambiguous — use only as last resort)
     if price is None:
         for key in ("price", "lastPrice", "lastTradePrice"):
             raw = market.get(key)

@@ -410,7 +410,7 @@
       <table>
         <thead><tr>
           <th>CITY</th><th>QUESTION</th><th>TIER</th><th>SHARES</th>
-          <th>ENTRY</th><th>EXIT</th><th>PnL</th><th>STATUS</th><th>SOLD AT</th>
+          <th>ENTRY</th><th>EXIT</th><th>PnL</th><th>STATUS</th><th>CLOSES</th><th>SOLD AT</th>
         </tr></thead>
         <tbody id="sold-pos-tbody"></tbody>
       </table>
@@ -596,7 +596,7 @@
         <thead><tr>
           <th>TIME</th><th>CITY</th><th>QUESTION</th><th>TIER</th>
           <th>SHARES</th><th>ASK</th><th>PROB</th><th>EV</th>
-          <th>CAPITAL</th><th>PROJ PROFIT</th><th>OUTCOME</th><th>ACTUAL PnL</th>
+          <th>CAPITAL</th><th>PROJ PROFIT</th><th>TIME LEFT</th><th>OUTCOME</th><th>ACTUAL PnL</th>
         </tr></thead>
         <tbody id="paper-trades-tbody"></tbody>
       </table>
@@ -990,6 +990,11 @@ function renderSoldPositions() {
     const pnl  = exitP!=null ? (exitP - entryP) * p.shares : null;
     const pnlStr  = pnl!=null ? (pnl>=0?'+':'')+pnl.toFixed(4) : '—';
     const pnlClass = pnl!=null?(pnl>0?'green':'red'):'';
+    const resLeft = resolutionSecsLeft(p.resolution_time);
+    const resStr  = fmtTimeLeft(resLeft);
+    const resClass = resLeft != null && resLeft < 0 ? 'muted'
+                   : resLeft != null && resLeft < 3600 * 4 ? 'red'
+                   : resLeft != null && resLeft < 3600 * 24 ? 'amber' : '';
     const tr = document.createElement('tr');
     tr.innerHTML=`<td><strong>${p.city||'?'}</strong></td>
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)">${p.question}</td>
@@ -999,11 +1004,12 @@ function renderSoldPositions() {
       <td>${exitP!=null?exitP.toFixed(4):'—'}</td>
       <td class="${pnlClass}">${pnlStr}</td>
       <td><span class="pill pill-${(p.status||'').toLowerCase()}">${p.status}</span></td>
+      <td class="${resClass}" style="white-space:nowrap">${resStr}</td>
       <td style="color:var(--muted)">${p.exit_time ? new Date(p.exit_time).toLocaleString() : '—'}</td>`;
     tbody.appendChild(tr);
   });
   if (!sold.length) {
-    tbody.innerHTML='<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:16px;">no sold positions</td></tr>';
+    tbody.innerHTML='<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:16px;">no sold positions</td></tr>';
   }
 }
 
@@ -1323,7 +1329,7 @@ function renderPaperTrades() {
 
   const tbody = document.getElementById('paper-trades-tbody'); tbody.innerHTML = '';
   if (!records.length) {
-    tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:var(--muted);padding:16px;">no paper trades yet — start the bot in PAPER mode to generate data</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" style="text-align:center;color:var(--muted);padding:16px;">no paper trades yet — start the bot in PAPER mode to generate data</td></tr>';
     return;
   }
   records.forEach(r => {
@@ -1336,6 +1342,11 @@ function renderPaperTrades() {
     const pnlHtml = r.pnl != null
       ? `<span class="${r.pnl >= 0 ? 'green' : 'red'}">${r.pnl >= 0 ? '+' : ''}$${parseFloat(r.pnl).toFixed(4)}</span>`
       : '—';
+    const resLeft = resolutionSecsLeft(r.resolution_time);
+    const resStr  = fmtTimeLeft(resLeft);
+    const resClass = resLeft != null && resLeft < 0 ? 'muted'
+                   : resLeft != null && resLeft < 3600 * 4 ? 'red'
+                   : resLeft != null && resLeft < 3600 * 24 ? 'amber' : '';
     const tr = document.createElement('tr');
     const ts = r.ts ? new Date(r.ts).toLocaleString() : '—';
     tr.innerHTML = `
@@ -1349,6 +1360,7 @@ function renderPaperTrades() {
       <td class="${(r.ev||0)>0?'green':''}">${r.ev != null ? r.ev.toFixed(4) : '—'}</td>
       <td class="amber">$${parseFloat(r.capital||0).toFixed(4)}</td>
       <td class="${projProfit>=0?'green':'red'}">${projProfit>=0?'+':''}$${projProfit.toFixed(4)}</td>
+      <td class="${resClass}" style="white-space:nowrap">${resStr}</td>
       <td>${outcomeHtml}</td>
       <td>${pnlHtml}</td>`;
     tbody.appendChild(tr);
