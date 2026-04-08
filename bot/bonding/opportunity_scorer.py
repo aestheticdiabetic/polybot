@@ -7,6 +7,7 @@ position tier (CORE / SECONDARY / WING), and enforces per-cluster capital caps.
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Optional
 
 import config as _config
@@ -91,19 +92,36 @@ def score_market(
     Score YES and NO sides of a market. Returns the higher-EV side, or None if
     neither meets tier criteria. Never returns both sides (prevents same-market hedging).
     """
-    # Skip markets where the target day is nearly over — our weather model can lag
-    # real-world observations near end-of-day, giving false 100% confidence.
-    # Gamma's end_date_iso is a date label (midnight start-of-day UTC), not the actual
-    # resolution timestamp, so we compute hours to end-of-day from target_date directly.
+    # Skip markets where the target day is nearly over — our weather model assimilates
+    # real-time observations during the local afternoon and becomes artificially certain.
+    # We compute hours until LOCAL midnight (not UTC midnight) so the gate fires at the
+    # same point in the city's day regardless of timezone.
+    tz_name = _config.BOND_CITY_TIMEZONES.get(market.city)
+    if not tz_name:
+        log.warning(
+            f"scorer: {market.city} {market.target_date} — no timezone configured, skipping "
+            f"(add to BOND_CITY_TIMEZONES in config.py)"
+        )
+        return None
+    try:
+        city_tz = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        log.warning(
+            f"scorer: {market.city} {market.target_date} — invalid timezone '{tz_name}', skipping "
+            f"(fix BOND_CITY_TIMEZONES in config.py)"
+        )
+        return None
+    next_day = market.target_date + timedelta(days=1)
     end_of_day_utc = datetime(
-        *((market.target_date + timedelta(days=1)).timetuple()[:6]),
-        tzinfo=timezone.utc,
-    )
+        next_day.year, next_day.month, next_day.day, 0, 0, 0,
+        tzinfo=city_tz,
+    ).astimezone(timezone.utc)
     hours_to_day_end = (end_of_day_utc - datetime.now(timezone.utc)).total_seconds() / 3600
     if 0 < hours_to_day_end < _config.BOND_MIN_ENTRY_HOURS:
         log.info(
             f"scorer: {market.city} {market.target_date} — "
-            f"{hours_to_day_end:.1f}/{_config.BOND_MIN_ENTRY_HOURS}h before day end: skipping"
+            f"{hours_to_day_end:.1f}h until local midnight "
+            f"(gate={_config.BOND_MIN_ENTRY_HOURS}h): skipping"
         )
         return None
 

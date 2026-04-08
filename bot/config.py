@@ -162,7 +162,8 @@ BOND_EARLY_EXIT_PRICE     = 0.97  # sell core when price hits this
 BOND_WING_EXIT_MULTIPLIER = 5.0   # sell wing if price >= cost × this
 BOND_WING_MIN_ABS_GAIN    = 1.00  # AND absolute gain >= this value (USD)
 BOND_GAS_FLOOR_HOURS      = 4     # don't exit within N hours of resolution
-BOND_MIN_ENTRY_HOURS      = 6     # don't enter new positions within N hours of resolution
+BOND_MIN_ENTRY_HOURS      = 10    # don't enter new positions within N hours of local-day end
+                                  # (10h = block entry after ~14:00 local time, before daily high is set)
 
 # Scanner settings
 BOND_POLL_INTERVAL_SECS  = 60    # seconds between REST market discovery scans (WS handles real-time pricing)
@@ -220,6 +221,60 @@ BOND_CITIES: dict[str, tuple[float, float]] = {
     "Lahore":        (31.5204,   74.3587),
     "Dhaka":         (23.8103,   90.4125),
     "Colombo":        (6.9271,   79.8612),
+}
+
+# IANA timezone for each city — used to compute hours until LOCAL day end (not UTC midnight)
+# so the time gate fires correctly regardless of city timezone.
+BOND_CITY_TIMEZONES: dict[str, str] = {
+    "Tokyo":          "Asia/Tokyo",
+    "London":         "Europe/London",
+    "New York":       "America/New_York",
+    "Los Angeles":    "America/Los_Angeles",
+    "Chicago":        "America/Chicago",
+    "Sydney":         "Australia/Sydney",
+    "Munich":         "Europe/Berlin",
+    "Paris":          "Europe/Paris",
+    "Dubai":          "Asia/Dubai",
+    "Singapore":      "Asia/Singapore",
+    "Seoul":          "Asia/Seoul",
+    "Istanbul":       "Europe/Istanbul",
+    "Ankara":         "Europe/Istanbul",
+    "Chengdu":        "Asia/Shanghai",
+    "Busan":          "Asia/Seoul",
+    "Seattle":        "America/Los_Angeles",
+    "Miami":          "America/New_York",
+    "Toronto":        "America/Toronto",
+    "Berlin":         "Europe/Berlin",
+    "Amsterdam":      "Europe/Amsterdam",
+    "Jakarta":        "Asia/Jakarta",
+    "Helsinki":       "Europe/Helsinki",
+    "Chongqing":      "Asia/Shanghai",
+    "Kuala Lumpur":   "Asia/Kuala_Lumpur",
+    "Wellington":     "Pacific/Auckland",
+    "Sao Paulo":      "America/Sao_Paulo",
+    "Buenos Aires":   "America/Argentina/Buenos_Aires",
+    "Mexico City":    "America/Mexico_City",
+    "Mumbai":         "Asia/Kolkata",
+    "Delhi":          "Asia/Kolkata",
+    "Shanghai":       "Asia/Shanghai",
+    "Beijing":        "Asia/Shanghai",
+    "Lagos":          "Africa/Lagos",
+    "Cairo":          "Africa/Cairo",
+    "Nairobi":        "Africa/Nairobi",
+    "Johannesburg":   "Africa/Johannesburg",
+    "Rio de Janeiro": "America/Sao_Paulo",
+    "Bogota":         "America/Bogota",
+    "Lima":           "America/Lima",
+    "Bangkok":        "Asia/Bangkok",
+    "Ho Chi Minh":    "Asia/Ho_Chi_Minh",
+    "Manila":         "Asia/Manila",
+    "Osaka":          "Asia/Tokyo",
+    "Taipei":         "Asia/Taipei",
+    "Hong Kong":      "Asia/Hong_Kong",
+    "Karachi":        "Asia/Karachi",
+    "Lahore":         "Asia/Karachi",
+    "Dhaka":          "Asia/Dhaka",
+    "Colombo":        "Asia/Colombo",
 }
 
 # City name aliases — maps Polymarket's naming variants to canonical names above
