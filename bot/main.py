@@ -88,8 +88,17 @@ async def run_bonding_loop(state: StateManager) -> None:
     async def _on_ws_opportunity(opp):
         await _place_bond_order(bond_client, exit_mgr, order_tracker, opp, OrderArgs, OrderType)
 
+    # Initial scan to pre-populate the feed before the WS connects.
+    # This ensures the WebSocket subscribes to all markets immediately on connect
+    # rather than starting with 0 subscriptions and resubscribing ~60s later.
+    log.info("BOND mode: running initial scan to pre-populate WS feed...")
+    markets = await scan_weather_markets()
+    city_date_pairs = list({(m.city, m.target_date) for m in markets})
+    forecasts = await get_all_forecasts(city_date_pairs)
+
     feed = BondPriceFeed(on_opportunity=_on_ws_opportunity)
-    feed_task = asyncio.get_running_loop().create_task(feed.run())
+    feed.update_markets(markets, forecasts)  # pre-populate; WS not connected yet so no resubscribe
+    feed_task = asyncio.get_running_loop().create_task(feed.run())  # now connects subscribed
 
     state.set_running(True)
     log.info(
@@ -104,13 +113,12 @@ async def run_bonding_loop(state: StateManager) -> None:
         cycle += 1
         cycle_start = _time.time()
         try:
-            markets = await scan_weather_markets()
-
-            city_date_pairs = list({(m.city, m.target_date) for m in markets})
-            forecasts = await get_all_forecasts(city_date_pairs)
-
-            # Update WS feed — resubscribes automatically if market set changed
-            feed.update_markets(markets, forecasts)
+            # Cycle 1 reuses the pre-fetched markets/forecasts; subsequent cycles rescan
+            if cycle > 1:
+                markets = await scan_weather_markets()
+                city_date_pairs = list({(m.city, m.target_date) for m in markets})
+                forecasts = await get_all_forecasts(city_date_pairs)
+                feed.update_markets(markets, forecasts)
 
             # Fallback REST scoring pass: catches markets with no recent WS events
             opps = score_all(markets, forecasts)
@@ -246,6 +254,8 @@ async def run_paper_loop(state: StateManager) -> None:
     """PAPER mode — mirrors live bonding loop with WS prices, but logs instead of placing orders.
 
     Architecture matches run_bonding_loop exactly:
+    - Initial REST scan pre-populates the WS feed before it connects, so the
+      WebSocket subscribes to all weather token IDs immediately on connect.
     - REST scan every BOND_POLL_INTERVAL_SECS discovers new/closed markets.
     - BondPriceFeed subscribes via WS and calls back on every qualifying price tick.
     - Per-market deduplication via seen_ids (loaded from JSONL at startup) prevents
@@ -266,8 +276,17 @@ async def run_paper_loop(state: StateManager) -> None:
     async def _on_ws_opportunity(opp):
         log_opportunity(opp, seen_ids)
 
+    # Initial scan to pre-populate the feed before the WS connects.
+    # This ensures the WebSocket subscribes to all markets immediately on connect
+    # rather than starting with 0 subscriptions and resubscribing ~60s later.
+    log.info("PAPER mode: running initial scan to pre-populate WS feed...")
+    markets = await scan_weather_markets()
+    city_date_pairs = list({(m.city, m.target_date) for m in markets})
+    forecasts = await get_all_forecasts(city_date_pairs)
+
     feed = BondPriceFeed(on_opportunity=_on_ws_opportunity)
-    feed_task = asyncio.get_running_loop().create_task(feed.run())
+    feed.update_markets(markets, forecasts)  # pre-populate; WS not connected yet so no resubscribe
+    feed_task = asyncio.get_running_loop().create_task(feed.run())  # now connects subscribed
 
     state.set_running(True)
     log.info(
@@ -280,13 +299,12 @@ async def run_paper_loop(state: StateManager) -> None:
         cycle += 1
         cycle_start = time.time()
         try:
-            markets = await scan_weather_markets()
-
-            city_date_pairs = list({(m.city, m.target_date) for m in markets})
-            forecasts = await get_all_forecasts(city_date_pairs)
-
-            # Update WS feed — resubscribes automatically if market set changed
-            feed.update_markets(markets, forecasts)
+            # Cycle 1 reuses the pre-fetched markets/forecasts; subsequent cycles rescan
+            if cycle > 1:
+                markets = await scan_weather_markets()
+                city_date_pairs = list({(m.city, m.target_date) for m in markets})
+                forecasts = await get_all_forecasts(city_date_pairs)
+                feed.update_markets(markets, forecasts)
 
             # Fallback REST scoring pass: catches markets with no recent WS events
             opps = score_all(markets, forecasts)[:BOND_MAX_MARKETS_PER_RUN]
