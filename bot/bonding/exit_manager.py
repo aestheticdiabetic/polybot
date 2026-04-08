@@ -8,7 +8,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -272,14 +272,23 @@ class ExitManager:
         return {}
 
     def _hours_to_resolution(self, market_data: dict) -> float:
-        """Extract hours until resolution from a Gamma market dict. Returns 999.0 on missing data."""
+        """Hours until end of the target calendar day (UTC midnight of day+1).
+
+        Gamma's end_date_iso is the date label at midnight start-of-day UTC, not the
+        actual resolution timestamp. We extract the date portion only and compute hours
+        to end-of-day (midnight of the following day UTC).
+        """
         for key in ("end_date_iso", "endDateIso", "endDate", "end_date"):
             val = market_data.get(key)
             if val:
-                end_dt = datetime.fromisoformat(
-                    str(val).replace("Z", "+00:00")
-                ).astimezone(timezone.utc)
-                return max(0.0, (end_dt - datetime.now(timezone.utc)).total_seconds() / 3600)
+                try:
+                    date_str = str(val)[:10]  # "2026-04-08"
+                    end_of_day = datetime.fromisoformat(
+                        date_str + "T00:00:00+00:00"
+                    ) + timedelta(days=1)
+                    return max(0.0, (end_of_day - datetime.now(timezone.utc)).total_seconds() / 3600)
+                except ValueError:
+                    continue
         return 999.0  # unknown — don't gate on gas floor
 
     def _yes_resolution_price(self, market_data: dict) -> float:

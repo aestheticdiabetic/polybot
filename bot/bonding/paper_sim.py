@@ -18,7 +18,7 @@ import logging
 import os
 import sys
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -162,11 +162,14 @@ class PaperExitManager:
             self._record_sell(pos, price)
 
     def _hours_left(self, pos: PaperPosition) -> float:
+        # resolution_time stores Gamma's end_date_iso — midnight start-of-day UTC, not
+        # actual resolution. Extract the date portion and compute end-of-day instead.
         try:
-            end = datetime.fromisoformat(
-                pos.resolution_time.replace("Z", "+00:00")
-            ).astimezone(timezone.utc)
-            return max(0.0, (end - datetime.now(timezone.utc)).total_seconds() / 3600)
+            date_str = pos.resolution_time[:10]  # "2026-04-08"
+            end_of_day = datetime.fromisoformat(
+                date_str + "T00:00:00+00:00"
+            ) + timedelta(days=1)
+            return max(0.0, (end_of_day - datetime.now(timezone.utc)).total_seconds() / 3600)
         except Exception:
             return 999.0
 
