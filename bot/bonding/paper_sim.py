@@ -17,11 +17,13 @@ import json
 import logging
 import os
 import sys
+from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from bonding.market_scanner import scan_weather_markets
-from bonding.opportunity_scorer import score_all
+from bonding.opportunity_scorer import score_all, ScoredOpportunity, TIER_CORE, TIER_SECONDARY, TIER_WING
 from bonding.weather_client import get_all_forecasts
 import config as _config
 from config import LOG_LEVEL
@@ -62,6 +64,195 @@ def _load_seen_market_ids() -> set[str]:
     except Exception:
         pass
     return seen
+
+
+@dataclass
+class PaperPosition:
+    market_id: str
+    token_id: str
+    question: str
+    city: str
+    date: str
+    resolution_time: str   # ISO8601
+    tier: str
+    shares: int
+    side: str              # "YES" or "NO"
+    entry_price: float
+    entry_ts: str          # ISO8601
+    status: str = "OPEN"  # OPEN | SOLD
+    exit_price: Optional[float] = None
+    exit_ts: Optional[str] = None
+    pnl: Optional[float] = None
+
+
+class PaperExitManager:
+    """
+    Tracks open paper positions and logs WOULD_SELL events when exit criteria
+    are met. Receives price updates via on_price_tick(), called by BondPriceFeed
+    on every WS price event — no polling needed.
+
+    Positions are persisted to a JSON ledger alongside the paper trades JSONL so
+    they survive restarts.
+    """
+
+    def __init__(self, paper_log: Path) -> None:
+        self._paper_log = paper_log
+        self._ledger = paper_log.parent / "paper_positions.json"
+        self._positions: dict[str, PaperPosition] = {}  # token_id → position (all statuses)
+        self._load()
+
+    def _load(self) -> None:
+        if not self._ledger.exists():
+            return
+        try:
+            data = json.loads(self._ledger.read_text(encoding="utf-8"))
+            for d in data.get("positions", []):
+                pos = PaperPosition(**d)
+                self._positions[pos.token_id] = pos
+            open_count = sum(1 for p in self._positions.values() if p.status == "OPEN")
+            log.info(f"paper_exit: loaded {open_count} open / {len(self._positions)} total positions")
+        except Exception as exc:
+            log.error(f"paper_exit: failed to load ledger: {exc}")
+
+    def _save(self) -> None:
+        self._ledger.parent.mkdir(parents=True, exist_ok=True)
+        tmp = Path(str(self._ledger) + ".tmp")
+        payload = json.dumps(
+            {"positions": [asdict(p) for p in self._positions.values()]}, indent=2
+        )
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(self._ledger)
+
+    def add_position(self, opp: ScoredOpportunity) -> None:
+        """Record a new open paper position after a WOULD_BUY is logged."""
+        if opp.token_id in self._positions:
+            return  # already tracking this token
+        pos = PaperPosition(
+            market_id=opp.market.market_id,
+            token_id=opp.token_id,
+            question=opp.market.question,
+            city=opp.market.city,
+            date=opp.market.target_date.isoformat(),
+            resolution_time=opp.market.resolution_time.isoformat(),
+            tier=opp.tier,
+            shares=opp.shares,
+            side=opp.outcome,
+            entry_price=opp.side_ask,
+            entry_ts=datetime.now(timezone.utc).isoformat(),
+        )
+        self._positions[pos.token_id] = pos
+        self._save()
+        log.info(
+            f"paper_exit: tracking {pos.city} {pos.side} tier={pos.tier} "
+            f"entry={pos.entry_price:.4f} shares={pos.shares}"
+        )
+
+    async def on_price_tick(self, token_id: str, price: float) -> None:
+        """Called by BondPriceFeed on every WS price event for a tracked token."""
+        pos = self._positions.get(token_id)
+        if pos is None or pos.status != "OPEN":
+            return
+        hours = self._hours_left(pos)
+        if self._should_exit(pos, price, hours):
+            self._record_sell(pos, price)
+
+    def _hours_left(self, pos: PaperPosition) -> float:
+        try:
+            end = datetime.fromisoformat(
+                pos.resolution_time.replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+            return max(0.0, (end - datetime.now(timezone.utc)).total_seconds() / 3600)
+        except Exception:
+            return 999.0
+
+    def _should_exit(self, pos: PaperPosition, price: float, hours: float) -> bool:
+        if price <= 0.0:
+            return False
+        # Rule 1: too close to resolution — gas not worth it (same discipline as live)
+        if hours < _config.BOND_GAS_FLOOR_HOURS:
+            return False
+        # Rule 2: core early exit
+        if pos.tier == TIER_CORE and price >= _config.BOND_EARLY_EXIT_PRICE:
+            return True
+        # Rule 3: 10× on any tier
+        if price >= pos.entry_price * 10:
+            return True
+        # Rule 4: wing/secondary multiplier + absolute gain threshold
+        if pos.tier in (TIER_SECONDARY, TIER_WING):
+            gain = (price - pos.entry_price) * pos.shares
+            if (
+                price >= pos.entry_price * _config.BOND_WING_EXIT_MULTIPLIER
+                and gain >= _config.BOND_WING_MIN_ABS_GAIN
+            ):
+                return True
+        # Rule 5: sub-cent cost basis — hold unless significant reprice
+        if pos.entry_price < 0.01 and price < 0.50:
+            return False
+        return False
+
+    def _record_sell(self, pos: PaperPosition, exit_price: float) -> None:
+        pnl = (exit_price - pos.entry_price) * pos.shares
+        pos.status = "SOLD"
+        pos.exit_price = round(exit_price, 4)
+        pos.exit_ts = datetime.now(timezone.utc).isoformat()
+        pos.pnl = round(pnl, 4)
+        # Patch the original WOULD_BUY entry so the log is self-contained.
+        self._patch_would_buy(pos)
+        record = {
+            "ts":          pos.exit_ts,
+            "event":       "WOULD_SELL",
+            "market_id":   pos.market_id,
+            "question":    pos.question,
+            "city":        pos.city,
+            "date":        pos.date,
+            "tier":        pos.tier,
+            "shares":      pos.shares,
+            "side":        pos.side,
+            "entry_price": pos.entry_price,
+            "exit_price":  pos.exit_price,
+            "pnl":         pos.pnl,
+        }
+        _append_record(record)
+        self._save()
+        log.info(
+            f"WOULD_SELL city={pos.city} side={pos.side} tier={pos.tier} "
+            f"entry={pos.entry_price:.4f} exit={exit_price:.4f} pnl={pnl:+.2f}"
+        )
+
+    def _patch_would_buy(self, pos: PaperPosition) -> None:
+        """
+        Rewrite the JSONL so the original WOULD_BUY entry for this market shows
+        outcome='SOLD', exit_price, and pnl — making the log self-contained.
+        """
+        if not self._paper_log.exists():
+            return
+        try:
+            lines = self._paper_log.read_text(encoding="utf-8").splitlines()
+            patched = []
+            for line in lines:
+                if not line.strip():
+                    patched.append(line)
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    patched.append(line)
+                    continue
+                if (
+                    rec.get("event") == "WOULD_BUY"
+                    and rec.get("market_id") == pos.market_id
+                    and rec.get("outcome") is None
+                ):
+                    rec["outcome"]    = "SOLD"
+                    rec["exit_price"] = pos.exit_price
+                    rec["pnl"]        = pos.pnl
+                    line = json.dumps(rec)
+                patched.append(line)
+            tmp = Path(str(self._paper_log) + ".tmp")
+            tmp.write_text("\n".join(patched) + "\n", encoding="utf-8")
+            tmp.replace(self._paper_log)
+        except Exception as exc:
+            log.error(f"paper_exit: failed to patch WOULD_BUY record: {exc}")
 
 
 def log_opportunity(opp, seen_ids: set[str]) -> bool:

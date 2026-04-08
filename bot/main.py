@@ -267,15 +267,21 @@ async def run_paper_loop(state: StateManager) -> None:
     from bonding.market_scanner import scan_weather_markets
     from bonding.opportunity_scorer import score_all
     from bonding.price_feed import BondPriceFeed
-    from bonding.paper_sim import log_opportunity, _load_seen_market_ids
+    from bonding.paper_sim import log_opportunity, _load_seen_market_ids, PaperExitManager, PAPER_LOG
     from config import BOND_POLL_INTERVAL_SECS, BOND_MAX_MARKETS_PER_RUN
 
     # Load already-logged market IDs so we never double-log across restarts
     seen_ids: set[str] = _load_seen_market_ids()
     log.info(f"PAPER mode: loaded {len(seen_ids)} previously logged market IDs")
 
+    exit_mgr = PaperExitManager(PAPER_LOG)
+
     async def _on_ws_opportunity(opp):
-        log_opportunity(opp, seen_ids)
+        if log_opportunity(opp, seen_ids):
+            exit_mgr.add_position(opp)
+
+    async def _on_price_tick(token_id: str, price: float) -> None:
+        await exit_mgr.on_price_tick(token_id, price)
 
     # Initial scan to pre-populate the feed before the WS connects.
     # This ensures the WebSocket subscribes to all markets immediately on connect
@@ -285,7 +291,7 @@ async def run_paper_loop(state: StateManager) -> None:
     city_date_pairs = list({(m.city, m.target_date) for m in markets})
     forecasts = await get_all_forecasts(city_date_pairs)
 
-    feed = BondPriceFeed(on_opportunity=_on_ws_opportunity)
+    feed = BondPriceFeed(on_opportunity=_on_ws_opportunity, on_price_tick=_on_price_tick)
     feed.update_markets(markets, forecasts)  # pre-populate; WS not connected yet so no resubscribe
     feed_task = asyncio.get_running_loop().create_task(feed.run())  # now connects subscribed
 
@@ -314,6 +320,7 @@ async def run_paper_loop(state: StateManager) -> None:
                 if not feed.is_on_cooldown(opp.token_id):
                     if log_opportunity(opp, seen_ids):
                         feed.mark_cooldown(opp.token_id)
+                        exit_mgr.add_position(opp)
                         logged += 1
 
             state.update_bond_stats({

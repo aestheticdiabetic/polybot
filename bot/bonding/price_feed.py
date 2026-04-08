@@ -38,8 +38,9 @@ class BondPriceFeed:
       3. On each qualifying price event, on_opportunity(ScoredOpportunity) is awaited.
     """
 
-    def __init__(self, on_opportunity):
+    def __init__(self, on_opportunity, on_price_tick=None):
         self._on_opportunity = on_opportunity
+        self._on_price_tick = on_price_tick  # async cb(token_id, price) fired on every WS tick
         self._markets: dict[str, MarketCandidate] = {}        # token_id → candidate
         self._forecasts: dict[tuple, ForecastResult] = {}     # (city, date) → forecast
         self._cooldowns: dict[str, float] = {}                # token_id → last_order_ts
@@ -222,6 +223,10 @@ class BondPriceFeed:
 
         if updated_ask is None or not (0.0 < updated_ask < 1.0):
             return
+
+        # Notify price-tick subscribers (e.g. paper exit manager) before cooldown gate.
+        if self._on_price_tick is not None:
+            await self._on_price_tick(asset_id, updated_ask)
 
         if self.is_on_cooldown(asset_id):
             return
