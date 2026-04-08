@@ -221,6 +221,27 @@ BOND_CITIES: dict[str, tuple[float, float]] = {
     "Lahore":        (31.5204,   74.3587),
     "Dhaka":         (23.8103,   90.4125),
     "Colombo":        (6.9271,   79.8612),
+    # US cities active on Polymarket
+    "San Francisco": (37.7749, -122.4194),
+    "Houston":       (29.7604,  -95.3698),
+    "Dallas":        (32.7767,  -96.7970),
+    "Austin":        (30.2672,  -97.7431),
+    "Denver":        (39.7392, -104.9903),
+    "Atlanta":       (33.7490,  -84.3880),
+    # Europe
+    "Madrid":        (40.4168,   -3.7038),
+    "Milan":         (45.4642,    9.1900),
+    "Warsaw":        (52.2297,   21.0122),
+    "Moscow":        (55.7558,   37.6173),
+    # Middle East
+    "Tel Aviv":      (32.0853,   34.7818),
+    # South Asia
+    "Lucknow":       (26.8467,   80.9462),
+    # China
+    "Wuhan":         (30.5928,  114.3055),
+    "Shenzhen":      (22.5431,  114.0579),
+    # Central America
+    "Panama City":    (8.9936,  -79.5197),
 }
 
 # IANA timezone for each city — used to compute hours until LOCAL day end (not UTC midnight)
@@ -275,6 +296,27 @@ BOND_CITY_TIMEZONES: dict[str, str] = {
     "Lahore":         "Asia/Karachi",
     "Dhaka":          "Asia/Dhaka",
     "Colombo":        "Asia/Colombo",
+    # US cities
+    "San Francisco":  "America/Los_Angeles",
+    "Houston":        "America/Chicago",
+    "Dallas":         "America/Chicago",
+    "Austin":         "America/Chicago",
+    "Denver":         "America/Denver",
+    "Atlanta":        "America/New_York",
+    # Europe
+    "Madrid":         "Europe/Madrid",
+    "Milan":          "Europe/Rome",
+    "Warsaw":         "Europe/Warsaw",
+    "Moscow":         "Europe/Moscow",
+    # Middle East
+    "Tel Aviv":       "Asia/Jerusalem",
+    # South Asia
+    "Lucknow":        "Asia/Kolkata",
+    # China
+    "Wuhan":          "Asia/Shanghai",
+    "Shenzhen":       "Asia/Shanghai",
+    # Central America
+    "Panama City":    "America/Panama",
 }
 
 # City name aliases — maps Polymarket's naming variants to canonical names above
