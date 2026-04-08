@@ -94,9 +94,22 @@ class ExitManager:
             return
 
         for pos in open_pos:
-            current_price = await self._get_current_price(pos.token_id)
-            hours_left    = await self._get_hours_to_resolution(pos.market_id)
+            market_data = await self._fetch_market_data(pos.market_id)
+            hours_left  = self._hours_to_resolution(market_data)
 
+            # Market has already passed its end date — record actual P&L and mark resolved
+            if hours_left <= 0:
+                exit_price = self._yes_resolution_price(market_data)
+                pnl = (exit_price - pos.entry_price) * pos.shares
+                log.info(
+                    f"BOND_RESOLVED market={pos.market_id[:8]} city={pos.city} "
+                    f"tier={pos.tier} entry={pos.entry_price:.4f} "
+                    f"exit={exit_price:.4f} pnl={pnl:+.2f}"
+                )
+                self._mark_resolved(pos.market_id, exit_price)
+                continue
+
+            current_price = await self._get_current_price(pos.token_id)
             if self._should_exit(pos, current_price, hours_left):
                 await self._execute_sell(pos, current_price)
             else:
@@ -213,6 +226,15 @@ class ExitManager:
                 p.exit_time  = datetime.now(timezone.utc).isoformat()
         self._save_positions(positions)
 
+    def _mark_resolved(self, market_id: str, exit_price: float) -> None:
+        positions = self._load_positions()
+        for p in positions:
+            if p.market_id == market_id and p.status == STATUS_OPEN:
+                p.status     = STATUS_RESOLVED
+                p.exit_price = exit_price
+                p.exit_time  = datetime.now(timezone.utc).isoformat()
+        self._save_positions(positions)
+
     # ── External data fetches ─────────────────────────────────────
 
     async def _get_current_price(self, token_id: str) -> float:
@@ -232,8 +254,8 @@ class ExitManager:
             log.debug(f"exit_mgr: price fetch failed for {token_id[:12]}: {exc}")
         return 0.0
 
-    async def _get_hours_to_resolution(self, market_id: str) -> float:
-        """Fetch resolution time from Gamma API. Returns large value on failure."""
+    async def _fetch_market_data(self, market_id: str) -> dict:
+        """Fetch raw Gamma market dict. Returns {} on failure."""
         timeout = aiohttp.ClientTimeout(total=5)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -241,15 +263,40 @@ class ExitManager:
                     f"{GAMMA_API}/markets/{market_id}", timeout=timeout
                 ) as resp:
                     resp.raise_for_status()
-                    data = await resp.json()
-                    for key in ("end_date_iso", "endDateIso", "endDate", "end_date"):
-                        val = data.get(key)
-                        if val:
-                            end_dt = datetime.fromisoformat(
-                                str(val).replace("Z", "+00:00")
-                            ).astimezone(timezone.utc)
-                            now = datetime.now(timezone.utc)
-                            return max(0.0, (end_dt - now).total_seconds() / 3600)
+                    return await resp.json()
         except Exception as exc:
-            log.debug(f"exit_mgr: resolution time fetch failed for {market_id[:8]}: {exc}")
+            log.debug(f"exit_mgr: market data fetch failed for {market_id[:8]}: {exc}")
+        return {}
+
+    def _hours_to_resolution(self, market_data: dict) -> float:
+        """Extract hours until resolution from a Gamma market dict. Returns 999.0 on missing data."""
+        for key in ("end_date_iso", "endDateIso", "endDate", "end_date"):
+            val = market_data.get(key)
+            if val:
+                end_dt = datetime.fromisoformat(
+                    str(val).replace("Z", "+00:00")
+                ).astimezone(timezone.utc)
+                return max(0.0, (end_dt - datetime.now(timezone.utc)).total_seconds() / 3600)
         return 999.0  # unknown — don't gate on gas floor
+
+    def _yes_resolution_price(self, market_data: dict) -> float:
+        """
+        Return the actual payout price for the YES token (1.0 = win, 0.0 = loss).
+        Falls back to 0.0 if the winner cannot be determined.
+        """
+        tokens = market_data.get("tokens", [])
+        for tok in tokens:
+            if str(tok.get("outcome", "")).lower() in ("yes", "1"):
+                winner = tok.get("winner")
+                if winner is True:
+                    return 1.0
+                if winner is False:
+                    return 0.0
+        # Fallback: check top-level resolution field some markets use
+        resolution = str(market_data.get("resolution", "")).upper()
+        if resolution == "YES":
+            return 1.0
+        if resolution == "NO":
+            return 0.0
+        log.debug("exit_mgr: could not determine YES winner from market data, defaulting to 0.0")
+        return 0.0
