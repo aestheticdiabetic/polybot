@@ -277,8 +277,9 @@ async def run_paper_loop(state: StateManager) -> None:
     exit_mgr = PaperExitManager(PAPER_LOG)
 
     async def _on_ws_opportunity(opp):
-        if log_opportunity(opp, seen_ids):
-            exit_mgr.add_position(opp)
+        if not exit_mgr.has_open_position(opp.token_id):
+            if log_opportunity(opp, seen_ids):
+                exit_mgr.add_position(opp)
 
     async def _on_price_tick(token_id: str, price: float) -> None:
         await exit_mgr.on_price_tick(token_id, price)

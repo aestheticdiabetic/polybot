@@ -123,6 +123,11 @@ class PaperExitManager:
         tmp.write_text(payload, encoding="utf-8")
         tmp.replace(self._ledger)
 
+    def has_open_position(self, token_id: str) -> bool:
+        """Return True if there is an OPEN paper position for this token."""
+        pos = self._positions.get(token_id)
+        return pos is not None and pos.status == "OPEN"
+
     def add_position(self, opp: ScoredOpportunity) -> None:
         """Record a new open paper position after a WOULD_BUY is logged."""
         if opp.token_id in self._positions:
