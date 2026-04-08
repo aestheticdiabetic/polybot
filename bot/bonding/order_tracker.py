@@ -38,10 +38,11 @@ class PendingOrder:
     tier: str
     shares: int
     limit_price: float
-    prob_at_placement: float   # forecast probability stored so we can reassess edge
+    prob_at_placement: float   # P(this token resolves $1) at placement time
     placed_at: str             # ISO8601
     resolution_time: str       # ISO8601
     status: str                # PENDING | FILLED | CANCELLED
+    outcome: str = "YES"       # "YES" or "NO"; default preserves existing ledger records
 
 
 class PendingOrderTracker:
@@ -148,7 +149,7 @@ class PendingOrderTracker:
             token_id=order.token_id,
             question=order.question,
             city=order.city,
-            outcome="YES",
+            outcome=order.outcome,
             tier=order.tier,
             shares=order.shares,
             entry_price=order.limit_price,

@@ -124,11 +124,11 @@ async def run_bonding_loop(state: StateManager) -> None:
             opps = score_all(markets, forecasts)
             placed = 0
             for opp in opps[:BOND_MAX_MARKETS_PER_RUN]:
-                if not feed.is_on_cooldown(opp.market.token_id):
+                if not feed.is_on_cooldown(opp.token_id):
                     await _place_bond_order(
                         bond_client, exit_mgr, order_tracker, opp, OrderArgs, OrderType
                     )
-                    feed.mark_cooldown(opp.market.token_id)
+                    feed.mark_cooldown(opp.token_id)
                     placed += 1
 
             state.update_bond_stats({
@@ -173,8 +173,8 @@ async def _place_bond_order(client, exit_mgr, order_tracker, opp, OrderArgs, Ord
     # ── Phase 1: immediate FOK fill ───────────────────────────────
     if opp.shares_immediate > 0:
         fok_args = OrderArgs(
-            token_id=opp.market.token_id,
-            price=opp.market.best_ask,
+            token_id=opp.token_id,
+            price=opp.side_ask,
             size=opp.shares_immediate,
             side="BUY",
         )
@@ -185,18 +185,18 @@ async def _place_bond_order(client, exit_mgr, order_tracker, opp, OrderArgs, Ord
             )
             log.info(
                 f"BOND_FOK_PLACED city={opp.market.city} date={opp.market.target_date} "
-                f"tier={opp.tier} shares={opp.shares_immediate} "
-                f"price={opp.market.best_ask:.4f} ev={opp.ev:.4f}"
+                f"outcome={opp.outcome} tier={opp.tier} shares={opp.shares_immediate} "
+                f"price={opp.side_ask:.4f} ev={opp.ev:.4f}"
             )
             pos = BondPosition(
                 market_id=opp.market.market_id,
-                token_id=opp.market.token_id,
+                token_id=opp.token_id,
                 question=opp.market.question,
                 city=opp.market.city,
-                outcome="YES",
+                outcome=opp.outcome,
                 tier=opp.tier,
                 shares=opp.shares_immediate,
-                entry_price=opp.market.best_ask,
+                entry_price=opp.side_ask,
                 entry_time=datetime.now(timezone.utc).isoformat(),
                 resolution_time=opp.market.resolution_time.isoformat(),
                 status="OPEN",
@@ -211,7 +211,7 @@ async def _place_bond_order(client, exit_mgr, order_tracker, opp, OrderArgs, Ord
     # ── Phase 2: GTC limit for remainder ─────────────────────────
     if opp.shares_limit > 0:
         gtc_args = OrderArgs(
-            token_id=opp.market.token_id,
+            token_id=opp.token_id,
             price=opp.limit_price,
             size=opp.shares_limit,
             side="BUY",
@@ -226,7 +226,7 @@ async def _place_bond_order(client, exit_mgr, order_tracker, opp, OrderArgs, Ord
                 pending = PendingOrder(
                     order_id=order_id,
                     market_id=opp.market.market_id,
-                    token_id=opp.market.token_id,
+                    token_id=opp.token_id,
                     question=opp.market.question,
                     city=opp.market.city,
                     tier=opp.tier,
@@ -236,6 +236,7 @@ async def _place_bond_order(client, exit_mgr, order_tracker, opp, OrderArgs, Ord
                     placed_at=datetime.now(timezone.utc).isoformat(),
                     resolution_time=opp.market.resolution_time.isoformat(),
                     status="PENDING",
+                    outcome=opp.outcome,
                 )
                 await order_tracker.add_order(pending)
             else:
@@ -310,9 +311,9 @@ async def run_paper_loop(state: StateManager) -> None:
             opps = score_all(markets, forecasts)[:BOND_MAX_MARKETS_PER_RUN]
             logged = 0
             for opp in opps:
-                if not feed.is_on_cooldown(opp.market.token_id):
+                if not feed.is_on_cooldown(opp.token_id):
                     if log_opportunity(opp, seen_ids):
-                        feed.mark_cooldown(opp.market.token_id)
+                        feed.mark_cooldown(opp.token_id)
                         logged += 1
 
             state.update_bond_stats({

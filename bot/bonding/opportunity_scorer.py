@@ -31,15 +31,18 @@ _WING_ASK_MIN = 0.001
 class ScoredOpportunity:
     market: MarketCandidate
     forecast: ForecastResult
-    prob: float          # true probability from forecast (0–1)
-    ev: float            # expected value per share = prob*1.0 - best_ask
-    edge: float          # prob - best_ask (true vs implied probability gap)
+    prob: float          # P(this token resolves $1): P(YES) for YES side, P(NO) for NO side
+    ev: float            # expected value per share = prob - side_ask
+    edge: float          # prob - side_ask (true vs implied probability gap)
     tier: str            # CORE | SECONDARY | WING
     shares: int          # total target shares
-    capital: float       # total cost basis = shares * best_ask
+    capital: float       # total cost basis = shares * side_ask
     shares_immediate: int  # shares to buy now via FOK (available at profitable prices)
     shares_limit: int      # shares to queue as GTC limit order
-    limit_price: float     # price for the GTC limit order (= best_ask at scan time)
+    limit_price: float     # price for the GTC limit order (= side_ask at scan time)
+    outcome: str           # "YES" or "NO" — which token to trade
+    token_id: str          # token ID for CLOB orders (YES or NO token)
+    side_ask: float        # best ask for the chosen side
 
 
 def score_all(
@@ -84,13 +87,40 @@ def score_market(
     forecast: ForecastResult,
 ) -> Optional[ScoredOpportunity]:
     """
-    Score a single market. Returns None if it doesn't meet any tier criteria.
+    Score YES and NO sides of a market. Returns the higher-EV side, or None if
+    neither meets tier criteria. Never returns both sides (prevents same-market hedging).
     """
-    ask = market.best_ask
-    if ask <= 0.0 or ask >= 1.0:
+    temp_min, temp_max = _convert_temps(market)
+    if temp_min is None or temp_max is None:
         return None
 
-    # Convert temperature bounds to Celsius if market is in Fahrenheit
+    prob_yes = prob_in_range(forecast, temp_min, temp_max)
+    prob_no  = 1.0 - prob_yes
+
+    yes_opp = _score_side(
+        market=market, forecast=forecast,
+        prob=prob_yes, ask=market.best_ask, ask_book=market.ask_book,
+        token_id=market.token_id, outcome="YES",
+    )
+    no_opp: Optional[ScoredOpportunity] = None
+    if market.no_token_id and market.no_best_ask is not None:
+        no_opp = _score_side(
+            market=market, forecast=forecast,
+            prob=prob_no, ask=market.no_best_ask, ask_book=market.no_ask_book,
+            token_id=market.no_token_id, outcome="NO",
+        )
+
+    if yes_opp is None and no_opp is None:
+        return None
+    if yes_opp is None:
+        return no_opp
+    if no_opp is None:
+        return yes_opp
+    return yes_opp if yes_opp.ev >= no_opp.ev else no_opp
+
+
+def _convert_temps(market: MarketCandidate) -> tuple[Optional[float], Optional[float]]:
+    """Convert market temperature bounds to Celsius."""
     temp_min = market.temp_min
     temp_max = market.temp_max
     if market.unit == "F":
@@ -98,38 +128,44 @@ def score_market(
             temp_min = fahrenheit_to_celsius(temp_min)
         if temp_max is not None:
             temp_max = fahrenheit_to_celsius(temp_max)
+    return temp_min, temp_max
 
-    # Can't compute probability without a bucket
-    if temp_min is None or temp_max is None:
+
+def _score_side(
+    market: MarketCandidate,
+    forecast: ForecastResult,
+    prob: float,
+    ask: float,
+    ask_book: list,
+    token_id: str,
+    outcome: str,
+) -> Optional[ScoredOpportunity]:
+    """
+    Score a single side (YES or NO) of a market.
+    prob = P(this token resolves $1).
+    Returns None if it doesn't meet any tier criteria.
+    """
+    if ask <= 0.0 or ask >= 1.0:
         return None
 
-    prob = prob_in_range(forecast, temp_min, temp_max)
-    ev   = (prob * 1.0) - ask
-    edge = prob - ask
+    ev   = prob - ask
+    edge = ev
 
     tier = assign_tier(ask, ev, prob)
     if tier is None:
         return None
 
-    # All tiers must meet minimum edge floor
     if edge < _config.BOND_EDGE_FLOOR:
         log.debug(
-            f"scorer: {market.city} {market.target_date} ask={ask:.4f} "
+            f"scorer: {market.city} {market.target_date} {outcome} ask={ask:.4f} "
             f"edge={edge:.4f} < BOND_EDGE_FLOOR — skip"
         )
         return None
 
     shares = _shares_for_tier(tier)
-
-    # Compute fill split: how many shares are immediately available at profitable
-    # prices vs how many need a resting GTC limit order.
-    # max_profitable_price = highest price where we still satisfy the edge floor.
     max_profitable_price = prob - _config.BOND_EDGE_FLOOR
-    shares_immediate, shares_limit = _compute_fill_split(
-        market.ask_book, shares, max_profitable_price
-    )
+    shares_immediate, shares_limit = _compute_fill_split(ask_book, shares, max_profitable_price)
 
-    # Need at least something to do
     if shares_immediate == 0 and shares_limit == 0:
         return None
 
@@ -147,6 +183,9 @@ def score_market(
         shares_immediate=shares_immediate,
         shares_limit=shares_limit,
         limit_price=ask,
+        outcome=outcome,
+        token_id=token_id,
+        side_ask=ask,
     )
 
 

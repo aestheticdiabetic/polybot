@@ -9,4 +9,3 @@ __pycache__/
 dist/
 build/
 README.md
-Dockerfile

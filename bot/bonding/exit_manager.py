@@ -99,7 +99,10 @@ class ExitManager:
 
             # Market has already passed its end date — record actual P&L and mark resolved
             if hours_left <= 0:
-                exit_price = self._yes_resolution_price(market_data)
+                if pos.outcome == "NO":
+                    exit_price = self._no_resolution_price(market_data)
+                else:
+                    exit_price = self._yes_resolution_price(market_data)
                 pnl = (exit_price - pos.entry_price) * pos.shares
                 log.info(
                     f"BOND_RESOLVED market={pos.market_id[:8]} city={pos.city} "
@@ -317,4 +320,41 @@ class ExitManager:
             pass
 
         log.debug("exit_mgr: could not determine YES winner from market data, defaulting to 0.0")
+        return 0.0
+
+    def _no_resolution_price(self, market_data: dict) -> float:
+        """
+        Return the actual payout for the NO token (1.0 = win, 0.0 = loss).
+        Exact mirror of _yes_resolution_price() targeting the NO/0 outcome.
+        """
+        # Shape 1: tokens list with explicit winner flag
+        tokens = market_data.get("tokens", [])
+        for tok in tokens:
+            if str(tok.get("outcome", "")).lower() in ("no", "0"):
+                winner = tok.get("winner")
+                if winner is True:
+                    return 1.0
+                if winner is False:
+                    return 0.0
+
+        # Shape 2: top-level resolution string
+        resolution = str(market_data.get("resolution", "")).upper()
+        if resolution == "NO":
+            return 1.0
+        if resolution == "YES":
+            return 0.0
+
+        # Shape 3: outcomePrices snapped to ~1.0 (NegRisk / weather markets)
+        try:
+            raw_outcomes = market_data.get("outcomes", "[]")
+            raw_prices   = market_data.get("outcomePrices", "[]")
+            outcomes = json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
+            prices   = json.loads(raw_prices)   if isinstance(raw_prices,   str) else raw_prices
+            for outcome, price in zip(outcomes, prices):
+                if float(price) >= 0.99:
+                    return 1.0 if str(outcome).lower() in ("no", "0") else 0.0
+        except Exception:
+            pass
+
+        log.debug("exit_mgr: could not determine NO winner from market data, defaulting to 0.0")
         return 0.0

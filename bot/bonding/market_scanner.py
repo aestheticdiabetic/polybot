@@ -45,6 +45,9 @@ class MarketCandidate:
     best_ask: float            # current best ask for YES outcome
     resolution_time: datetime
     ask_book: list = field(default_factory=list)  # [(price, size), ...] ascending; empty = depth unknown
+    no_token_id: Optional[str] = None    # NO outcome token ID; None if not extractable
+    no_best_ask: Optional[float] = None  # current best ask for NO outcome
+    no_ask_book: list = field(default_factory=list)
 
 
 async def scan_weather_markets() -> list[MarketCandidate]:
@@ -114,6 +117,21 @@ async def scan_weather_markets() -> list[MarketCandidate]:
             fail_time += 1
             continue
 
+        # Extract NO token — graceful: skip NO scoring if extraction fails
+        no_token_id, no_gamma_price = _extract_no_token_and_price(m)
+        no_best_ask: Optional[float] = None
+        no_ask_book: list = []
+        if no_token_id:
+            if no_gamma_price is not None and 0.0 < no_gamma_price < 1.0:
+                no_best_ask = no_gamma_price
+            else:
+                no_ask_book = await _get_ask_book(no_token_id)
+                if no_ask_book:
+                    no_best_ask = no_ask_book[0][0]
+            if no_best_ask is not None and not (0.0 < no_best_ask < 1.0):
+                no_best_ask = None
+                no_ask_book = []
+
         candidates.append(MarketCandidate(
             market_id=m.get("id", ""),
             token_id=token_id,
@@ -126,6 +144,9 @@ async def scan_weather_markets() -> list[MarketCandidate]:
             best_ask=best_ask,
             resolution_time=resolution_time,
             ask_book=ask_book,
+            no_token_id=no_token_id,
+            no_best_ask=no_best_ask,
+            no_ask_book=no_ask_book,
         ))
 
     log.info(
@@ -460,6 +481,65 @@ def _extract_yes_token_and_price(market: dict) -> tuple[Optional[str], Optional[
                     break
                 except (ValueError, TypeError):
                     pass
+
+    return token_id, price
+
+
+def _extract_no_token_and_price(market: dict) -> tuple[Optional[str], Optional[float]]:
+    """
+    Extract the token_id AND current price for the NO outcome from a Gamma market dict.
+    Mirrors _extract_yes_token_and_price() but targets the NO/0 outcome.
+
+    Returns (token_id, price) — price is None if not found in Gamma response.
+    """
+    token_id: Optional[str] = None
+    price: Optional[float]  = None
+
+    # Shape 1: tokens list [{"outcome": "No", "token_id": "...", "price": "0.35"}, ...]
+    tokens = market.get("tokens", [])
+    for tok in tokens:
+        if str(tok.get("outcome", "")).lower() in ("no", "0"):
+            token_id = tok.get("token_id") or tok.get("tokenId")
+            raw = tok.get("price")
+            if raw is not None:
+                try:
+                    price = float(raw)
+                except (ValueError, TypeError):
+                    pass
+            break
+
+    # Determine NO index from the outcomes array — do NOT assume index 1 = NO.
+    outcomes = market.get("outcomes", [])
+    no_idx = 1  # default fallback (Polymarket typically puts NO at index 1)
+    for i, o in enumerate(outcomes):
+        if str(o).lower() in ("no", "0"):
+            no_idx = i
+            break
+
+    # Shape 2: clob_token_ids list — parallel to outcomes
+    if not token_id:
+        clob_ids = market.get("clobTokenIds") or market.get("clob_token_ids", [])
+        if isinstance(clob_ids, str):
+            try:
+                clob_ids = json.loads(clob_ids)
+            except Exception:
+                clob_ids = []
+        if len(clob_ids) > no_idx:
+            token_id = clob_ids[no_idx]
+
+    # Price fallback: outcomePrices parallel to outcomes
+    if price is None:
+        outcome_prices = market.get("outcomePrices", [])
+        if isinstance(outcome_prices, str):
+            try:
+                outcome_prices = json.loads(outcome_prices)
+            except Exception:
+                outcome_prices = []
+        if len(outcome_prices) > no_idx:
+            try:
+                price = float(outcome_prices[no_idx])
+            except (ValueError, TypeError):
+                pass
 
     return token_id, price
 

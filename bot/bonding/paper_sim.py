@@ -85,7 +85,8 @@ def log_opportunity(opp, seen_ids: set[str]) -> bool:
         "resolution_time": opp.market.resolution_time.isoformat(),
         "tier":            opp.tier,
         "shares":          opp.shares,
-        "ask":             opp.market.best_ask,
+        "side":            opp.outcome,       # "YES" or "NO" — which token was bet
+        "ask":             opp.side_ask,
         "prob":            round(opp.prob, 4),
         "ev":              round(opp.ev, 4),
         "edge":            round(opp.edge, 4),
@@ -97,8 +98,8 @@ def log_opportunity(opp, seen_ids: set[str]) -> bool:
     _append_record(record)
     log.info(
         f"WOULD_BUY [{record['source'].upper()}] city={opp.market.city} "
-        f"date={opp.market.target_date} tier={opp.tier} shares={opp.shares} "
-        f"ask={opp.market.best_ask:.4f} ev={opp.ev:.4f} edge={opp.edge:.4f}"
+        f"date={opp.market.target_date} side={opp.outcome} tier={opp.tier} shares={opp.shares} "
+        f"ask={opp.side_ask:.4f} ev={opp.ev:.4f} edge={opp.edge:.4f}"
     )
     return True
 

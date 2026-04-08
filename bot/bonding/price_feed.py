@@ -60,19 +60,30 @@ class BondPriceFeed:
         """
         Refresh the tracked market set and forecasts from the latest REST scan.
         Preserves WS-updated prices for markets already in the feed.
+        Registers both YES and NO token IDs so both get WS price events.
         Triggers a WS resubscription if the token set changed.
         """
-        new_ids = {m.token_id for m in candidates}
+        new_ids: set[str] = set()
         old_ids = set(self._markets.keys())
 
         updated: dict[str, MarketCandidate] = {}
         for m in candidates:
+            # Preserve WS-updated YES prices
             existing = self._markets.get(m.token_id)
             if existing is not None:
-                # Keep any WS-updated price and ask_book; refresh metadata from REST
                 m.best_ask = existing.best_ask
                 m.ask_book = existing.ask_book
             updated[m.token_id] = m
+            new_ids.add(m.token_id)
+
+            # Also register NO token — same MarketCandidate object, separate key
+            if m.no_token_id:
+                existing_no = self._markets.get(m.no_token_id)
+                if existing_no is not None:
+                    m.no_best_ask = existing_no.no_best_ask
+                    m.no_ask_book = existing_no.no_ask_book
+                updated[m.no_token_id] = m
+                new_ids.add(m.no_token_id)
 
         self._markets = updated
         self._forecasts = forecasts
@@ -175,6 +186,7 @@ class BondPriceFeed:
             return
 
         market = self._markets[asset_id]
+        is_no_side = (asset_id == market.no_token_id)
         updated_ask: float | None = None
 
         if event.get("asks"):
@@ -190,7 +202,12 @@ class BondPriceFeed:
                     continue
             if levels:
                 levels.sort(key=lambda x: x[0])
-                market.ask_book = levels
+                if is_no_side:
+                    market.no_ask_book = levels
+                    market.no_best_ask = levels[0][0]
+                else:
+                    market.ask_book = levels
+                    market.best_ask = levels[0][0]
                 updated_ask = levels[0][0]
 
         elif event_type == "price_change":
@@ -198,11 +215,13 @@ class BondPriceFeed:
                 updated_ask = float(event["price"])
             except (KeyError, ValueError, TypeError):
                 return
+            if is_no_side:
+                market.no_best_ask = updated_ask
+            else:
+                market.best_ask = updated_ask
 
         if updated_ask is None or not (0.0 < updated_ask < 1.0):
             return
-
-        market.best_ask = updated_ask
 
         if self.is_on_cooldown(asset_id):
             return
@@ -212,11 +231,13 @@ class BondPriceFeed:
             return
 
         opp = score_market(market, forecast)
-        if opp is not None:
+        # Only fire if the scored side matches the token that triggered this event.
+        # Prevents a YES price tick from firing a NO order (or vice versa).
+        if opp is not None and opp.token_id == asset_id:
             self.mark_cooldown(asset_id)
             self.stats["opportunities_fired"] += 1
             log.info(
                 f"feed: WS opportunity city={market.city} date={market.target_date} "
-                f"ask={updated_ask:.4f} ev={opp.ev:.4f} tier={opp.tier}"
+                f"outcome={opp.outcome} ask={updated_ask:.4f} ev={opp.ev:.4f} tier={opp.tier}"
             )
             await self._on_opportunity(opp)
