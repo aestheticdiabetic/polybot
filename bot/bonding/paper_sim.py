@@ -64,8 +64,50 @@ def _load_seen_market_ids() -> set[str]:
     return seen
 
 
+def log_opportunity(opp, seen_ids: set[str]) -> bool:
+    """
+    Log a single scored opportunity to the JSONL file if not already seen.
+
+    Updates seen_ids in-place. Returns True if logged, False if skipped.
+    Used by both the REST fallback pass and the WS price-feed callback.
+    """
+    if opp.market.market_id in seen_ids:
+        return False
+
+    seen_ids.add(opp.market.market_id)
+    record = {
+        "ts":              datetime.now(timezone.utc).isoformat(),
+        "event":           "WOULD_BUY",
+        "market_id":       opp.market.market_id,
+        "question":        opp.market.question,
+        "city":            opp.market.city,
+        "date":            opp.market.target_date.isoformat(),
+        "resolution_time": opp.market.resolution_time.isoformat(),
+        "tier":            opp.tier,
+        "shares":          opp.shares,
+        "ask":             opp.market.best_ask,
+        "prob":            round(opp.prob, 4),
+        "ev":              round(opp.ev, 4),
+        "edge":            round(opp.edge, 4),
+        "capital":         round(opp.capital, 4),
+        "outcome":         None,  # filled post-resolution by analysis script
+        "pnl":             None,
+        "source":          "ws" if opp.market.ask_book else "rest",
+    }
+    _append_record(record)
+    log.info(
+        f"WOULD_BUY [{record['source'].upper()}] city={opp.market.city} "
+        f"date={opp.market.target_date} tier={opp.tier} shares={opp.shares} "
+        f"ask={opp.market.best_ask:.4f} ev={opp.ev:.4f} edge={opp.edge:.4f}"
+    )
+    return True
+
+
 async def run_cycle() -> int:
-    """Run one scan cycle. Returns number of new opportunities logged."""
+    """
+    Run one REST scan cycle. Returns number of new opportunities logged.
+    Used by the standalone runner; the main loop uses BondPriceFeed directly.
+    """
     markets = await scan_weather_markets()
     if not markets:
         log.info("paper_sim: no markets found this cycle")
@@ -76,45 +118,17 @@ async def run_cycle() -> int:
 
     opps = score_all(markets, forecasts)[:_config.BOND_MAX_MARKETS_PER_RUN]
 
-    # De-duplicate: skip markets already paper-traded this run
     seen_ids = _load_seen_market_ids()
-    new_opps = [o for o in opps if o.market.market_id not in seen_ids]
-    skipped = len(opps) - len(new_opps)
+    logged = sum(1 for opp in opps if log_opportunity(opp, seen_ids))
+    skipped = len(opps) - logged
     if skipped:
         log.info(f"paper_sim: skipped {skipped} already-logged market(s)")
-    if not new_opps:
+    if not logged:
         log.info("paper_sim: no new opportunities this cycle")
         return 0
 
-    ts = datetime.now(timezone.utc).isoformat()
-    for opp in new_opps:
-        record = {
-            "ts":              ts,
-            "event":           "WOULD_BUY",
-            "market_id":       opp.market.market_id,
-            "question":        opp.market.question,
-            "city":            opp.market.city,
-            "date":            opp.market.target_date.isoformat(),
-            "resolution_time": opp.market.resolution_time.isoformat(),
-            "tier":            opp.tier,
-            "shares":          opp.shares,
-            "ask":             opp.market.best_ask,
-            "prob":            round(opp.prob, 4),
-            "ev":              round(opp.ev, 4),
-            "edge":            round(opp.edge, 4),
-            "capital":         round(opp.capital, 4),
-            "outcome":         None,  # filled in post-resolution by analysis script
-            "pnl":             None,
-        }
-        _append_record(record)
-        log.info(
-            f"WOULD_BUY city={opp.market.city} date={opp.market.target_date} "
-            f"tier={opp.tier} shares={opp.shares} ask={opp.market.best_ask:.4f} "
-            f"ev={opp.ev:.4f} edge={opp.edge:.4f}"
-        )
-
-    log.info(f"paper_sim: cycle complete — {len(new_opps)} new opportunities logged to {PAPER_LOG}")
-    return len(new_opps)
+    log.info(f"paper_sim: cycle complete — {logged} new opportunities logged to {PAPER_LOG}")
+    return logged
 
 
 async def run() -> None:

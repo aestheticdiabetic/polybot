@@ -243,33 +243,80 @@ async def _place_bond_order(client, exit_mgr, order_tracker, opp, OrderArgs, Ord
 
 
 async def run_paper_loop(state: StateManager) -> None:
-    """PAPER mode — runs paper_sim scan cycles, controlled via dashboard Start/Stop."""
-    from bonding.paper_sim import run_cycle
-    from config import BOND_POLL_INTERVAL_SECS
+    """PAPER mode — mirrors live bonding loop with WS prices, but logs instead of placing orders.
+
+    Architecture matches run_bonding_loop exactly:
+    - REST scan every BOND_POLL_INTERVAL_SECS discovers new/closed markets.
+    - BondPriceFeed subscribes via WS and calls back on every qualifying price tick.
+    - Per-market deduplication via seen_ids (loaded from JSONL at startup) prevents
+      logging the same market opportunity more than once across restarts.
+    - REST fallback pass catches markets with no recent WS events.
+    """
+    from bonding.weather_client import get_all_forecasts
+    from bonding.market_scanner import scan_weather_markets
+    from bonding.opportunity_scorer import score_all
+    from bonding.price_feed import BondPriceFeed
+    from bonding.paper_sim import log_opportunity, _load_seen_market_ids
+    from config import BOND_POLL_INTERVAL_SECS, BOND_MAX_MARKETS_PER_RUN
+
+    # Load already-logged market IDs so we never double-log across restarts
+    seen_ids: set[str] = _load_seen_market_ids()
+    log.info(f"PAPER mode: loaded {len(seen_ids)} previously logged market IDs")
+
+    async def _on_ws_opportunity(opp):
+        log_opportunity(opp, seen_ids)
+
+    feed = BondPriceFeed(on_opportunity=_on_ws_opportunity)
+    feed_task = asyncio.get_running_loop().create_task(feed.run())
 
     state.set_running(True)
-    log.info(f"PolyBot PAPER mode starting — poll_interval={BOND_POLL_INTERVAL_SECS}s")
+    log.info(
+        f"PolyBot PAPER mode starting — "
+        f"discovery_interval={BOND_POLL_INTERVAL_SECS}s (WS for real-time prices)"
+    )
 
     cycle = 0
     while state.is_running():
         cycle += 1
         cycle_start = time.time()
         try:
-            found = await run_cycle()
+            markets = await scan_weather_markets()
+
+            city_date_pairs = list({(m.city, m.target_date) for m in markets})
+            forecasts = await get_all_forecasts(city_date_pairs)
+
+            # Update WS feed — resubscribes automatically if market set changed
+            feed.update_markets(markets, forecasts)
+
+            # Fallback REST scoring pass: catches markets with no recent WS events
+            opps = score_all(markets, forecasts)[:BOND_MAX_MARKETS_PER_RUN]
+            logged = 0
+            for opp in opps:
+                if not feed.is_on_cooldown(opp.market.token_id):
+                    if log_opportunity(opp, seen_ids):
+                        feed.mark_cooldown(opp.market.token_id)
+                        logged += 1
+
             state.update_bond_stats({
-                "cycle":              cycle,
-                "last_cycle_at":      time.time(),
-                "cycle_duration_s":   round(time.time() - cycle_start, 1),
-                "markets_scanned":    found,
-                "opportunities_found": found,
-                "orders_placed":      0,  # paper mode — no real orders
+                "cycle":               cycle,
+                "last_cycle_at":       time.time(),
+                "cycle_duration_s":    round(time.time() - cycle_start, 1),
+                "markets_scanned":     len(markets),
+                "opportunities_found": len(opps),
+                "orders_placed":       logged,  # "placed" = logged in paper mode
+                "ws_price_events":     feed.stats["price_events"],
+                "ws_opportunities":    feed.stats["opportunities_fired"],
+                "ws_reconnects":       feed.stats["ws_reconnects"],
             })
+
         except asyncio.CancelledError:
+            feed_task.cancel()
             break
         except Exception as exc:
             log.error(f"Paper sim loop error: {exc}", exc_info=True)
         await asyncio.sleep(BOND_POLL_INTERVAL_SECS)
 
+    await feed.stop()
     state.set_running(False)
     log.info("PAPER mode stopped cleanly")
 
