@@ -4,6 +4,7 @@ market_scanner.py — Poll Polymarket Gamma API for open weather/temperature mar
 Read-only. Parses natural language market questions to extract structured data
 (city, date, temperature bucket). No orders are placed here.
 """
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -412,6 +413,11 @@ def _extract_yes_token_and_price(market: dict) -> tuple[Optional[str], Optional[
     # Shape 2: clob_token_ids list — parallel to outcomes
     if not token_id:
         clob_ids = market.get("clobTokenIds") or market.get("clob_token_ids", [])
+        if isinstance(clob_ids, str):
+            try:
+                clob_ids = json.loads(clob_ids)
+            except Exception:
+                clob_ids = []
         if len(clob_ids) > yes_idx:
             token_id = clob_ids[yes_idx]
         elif clob_ids:
@@ -424,6 +430,11 @@ def _extract_yes_token_and_price(market: dict) -> tuple[Optional[str], Optional[
     # Price fallback: outcomePrices parallel to outcomes
     if price is None:
         outcome_prices = market.get("outcomePrices", [])
+        if isinstance(outcome_prices, str):
+            try:
+                outcome_prices = json.loads(outcome_prices)
+            except Exception:
+                outcome_prices = []
         if len(outcome_prices) > yes_idx:
             try:
                 price = float(outcome_prices[yes_idx])
