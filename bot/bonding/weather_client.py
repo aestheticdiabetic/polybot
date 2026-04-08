@@ -1,9 +1,15 @@
 """
-weather_client.py — Fetch city temperature forecasts from Open-Meteo ensemble API.
+weather_client.py — Fetch city temperature forecasts from Open-Meteo.
 
-Uses the GFS Seamless ensemble model (30 members) to obtain a true empirical
-probability distribution over daily maximum temperatures, replacing the previous
-Gaussian approximation that was inflated by diurnal spread.
+Two-source strategy based on time-to-resolution:
+
+  ≥ 2 days out   → GFS Seamless ensemble (30 members, 6-hourly updates)
+                    Proper probabilistic spread over daily maximum temperatures.
+
+  Today/tomorrow → Open-Meteo hourly forecast API (1-2 hourly updates)
+                   Past hours are model-analysis (observation-blended), giving a
+                   hard running-maximum floor for same-day markets. Synthetic
+                   ensemble members capture remaining forecast uncertainty.
 
 No API key required. Free tier limits:
   - 10,000 calls/day
@@ -11,10 +17,8 @@ No API key required. Free tier limits:
   -    600 calls/minute
 
 Rate limiting notes:
-- Ensemble requests fetch `temperature_2m_max` + 30 member variables = 31 vars.
-  Open-Meteo counts this as ~3.1 API calls per request (>10 vars threshold).
-- Disk-persistent cache (2h TTL) keeps daily usage well under 10k even at scale.
-- Batch all dates for a city into a single API call (date range fetch).
+- Ensemble requests count as ~3.1 API calls (>10 vars). Hourly = 1 call.
+- Both caches are disk-persistent (ensemble 2h TTL, near-term 1h TTL).
 - Strict serial rate limiter: min 3s between requests (~20 req/min).
 """
 import asyncio
@@ -22,9 +26,10 @@ import collections
 import json
 import logging
 import os
+import random
 import time
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import aiohttp
@@ -32,26 +37,35 @@ import config as _config
 
 log = logging.getLogger("bond.weather")
 
-OPEN_METEO_ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
-ENSEMBLE_MODEL = "gfs_seamless"  # 30 members, global coverage, free tier
+OPEN_METEO_ENSEMBLE_URL  = "https://ensemble-api.open-meteo.com/v1/ensemble"
+OPEN_METEO_FORECAST_URL  = "https://api.open-meteo.com/v1/forecast"
+ENSEMBLE_MODEL           = "gfs_seamless"  # 30 members, global coverage, free tier
 
-# In-memory TTL: re-check if data is older than 30 min within a session
-MEM_CACHE_TTL_SECS  = 1800   # 30 minutes
-# Disk TTL: don't re-fetch from API if disk entry is fresher than 2 hours
-DISK_CACHE_TTL_SECS = 7200   # 2 hours
+# Use hourly API when target date is today or tomorrow
+NEARTERM_THRESHOLD_DAYS = 2
 
-DISK_CACHE_PATH = os.environ.get("WEATHER_CACHE_PATH", "/app/data/ensemble_cache.json")
+# ── Cache TTLs ────────────────────────────────────────────────────────────────
+DISK_CACHE_TTL_SECS      = 7200   # 2 hours — ensemble data
+NEARTERM_CACHE_TTL_SECS  = 3600   # 1 hour  — near-term hourly data
 
-# Minimum seconds between consecutive API requests.
-# 3s = ~20 req/min — well under the 600/min Open-Meteo limit.
+DISK_CACHE_PATH          = os.environ.get("WEATHER_CACHE_PATH",  "/app/data/ensemble_cache.json")
+NEARTERM_DISK_CACHE_PATH = os.environ.get("NEARTERM_CACHE_PATH", "/app/data/nearterm_cache.json")
+
+# Near-term forecast uncertainty: std dev of synthetic ensemble members (°C).
+# Calibrated to typical Open-Meteo short-range RMSE for daily max temperature.
+NEARTERM_SIGMA_SAME_DAY = 1.0   # same-day (observed hours give hard running-max floor)
+NEARTERM_SIGMA_NEXT_DAY = 1.5   # next-day (full day still ahead)
+NEARTERM_MEMBERS        = 100   # synthetic member count (finer resolution than 30)
+
+# Minimum seconds between consecutive API requests (~20 req/min, well under 600/min limit)
 _MIN_REQUEST_INTERVAL = 3.0
 
-# Open-Meteo free-tier hard limits (enforced via sliding-window counters below)
+# Open-Meteo free-tier hard limits
 _LIMIT_PER_MINUTE = 600
 _LIMIT_PER_HOUR   = 5_000
 _LIMIT_PER_DAY    = 10_000
 
-# Timestamps of every successful API call in the last 24 hours.
+# Timestamps of every successful API call in the last 24 hours
 _api_call_log: collections.deque[float] = collections.deque()
 
 
@@ -63,16 +77,21 @@ class UnknownCityError(ValueError):
 class ForecastResult:
     city: str
     target_date: date
-    daily_max_c: float          # ensemble control run daily high (°C)
-    ensemble_members: list[float]  # daily max from each ensemble member (°C)
+    daily_max_c: float            # ensemble control or hourly forecast daily high (°C)
+    ensemble_members: list[float] # daily max from each member (real or synthetic) (°C)
 
 
-# ── In-memory cache: (lat, lon, start_date_str, end_date_str) → (fetched_at, raw) ─
+# ── Ensemble cache (disk-persistent, 2h TTL) ─────────────────────────────────
 _cache: dict[tuple, tuple[float, dict]] = {}
 _cache_lock = asyncio.Lock()
 _disk_cache_loaded = False
 
-# Serial rate limiter
+# ── Near-term cache (disk-persistent, 1h TTL) ────────────────────────────────
+_nearterm_cache: dict[tuple, tuple[float, dict]] = {}
+_nearterm_cache_lock = asyncio.Lock()
+_nearterm_disk_cache_loaded = False
+
+# Serial rate limiter (shared by all API calls)
 _rate_lock: Optional[asyncio.Lock] = None
 _last_request_time: float = 0.0
 
@@ -125,6 +144,8 @@ def _record_api_call() -> None:
     _api_call_log.append(time.time())
 
 
+# ── Ensemble disk cache ───────────────────────────────────────────────────────
+
 def _load_disk_cache() -> None:
     global _disk_cache_loaded
     if _disk_cache_loaded:
@@ -143,7 +164,7 @@ def _load_disk_cache() -> None:
                 _cache[key] = (entry["fetched_at"], entry["data"])
                 loaded += 1
         if loaded:
-            log.info(f"weather: loaded {loaded} entries from disk cache ({DISK_CACHE_PATH})")
+            log.info(f"weather: loaded {loaded} ensemble entries from disk ({DISK_CACHE_PATH})")
     except FileNotFoundError:
         pass
     except Exception as exc:
@@ -167,28 +188,92 @@ def _save_disk_cache() -> None:
         log.warning(f"weather: failed to save disk cache: {exc}")
 
 
+# ── Near-term disk cache ──────────────────────────────────────────────────────
+
+def _load_nearterm_disk_cache() -> None:
+    global _nearterm_disk_cache_loaded
+    if _nearterm_disk_cache_loaded:
+        return
+    _nearterm_disk_cache_loaded = True
+    try:
+        with open(NEARTERM_DISK_CACHE_PATH) as f:
+            saved: dict = json.load(f)
+        now = time.time()
+        loaded = 0
+        for key_str, entry in saved.items():
+            age = now - entry.get("fetched_at", 0)
+            if age < NEARTERM_CACHE_TTL_SECS:
+                parts = key_str.split("|")
+                key = (float(parts[0]), float(parts[1]), parts[2])
+                _nearterm_cache[key] = (entry["fetched_at"], entry["data"])
+                loaded += 1
+        if loaded:
+            log.info(f"weather: loaded {loaded} nearterm entries from disk ({NEARTERM_DISK_CACHE_PATH})")
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        log.warning(f"weather: failed to load nearterm disk cache: {exc}")
+
+
+def _save_nearterm_disk_cache() -> None:
+    try:
+        os.makedirs(os.path.dirname(NEARTERM_DISK_CACHE_PATH), exist_ok=True)
+        now = time.time()
+        to_save: dict = {}
+        for key, (fetched_at, data) in _nearterm_cache.items():
+            if now - fetched_at < NEARTERM_CACHE_TTL_SECS:
+                key_str = f"{key[0]}|{key[1]}|{key[2]}"
+                to_save[key_str] = {"fetched_at": fetched_at, "data": data}
+        tmp = NEARTERM_DISK_CACHE_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(to_save, f)
+        os.replace(tmp, NEARTERM_DISK_CACHE_PATH)
+    except Exception as exc:
+        log.warning(f"weather: failed to save nearterm disk cache: {exc}")
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
 async def get_forecast(city: str, target_date: date) -> ForecastResult:
     """
-    Return ensemble forecast for a single city on target_date.
+    Return forecast for a single city on target_date.
+    Routes to the hourly API for today/tomorrow, ensemble for 2+ days out.
     Raises UnknownCityError if city cannot be resolved.
     """
     canonical, lat, lon = _resolve_city(city)
-    raw = await _fetch_ensemble_range(lat, lon, target_date, target_date)
-    return _parse_ensemble_from_range(canonical, target_date, raw)
+    today = date.today()
+    nearterm_cutoff = today + timedelta(days=NEARTERM_THRESHOLD_DAYS - 1)
+
+    if target_date <= nearterm_cutoff:
+        raw = await _fetch_nearterm_hourly(lat, lon, target_date)
+        return _parse_nearterm_forecast(canonical, target_date, raw)
+    else:
+        raw = await _fetch_ensemble_range(lat, lon, target_date, target_date)
+        return _parse_ensemble_from_range(canonical, target_date, raw)
 
 
 async def get_all_forecasts(
     city_date_pairs: list[tuple[str, date]],
 ) -> dict[tuple[str, date], ForecastResult]:
     """
-    Batch-fetch ensemble forecasts for all (city, date) pairs.
-    Groups dates by city so each city requires only ONE API call (date range).
-    De-dupes identical requests. Returns dict keyed by (canonical_city, date).
-    Unknown cities are logged and skipped (not raised).
-    """
-    max_forecast_date = date.today() + timedelta(days=16)
+    Batch-fetch forecasts for all (city, date) pairs.
 
-    loc_map: dict[tuple[float, float], tuple[str, float, float, set[date]]] = {}
+    Routing:
+      - today / tomorrow  → Open-Meteo hourly API (1-2h update cadence)
+      - 2+ days out       → GFS ensemble (6h update cadence, 30 members)
+
+    Ensemble dates are grouped by city into a single range request.
+    Near-term dates are fetched individually (one request per city per date).
+    Returns dict keyed by (canonical_city, date).
+    Unknown cities are logged and skipped.
+    """
+    today = date.today()
+    nearterm_cutoff = today + timedelta(days=NEARTERM_THRESHOLD_DAYS - 1)
+    max_forecast_date = today + timedelta(days=16)
+
+    nearterm_loc: dict[tuple, list] = {}  # loc_key -> [canonical, lat, lon, set[date]]
+    ensemble_loc: dict[tuple, list] = {}
+
     skipped_future = 0
     for city, d in city_date_pairs:
         if d > max_forecast_date:
@@ -199,40 +284,53 @@ async def get_all_forecasts(
         except UnknownCityError:
             log.warning(f"weather: skipping unknown city '{city}'")
             continue
+
         loc_key = (round(lat, 4), round(lon, 4))
-        if loc_key not in loc_map:
-            loc_map[loc_key] = (canonical, lat, lon, set())
-        loc_map[loc_key][3].add(d)
+        target_map = nearterm_loc if d <= nearterm_cutoff else ensemble_loc
+
+        if loc_key not in target_map:
+            target_map[loc_key] = [canonical, lat, lon, set()]
+        target_map[loc_key][3].add(d)
 
     if skipped_future:
-        log.info(f"weather: skipped {skipped_future} pairs with dates beyond 16-day forecast window")
+        log.info(f"weather: skipped {skipped_future} pairs beyond 16-day forecast window")
 
-    unique_pairs = sum(len(v[3]) for v in loc_map.values())
+    n_nearterm = sum(len(v[3]) for v in nearterm_loc.values())
+    n_ensemble = sum(len(v[3]) for v in ensemble_loc.values())
     log.info(
-        f"BOND_WEATHER_FETCH unique_pairs={unique_pairs} "
-        f"city_requests={len(loc_map)} model={ENSEMBLE_MODEL} (serial, {_MIN_REQUEST_INTERVAL}s interval)"
+        f"BOND_WEATHER_FETCH nearterm={n_nearterm} ensemble={n_ensemble} "
+        f"model={ENSEMBLE_MODEL} (serial, {_MIN_REQUEST_INTERVAL}s interval)"
     )
 
     results: dict[tuple[str, date], ForecastResult] = {}
     failed = 0
 
-    for canonical, lat, lon, dates in loc_map.values():
-        start_d = min(dates)
-        end_d = max(dates)
+    # Near-term: one API call per city per date
+    for canonical, lat, lon, dates in nearterm_loc.values():
+        for d in sorted(dates):
+            try:
+                raw = await _fetch_nearterm_hourly(lat, lon, d)
+                results[(canonical, d)] = _parse_nearterm_forecast(canonical, d, raw)
+            except Exception as exc:
+                log.warning(f"weather: nearterm fetch failed {canonical} {d}: {exc}")
+                failed += 1
+
+    # Ensemble: one API call per city (date range)
+    for canonical, lat, lon, dates in ensemble_loc.values():
+        start_d, end_d = min(dates), max(dates)
         try:
             raw = await _fetch_ensemble_range(lat, lon, start_d, end_d)
             for d in dates:
                 try:
-                    result = _parse_ensemble_from_range(canonical, d, raw)
-                    results[(canonical, d)] = result
+                    results[(canonical, d)] = _parse_ensemble_from_range(canonical, d, raw)
                 except Exception as exc:
-                    log.warning(f"weather: failed to parse {canonical} {d}: {exc}")
+                    log.warning(f"weather: ensemble parse failed {canonical} {d}: {exc}")
                     failed += 1
         except Exception as exc:
-            log.warning(f"weather: failed to fetch {canonical} {start_d}–{end_d}: {exc}")
+            log.warning(f"weather: ensemble fetch failed {canonical} {start_d}–{end_d}: {exc}")
             failed += len(dates)
 
-    fetched = unique_pairs - failed
+    fetched = (n_nearterm + n_ensemble) - failed
     log.info(f"BOND_WEATHER_DONE fetched={fetched} failed={failed}")
     return results
 
@@ -244,10 +342,7 @@ def prob_in_range(
 ) -> float:
     """
     Return empirical probability (0–1) that the day's high falls in [temp_min, temp_max].
-
-    Counts ensemble members whose predicted daily maximum falls within the range.
-    With 30 GFS members the resolution is 1/30 ≈ 3.3 percentage points.
-    Falls back to 0.0 if no members are available.
+    Works identically for real GFS ensemble members and synthetic near-term members.
     """
     members = forecast.ensemble_members
     if not members:
@@ -299,7 +394,7 @@ async def geocode_city(name: str) -> tuple[str, float, float]:
     return display, float(r["latitude"]), float(r["longitude"])
 
 
-# ── Internal helpers ──────────────────────────────────────────────
+# ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _resolve_city(city_name: str) -> tuple[str, float, float]:
     """
@@ -330,26 +425,170 @@ def _resolve_city(city_name: str) -> tuple[str, float, float]:
     raise UnknownCityError(f"Cannot resolve city '{city_name}' to coordinates")
 
 
+async def _fetch_nearterm_hourly(lat: float, lon: float, target_date: date) -> dict:
+    """
+    Fetch hourly temperature_2m for a single day from Open-Meteo forecast API.
+    Updated every 1-2 hours — much fresher than the 6-hourly GFS ensemble.
+    Past hours in the response are model-analysis (observation-blended).
+    Uses the shared serial rate limiter and 1-hour disk cache.
+    """
+    global _last_request_time
+
+    _load_nearterm_disk_cache()
+
+    cache_key = (round(lat, 4), round(lon, 4), target_date.isoformat())
+
+    async with _nearterm_cache_lock:
+        if cache_key in _nearterm_cache:
+            fetched_at, data = _nearterm_cache[cache_key]
+            if time.time() - fetched_at < NEARTERM_CACHE_TTL_SECS:
+                return data
+
+    params = {
+        "latitude":   lat,
+        "longitude":  lon,
+        "hourly":     "temperature_2m",
+        "timezone":   "auto",
+        "start_date": target_date.isoformat(),
+        "end_date":   target_date.isoformat(),
+    }
+    timeout = aiohttp.ClientTimeout(total=20)
+
+    async with _get_rate_lock():
+        gap = time.time() - _last_request_time
+        if gap < _MIN_REQUEST_INTERVAL:
+            await asyncio.sleep(_MIN_REQUEST_INTERVAL - gap)
+
+        _check_limits()
+
+        for attempt in range(5):
+            try:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(OPEN_METEO_FORECAST_URL, params=params) as resp:
+                        if resp.status == 429:
+                            wait = _MIN_REQUEST_INTERVAL * (2 ** attempt)
+                            log.warning(
+                                f"Open-Meteo forecast 429 at ({lat:.2f},{lon:.2f}) "
+                                f"{target_date} — retry in {wait:.1f}s (attempt {attempt+1}/5)"
+                            )
+                            await asyncio.sleep(wait)
+                            continue
+                        resp.raise_for_status()
+                        data = await resp.json()
+                        break
+            except aiohttp.ClientResponseError as exc:
+                if exc.status == 429 and attempt < 4:
+                    wait = _MIN_REQUEST_INTERVAL * (2 ** attempt)
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+        else:
+            raise RuntimeError(
+                f"Open-Meteo forecast rate limit: max retries for ({lat:.2f},{lon:.2f})"
+            )
+
+        _last_request_time = time.time()
+        _record_api_call()
+
+    async with _nearterm_cache_lock:
+        _nearterm_cache[cache_key] = (time.time(), data)
+
+    _save_nearterm_disk_cache()
+    return data
+
+
+def _parse_nearterm_forecast(city: str, target_date: date, raw: dict) -> ForecastResult:
+    """
+    Parse Open-Meteo hourly forecast for a near-term market (today or tomorrow).
+
+    Same-day markets:
+      Past hours are model-analysis (observation-blended) and provide a hard
+      running-maximum floor. If the running max already exceeds the temperature
+      bucket being tested, probability collapses to zero automatically.
+      Remaining hours use sigma=1.0°C uncertainty.
+
+    Next-day markets:
+      The full day is forecast; sigma=1.5°C reflects typical 24-48h RMSE.
+
+    Returns NEARTERM_MEMBERS synthetic ensemble members drawn from
+    N(forecast_max, sigma²), each floored at the observed running maximum.
+    """
+    hourly = raw.get("hourly", {})
+    times: list[str] = hourly.get("time", [])
+    temps: list      = hourly.get("temperature_2m", [])
+
+    date_str = target_date.isoformat()
+    day_temps = [
+        float(t) for ts, t in zip(times, temps)
+        if ts.startswith(date_str) and t is not None
+    ]
+    if not day_temps:
+        raise ValueError(f"No hourly temps for {city} {date_str}")
+
+    forecast_max = max(day_temps)
+    today = date.today()
+    running_max: Optional[float] = None
+
+    if target_date == today:
+        utc_offset_secs: int = raw.get("utc_offset_seconds", 0)
+        local_ts = datetime.now(timezone.utc).timestamp() + utc_offset_secs
+        current_hour_local = int((local_ts % 86400) // 3600)
+
+        observed = [
+            float(t) for ts, t in zip(times, temps)
+            if ts.startswith(date_str) and t is not None
+            and int(ts[11:13]) <= current_hour_local
+        ]
+        running_max = max(observed) if observed else None
+        sigma = NEARTERM_SIGMA_SAME_DAY
+    else:
+        sigma = NEARTERM_SIGMA_NEXT_DAY
+
+    # Synthetic ensemble: N(forecast_max, sigma²), floored at observed running max
+    members = [
+        max(random.gauss(forecast_max, sigma), running_max)
+        if running_max is not None
+        else random.gauss(forecast_max, sigma)
+        for _ in range(NEARTERM_MEMBERS)
+    ]
+
+    control = max(forecast_max, running_max) if running_max is not None else forecast_max
+
+    log.debug(
+        f"weather nearterm: {city} {date_str} "
+        f"forecast_max={forecast_max:.1f}°C "
+        f"running_max={f'{running_max:.1f}' if running_max is not None else 'n/a'}°C "
+        f"sigma={sigma}"
+    )
+
+    return ForecastResult(
+        city=city,
+        target_date=target_date,
+        daily_max_c=control,
+        ensemble_members=members,
+    )
+
+
 async def _fetch_ensemble_range(
     lat: float, lon: float, start_date: date, end_date: date
 ) -> dict:
     """
     Fetch GFS ensemble daily max temperatures for a date range.
-    Checks disk cache (DISK_CACHE_TTL_SECS), then in-memory (MEM_CACHE_TTL_SECS).
-    Uses serial rate limiter between live requests.
+    Disk-persistent 2-hour cache. Uses shared serial rate limiter.
     """
     global _last_request_time
 
     _load_disk_cache()
 
     start_str = start_date.isoformat()
-    end_str = end_date.isoformat()
+    end_str   = end_date.isoformat()
     cache_key = (round(lat, 4), round(lon, 4), start_str, end_str)
 
     async with _cache_lock:
         if cache_key in _cache:
             fetched_at, data = _cache[cache_key]
-            if time.time() - fetched_at < MEM_CACHE_TTL_SECS:
+            # Use DISK_CACHE_TTL_SECS so disk-loaded entries survive restarts
+            if time.time() - fetched_at < DISK_CACHE_TTL_SECS:
                 return data
 
     params = {
@@ -361,7 +600,6 @@ async def _fetch_ensemble_range(
         "start_date": start_str,
         "end_date":   end_str,
     }
-
     timeout = aiohttp.ClientTimeout(total=20)
 
     async with _get_rate_lock():
@@ -403,9 +641,8 @@ async def _fetch_ensemble_range(
         _last_request_time = time.time()
         _record_api_call()
 
-    now = time.time()
     async with _cache_lock:
-        _cache[cache_key] = (now, data)
+        _cache[cache_key] = (time.time(), data)
 
     _save_disk_cache()
     return data
@@ -433,7 +670,6 @@ def _parse_ensemble_from_range(city: str, target_date: date, raw: dict) -> Forec
         raise ValueError(f"Missing temperature_2m_max in ensemble response for {city}")
     daily_max_c: float = control_series[day_idx]
 
-    # Collect all member series dynamically (member01, member02, ...)
     members: list[float] = []
     for key, series in daily.items():
         if key.startswith("temperature_2m_max_member") and isinstance(series, list):
@@ -446,7 +682,7 @@ def _parse_ensemble_from_range(city: str, target_date: date, raw: dict) -> Forec
         members = [daily_max_c]
 
     log.debug(
-        f"weather: {city} {date_str} control={daily_max_c:.1f}°C "
+        f"weather ensemble: {city} {date_str} control={daily_max_c:.1f}°C "
         f"members={len(members)} range=[{min(members):.1f}, {max(members):.1f}]°C"
     )
 
