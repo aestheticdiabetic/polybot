@@ -616,8 +616,8 @@
       <select id="paper-outcome-filter" onchange="renderPaperTrades()" style="font-size:11px;padding:4px 8px;">
         <option value="">all outcomes</option>
         <option value="pending">pending</option>
-        <option value="YES">won</option>
-        <option value="NO">lost</option>
+        <option value="won">won</option>
+        <option value="lost">lost</option>
       </select>
     </div>
     <div class="scroll-table">
@@ -1398,8 +1398,8 @@ function renderPaperTrades() {
   let records = [...paperRecords];
   if (tierFilt) records = records.filter(r => r.tier === tierFilt);
   if (outcomeFilt === 'pending') records = records.filter(r => r.outcome == null);
-  else if (outcomeFilt === 'YES') records = records.filter(r => r.outcome === 'YES');
-  else if (outcomeFilt === 'NO')  records = records.filter(r => r.outcome === 'NO');
+  else if (outcomeFilt === 'won')  records = records.filter(r => r.outcome != null && (r.pnl || 0) > 0);
+  else if (outcomeFilt === 'lost') records = records.filter(r => r.outcome != null && (r.pnl || 0) <= 0);
 
   const tbody = document.getElementById('paper-trades-tbody'); tbody.innerHTML = '';
   if (!records.length) {
@@ -1408,11 +1408,12 @@ function renderPaperTrades() {
   }
   records.forEach(r => {
     const projProfit = (r.ev || 0) * (r.shares || 0);
+    const actualWin = r.outcome != null && (r.pnl || 0) > 0;
     const outcomeHtml = r.outcome == null
       ? '<span style="color:var(--muted)">pending</span>'
-      : r.outcome === 'YES'
-        ? '<span class="pill pill-won">YES ✓</span>'
-        : '<span class="pill pill-lost">NO ✗</span>';
+      : actualWin
+        ? `<span class="pill pill-won">${r.outcome} ✓</span>`
+        : `<span class="pill pill-lost">${r.outcome} ✗</span>`;
     const pnlHtml = r.pnl != null
       ? `<span class="${r.pnl >= 0 ? 'green' : 'red'}">${r.pnl >= 0 ? '+' : ''}$${parseFloat(r.pnl).toFixed(4)}</span>`
       : '—';
