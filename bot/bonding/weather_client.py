@@ -578,6 +578,15 @@ def _parse_nearterm_forecast(city: str, target_date: date, raw: dict) -> Forecas
     else:
         sigma = NEARTERM_SIGMA_NEXT_DAY
 
+    # Per-city bias correction (°C) derived from ERA5 calibration.
+    # Shifts forecast_max before generating ensemble members.
+    bias_c = _config.BOND_CITY_BIAS_CORRECTIONS.get(city, 0.0)
+    if bias_c:
+        forecast_max += bias_c
+        if running_max is not None:
+            running_max = max(running_max, forecast_max - abs(bias_c))
+        log.debug(f"weather nearterm: {city} bias correction {bias_c:+.2f}°C applied")
+
     # Synthetic ensemble: N(forecast_max, sigma²), floored at observed running max
     members = [
         max(random.gauss(forecast_max, sigma), running_max)
@@ -714,6 +723,13 @@ def _parse_ensemble_from_range(city: str, target_date: date, raw: dict) -> Forec
     if not members:
         log.warning(f"weather: no ensemble members found for {city} {date_str}, using control only")
         members = [daily_max_c]
+
+    # Per-city bias correction (°C) derived from ERA5 calibration.
+    bias_c = _config.BOND_CITY_BIAS_CORRECTIONS.get(city, 0.0)
+    if bias_c:
+        daily_max_c += bias_c
+        members = [m + bias_c for m in members]
+        log.debug(f"weather ensemble: {city} {date_str} bias correction {bias_c:+.2f}°C applied")
 
     log.debug(
         f"weather ensemble: {city} {date_str} control={daily_max_c:.1f}°C "

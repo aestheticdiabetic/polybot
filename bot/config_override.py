@@ -84,6 +84,17 @@ def load_overrides() -> None:
             except (json.JSONDecodeError, TypeError) as e:
                 log.warning(f"Failed to load BOND_CITY_ALIASES_JSON: {e}")
 
+        if "BOND_CITY_BIAS_CORRECTIONS_JSON" in overrides:
+            try:
+                _config.BOND_CITY_BIAS_CORRECTIONS = json.loads(
+                    overrides["BOND_CITY_BIAS_CORRECTIONS_JSON"]
+                )
+                applied["BOND_CITY_BIAS_CORRECTIONS"] = (
+                    f"({len(_config.BOND_CITY_BIAS_CORRECTIONS)} cities)"
+                )
+            except (json.JSONDecodeError, TypeError) as e:
+                log.warning(f"Failed to load BOND_CITY_BIAS_CORRECTIONS_JSON: {e}")
+
         if applied:
             log.info(f"Loaded config overrides: {applied}")
     except Exception as e:
@@ -112,6 +123,8 @@ def save_overrides(overrides: dict) -> bool:
                 )
             elif k == "BOND_CITY_ALIASES":
                 existing["BOND_CITY_ALIASES_JSON"] = json.dumps(v)
+            elif k == "BOND_CITY_BIAS_CORRECTIONS":
+                existing["BOND_CITY_BIAS_CORRECTIONS_JSON"] = json.dumps(v, sort_keys=True)
             else:
                 existing[k] = str(v)
 

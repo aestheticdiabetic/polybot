@@ -165,6 +165,18 @@ BOND_GAS_FLOOR_HOURS      = 4     # don't exit within N hours of resolution
 BOND_MIN_ENTRY_HOURS      = 10    # don't enter new positions within N hours of local-day end
                                   # (10h = block entry after ~14:00 local time, before daily high is set)
 
+# Market-implied confidence cap
+# When our model probability exceeds (ask × this ratio), the model is disagreeing
+# with the market by more than N-fold. Cap model prob to ask × ratio before
+# computing EV. Markets pricing a side at 0.001 are near-certain; a 5x cap
+# means we will never claim more than 0.5% probability for that side.
+BOND_MARKET_DISAGREEMENT_RATIO = 5.0
+
+# Per-city forecast bias corrections (°C).
+# Applied to daily_max_c before generating synthetic ensemble members.
+# Populate using bot/calibrate_forecasts.py and update as new data arrives.
+BOND_CITY_BIAS_CORRECTIONS: dict[str, float] = {}
+
 # Scanner settings
 BOND_POLL_INTERVAL_SECS  = 60    # seconds between REST market discovery scans (WS handles real-time pricing)
 BOND_MAX_MARKETS_PER_RUN = 150   # max orders placed per scan cycle

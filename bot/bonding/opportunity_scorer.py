@@ -128,15 +128,25 @@ def score_market(
         tzinfo=city_tz,
     ).astimezone(timezone.utc)
     hours_to_day_end = (end_of_day_utc - datetime.now(timezone.utc)).total_seconds() / 3600
-    if 0 < hours_to_day_end < _config.BOND_MIN_ENTRY_HOURS:
+    if hours_to_day_end < _config.BOND_MIN_ENTRY_HOURS:
+        if hours_to_day_end > 0:
+            # Approaching local midnight — suppress until midnight passes
+            suppress_secs = hours_to_day_end * 3600
+            reason = (
+                f"{hours_to_day_end:.1f}h until local midnight "
+                f"(gate={_config.BOND_MIN_ENTRY_HOURS}h)"
+            )
+        else:
+            # Local day has already ended — the original `0 <` guard was missing this case.
+            # Suppress for 24 h so we don't retry a settled market every 60 s.
+            suppress_secs = 24 * 3600
+            reason = f"local day already ended ({abs(hours_to_day_end):.1f}h ago)"
         _scan_suppressions[(market.city, market.target_date)] = (
-            time.time() + hours_to_day_end * 3600
+            time.time() + suppress_secs
         )
         log.info(
-            f"scorer: {market.city} {market.target_date} — "
-            f"{hours_to_day_end:.1f}h until local midnight "
-            f"(gate={_config.BOND_MIN_ENTRY_HOURS}h): skipping, suppressed for "
-            f"{hours_to_day_end:.1f}h"
+            f"scorer: {market.city} {market.target_date} — {reason}: "
+            f"skipping, suppressed for {suppress_secs / 3600:.1f}h"
         )
         return None
 
@@ -197,6 +207,20 @@ def _score_side(
     """
     if ask <= 0.0 or ask >= 1.0:
         return None
+
+    # Market-implied confidence cap: when our model disagrees with the market by
+    # more than BOND_MARKET_DISAGREEMENT_RATIO-fold, cap prob down to ask × ratio.
+    # Rationale: a market pricing a side at 0.001 is expressing ~100% certainty in
+    # the other side. Our ensemble can't reliably beat that signal — it more likely
+    # means the market has real-time information we don't (e.g. observed temperature).
+    market_cap = ask * _config.BOND_MARKET_DISAGREEMENT_RATIO
+    if prob > market_cap:
+        log.debug(
+            f"scorer: {market.city} {market.target_date} {outcome} "
+            f"prob capped {prob:.3f}→{market_cap:.3f} "
+            f"(ratio={prob/ask:.1f}x > {_config.BOND_MARKET_DISAGREEMENT_RATIO}x)"
+        )
+        prob = market_cap
 
     ev   = prob - ask
     edge = ev
