@@ -270,12 +270,12 @@ def _end_of_day_utc(city: str, target_date) -> str:
     if tz_name:
         try:
             city_tz = ZoneInfo(tz_name)
-            eod = datetime(target_date.year, target_date.month, target_date.day, 23, 59, 59, tzinfo=city_tz)
+            eod = datetime(target_date.year, target_date.month, target_date.day, 18, 0, 0, tzinfo=city_tz)
             return eod.astimezone(timezone.utc).isoformat()
         except Exception:
             pass
-    # fallback: next midnight UTC
-    return (datetime(target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc) + timedelta(days=1)).isoformat()
+    # fallback: 18:00 UTC same day
+    return datetime(target_date.year, target_date.month, target_date.day, 18, 0, 0, tzinfo=timezone.utc).isoformat()
 
 
 def log_opportunity(opp, seen_ids: set[str]) -> bool:

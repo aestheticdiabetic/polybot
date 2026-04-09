@@ -50,8 +50,8 @@ def _end_of_day_utc(city: str, date_str: str) -> str | None:
     """Return ISO8601 UTC for end of market day in the city's local timezone.
 
     Gamma stores end_date_iso as midnight UTC at the START of the target date,
-    not the actual resolution time. This function computes the correct end-of-day
-    UTC (23:59:59 in the city's timezone) for dashboard display.
+    not the actual resolution time. For weather markets, temperature outcomes are
+    effectively determined by 6pm local time, so we use 18:00 as the cutoff.
     """
     tz_name = _config.BOND_CITY_TIMEZONES.get(city)
     if not tz_name or not date_str:
@@ -59,7 +59,7 @@ def _end_of_day_utc(city: str, date_str: str) -> str | None:
     try:
         d = _date.fromisoformat(date_str[:10])
         city_tz = ZoneInfo(tz_name)
-        eod = _datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=city_tz)
+        eod = _datetime(d.year, d.month, d.day, 18, 0, 0, tzinfo=city_tz)
         return eod.astimezone(_tz.utc).isoformat()
     except Exception:
         return None

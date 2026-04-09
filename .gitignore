@@ -1,6 +1,7 @@
 .env
 logs/
 data/
+!bot/bonding/data/.gitkeep
 __pycache__/
 *.pyc
 *.pyo
