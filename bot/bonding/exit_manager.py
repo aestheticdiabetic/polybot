@@ -29,6 +29,7 @@ STATUS_RESOLVED = "RESOLVED"
 TIER_CORE      = "CORE"
 TIER_SECONDARY = "SECONDARY"
 TIER_WING      = "WING"
+TIER_CERTAIN   = "CERTAIN"
 
 
 @dataclass
@@ -146,7 +147,7 @@ class ExitManager:
             )
             return False
 
-        # Rule 2 — core early exit
+        # Rule 2 — core early exit (CERTAIN tier is excluded — hold to resolution)
         if pos.tier == TIER_CORE and price >= _config.BOND_EARLY_EXIT_PRICE:
             return True
 
