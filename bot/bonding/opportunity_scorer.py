@@ -123,7 +123,8 @@ def score_market(
         )
         return None
 
-    now_local = datetime.now(timezone.utc).astimezone(city_tz)
+    now_utc   = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone(city_tz)
 
     # Only apply the peak-hour gate to today's markets.
     # Future-date markets are not close enough to their day-end for the gate to fire.
@@ -142,7 +143,7 @@ def score_market(
                 tzinfo=city_tz,
             ).astimezone(timezone.utc)
             suppress_secs = max(
-                (end_of_day_utc - datetime.now(timezone.utc)).total_seconds(), 0
+                (end_of_day_utc - now_utc).total_seconds(), 0
             ) + 300  # 5 min buffer past midnight
             _scan_suppressions[(market.city, market.target_date)] = (
                 time.time() + suppress_secs
@@ -161,14 +162,14 @@ def score_market(
             next_day.year, next_day.month, next_day.day, 0, 0, 0,
             tzinfo=city_tz,
         ).astimezone(timezone.utc)
-        hours_to_day_end = (end_of_day_utc - datetime.now(timezone.utc)).total_seconds() / 3600
+        hours_to_day_end = (end_of_day_utc - now_utc).total_seconds() / 3600
         if hours_to_day_end <= 0:
             _scan_suppressions[(market.city, market.target_date)] = (
                 time.time() + 24 * 3600
             )
             log.info(
                 f"scorer: {market.city} {market.target_date} — "
-                f"local day already ended: suppressed for 24h"
+                f"local day already ended ({abs(hours_to_day_end):.1f}h ago): suppressed for 24h"
             )
             return None
 
