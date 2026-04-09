@@ -59,11 +59,11 @@ NEARTERM_SIGMA_SAME_DAY = 1.0   # same-day (observed hours give hard running-max
 NEARTERM_SIGMA_NEXT_DAY = 1.5   # next-day (full day still ahead)
 NEARTERM_MEMBERS        = 100   # synthetic member count (finer resolution than 30)
 
-# Post-peak decay: starts at 14:00 local, fully converged by 16:00 local.
+# Post-peak decay: anchor hour is now dynamic per city/month (see get_gate_hour()).
+# Decay starts at (gate_hour - 1) and converges fully over _POST_PEAK_DECAY_HOURS.
 # At full decay forecast_max = running_max and sigma = 0, so markets where the
 # target temp hasn't been reached yet get probability 0 (hard skip).
-_POST_PEAK_HOUR_LOCAL  = 14
-_POST_PEAK_DECAY_HOURS = 2.0  # 14:00 → 16:00
+_POST_PEAK_DECAY_HOURS = 2.0
 
 # Minimum seconds between consecutive API requests (~20 req/min, well under 600/min limit)
 _MIN_REQUEST_INTERVAL = 3.0
@@ -558,6 +558,7 @@ def _parse_nearterm_forecast(city: str, target_date: date, raw: dict) -> Forecas
     running_max: Optional[float] = None
 
     if target_date == today:
+        global _observation_recorded
         utc_offset_secs: int = raw.get("utc_offset_seconds", 0)
         local_ts = datetime.now(timezone.utc).timestamp() + utc_offset_secs
         current_hour_local = int((local_ts % 86400) // 3600)
@@ -616,7 +617,6 @@ def _parse_nearterm_forecast(city: str, target_date: date, raw: dict) -> Forecas
 
         # Record observation once per city-day after the gate hour has fully passed.
         if running_max is not None and current_hour_local >= gate_hour:
-            global _observation_recorded
             today_date = date.today()
             # Clear stale entries from previous days
             _observation_recorded = {
