@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 
 from bonding.market_scanner import scan_weather_markets
 from bonding.opportunity_scorer import score_all, ScoredOpportunity, TIER_CORE, TIER_SECONDARY, TIER_WING
-from bonding.weather_client import get_all_forecasts
+from bonding.weather_client import get_consensus_forecasts
 import config as _config
 from config import LOG_LEVEL
 
@@ -344,7 +344,7 @@ async def run_cycle() -> int:
         return 0
 
     city_date_pairs = list({(m.city, m.target_date) for m in markets})
-    forecasts = await get_all_forecasts(city_date_pairs)
+    forecasts = await get_consensus_forecasts(city_date_pairs)
 
     opps = score_all(markets, forecasts)[:_config.BOND_MAX_MARKETS_PER_RUN]
 

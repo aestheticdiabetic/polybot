@@ -51,7 +51,7 @@ async def run_bonding_loop(state: StateManager) -> None:
     """
     from py_clob_client.client import ClobClient
     from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
-    from bonding.weather_client import get_all_forecasts
+    from bonding.weather_client import get_consensus_forecasts
     from bonding.market_scanner import scan_weather_markets
     from bonding.opportunity_scorer import score_all
     from bonding.exit_manager import ExitManager, BondPosition
@@ -107,7 +107,7 @@ async def run_bonding_loop(state: StateManager) -> None:
     log.info("BOND mode: running initial scan to pre-populate WS feed...")
     markets = await scan_weather_markets()
     city_date_pairs = list({(m.city, m.target_date) for m in markets})
-    forecasts = await get_all_forecasts(city_date_pairs)
+    forecasts = await get_consensus_forecasts(city_date_pairs)
 
     feed = BondPriceFeed(on_opportunity=_on_ws_opportunity)
     feed.update_markets(markets, forecasts)  # pre-populate; WS not connected yet so no resubscribe
@@ -130,11 +130,12 @@ async def run_bonding_loop(state: StateManager) -> None:
             if cycle > 1:
                 markets = await scan_weather_markets()
                 city_date_pairs = list({(m.city, m.target_date) for m in markets})
-                forecasts = await get_all_forecasts(city_date_pairs)
+                forecasts = await get_consensus_forecasts(city_date_pairs)
                 feed.update_markets(markets, forecasts)
 
             # Fallback REST scoring pass: catches markets with no recent WS events
-            opps = score_all(markets, forecasts)
+            from bonding.sure_thing_scorer import score_certain
+            opps = score_all(markets, forecasts) + score_certain(markets, forecasts)
             placed = 0
             for opp in opps[:BOND_MAX_MARKETS_PER_RUN]:
                 if not feed.is_on_cooldown(opp.token_id):
@@ -276,7 +277,7 @@ async def run_paper_loop(state: StateManager) -> None:
       logging the same market opportunity more than once across restarts.
     - REST fallback pass catches markets with no recent WS events.
     """
-    from bonding.weather_client import get_all_forecasts
+    from bonding.weather_client import get_consensus_forecasts
     from bonding.market_scanner import scan_weather_markets
     from bonding.opportunity_scorer import score_all
     from bonding.price_feed import BondPriceFeed
@@ -303,7 +304,7 @@ async def run_paper_loop(state: StateManager) -> None:
     log.info("PAPER mode: running initial scan to pre-populate WS feed...")
     markets = await scan_weather_markets()
     city_date_pairs = list({(m.city, m.target_date) for m in markets})
-    forecasts = await get_all_forecasts(city_date_pairs)
+    forecasts = await get_consensus_forecasts(city_date_pairs)
 
     feed = BondPriceFeed(on_opportunity=_on_ws_opportunity, on_price_tick=_on_price_tick)
     feed.update_markets(markets, forecasts)  # pre-populate; WS not connected yet so no resubscribe
@@ -324,11 +325,12 @@ async def run_paper_loop(state: StateManager) -> None:
             if cycle > 1:
                 markets = await scan_weather_markets()
                 city_date_pairs = list({(m.city, m.target_date) for m in markets})
-                forecasts = await get_all_forecasts(city_date_pairs)
+                forecasts = await get_consensus_forecasts(city_date_pairs)
                 feed.update_markets(markets, forecasts)
 
             # Fallback REST scoring pass: catches markets with no recent WS events
-            opps = score_all(markets, forecasts)[:BOND_MAX_MARKETS_PER_RUN]
+            from bonding.sure_thing_scorer import score_certain
+            opps = (score_all(markets, forecasts) + score_certain(markets, forecasts))[:BOND_MAX_MARKETS_PER_RUN]
             logged = 0
             for opp in opps:
                 if not feed.is_on_cooldown(opp.token_id):

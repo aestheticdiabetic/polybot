@@ -23,7 +23,7 @@ import websockets
 from bonding import peak_hour_stats as _peak_stats
 from bonding.market_scanner import MarketCandidate
 from bonding.opportunity_scorer import score_market
-from bonding.weather_client import ForecastResult, _peak_hour_stats as _loaded_stats
+from bonding.weather_client import ForecastResult, SourceConsensus, _peak_hour_stats as _loaded_stats
 from config import CLOB_WS
 
 log = logging.getLogger("bond.feed")
@@ -46,7 +46,7 @@ class BondPriceFeed:
         self._on_opportunity = on_opportunity
         self._on_price_tick = on_price_tick  # async cb(token_id, price) fired on every WS tick
         self._markets: dict[str, MarketCandidate] = {}        # token_id → candidate
-        self._forecasts: dict[tuple, ForecastResult] = {}     # (city, date) → forecast
+        self._forecasts: dict[tuple, SourceConsensus] = {}     # (city, date) → consensus
         self._cooldowns: dict[str, float] = {}                # token_id → last_order_ts
         self._ws = None
         self._running = False
@@ -60,7 +60,7 @@ class BondPriceFeed:
     def update_markets(
         self,
         candidates: list[MarketCandidate],
-        forecasts: dict[tuple, ForecastResult],
+        forecasts: dict[tuple, SourceConsensus],
     ) -> None:
         """
         Refresh the tracked market set and forecasts from the latest REST scan.
