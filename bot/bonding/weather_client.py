@@ -90,6 +90,46 @@ class ForecastResult:
     forecast_peak_hour: Optional[int] = None  # local hour (0-23) of forecast daily max; None for ensemble
 
 
+@dataclass
+class SourceConsensus:
+    """Aggregates GFS, ECMWF, and tomorrow.io forecasts for a single city/date."""
+    city: str
+    target_date: date
+    gfs: ForecastResult
+    ecmwf: Optional[ForecastResult]
+    tomorrowio: Optional[ForecastResult]
+
+    def consensus_prob(self, temp_min: float, temp_max: float) -> float:
+        """Average P(YES) across all available sources."""
+        probs = [prob_in_range(self.gfs, temp_min, temp_max)]
+        if self.ecmwf is not None:
+            probs.append(prob_in_range(self.ecmwf, temp_min, temp_max))
+        if self.tomorrowio is not None:
+            probs.append(prob_in_range(self.tomorrowio, temp_min, temp_max))
+        return sum(probs) / len(probs)
+
+    def available_sources(self) -> int:
+        return sum(1 for s in [self.gfs, self.ecmwf, self.tomorrowio] if s is not None)
+
+    def point_forecasts(self) -> list[float]:
+        """Return point forecast (daily_max_c) from each available source."""
+        result = [self.gfs.daily_max_c]
+        if self.ecmwf is not None:
+            result.append(self.ecmwf.daily_max_c)
+        if self.tomorrowio is not None:
+            result.append(self.tomorrowio.daily_max_c)
+        return result
+
+    def all_ensemble_members(self) -> list[float]:
+        """Concatenate ensemble members from all available sources."""
+        members = list(self.gfs.ensemble_members)
+        if self.ecmwf is not None:
+            members.extend(self.ecmwf.ensemble_members)
+        if self.tomorrowio is not None:
+            members.extend(self.tomorrowio.ensemble_members)
+        return members
+
+
 # ── Ensemble cache (disk-persistent, 2h TTL) ─────────────────────────────────
 _cache: dict[tuple, tuple[float, dict]] = {}
 _cache_lock = asyncio.Lock()
