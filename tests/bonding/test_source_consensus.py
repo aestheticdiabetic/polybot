@@ -118,3 +118,28 @@ def test_get_ecmwf_forecast_returns_none_on_api_error():
                 return await get_ecmwf_forecast("London", date(2026, 4, 15))
 
     assert asyncio.run(run()) is None
+
+
+def test_get_consensus_forecasts_builds_source_consensus():
+    from bonding.weather_client import get_consensus_forecasts, SourceConsensus
+
+    target = date(2026, 4, 15)
+    gfs_result = _make_fr(18.0, [17.0, 18.0, 19.0])
+
+    async def run():
+        with patch("bonding.weather_client.get_all_forecasts", new=AsyncMock(
+            return_value={("London", target): gfs_result}
+        )):
+            with patch("bonding.weather_client.get_ecmwf_forecast", new=AsyncMock(return_value=None)):
+                with patch("bonding.tomorrow_client.get_forecast", new=AsyncMock(return_value=None)):
+                    with patch("bonding.weather_client._resolve_city", return_value=("London", 51.5, -0.1)):
+                        return await get_consensus_forecasts([("London", target)])
+
+    result = asyncio.run(run())
+    assert ("London", target) in result
+    consensus = result[("London", target)]
+    assert isinstance(consensus, SourceConsensus)
+    assert consensus.gfs is gfs_result
+    assert consensus.ecmwf is None
+    assert consensus.tomorrowio is None
+    assert consensus.available_sources() == 1

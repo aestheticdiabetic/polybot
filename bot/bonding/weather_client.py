@@ -434,6 +434,80 @@ async def get_ecmwf_forecast(city: str, target_date: date) -> Optional[ForecastR
         return None
 
 
+async def get_consensus_forecasts(
+    city_date_pairs: list[tuple[str, date]],
+) -> dict[tuple[str, date], SourceConsensus]:
+    """
+    Batch-fetch forecasts from all three sources for each (city, date) pair.
+
+    Sources:
+      - GFS (+ near-term hourly): existing get_all_forecasts() logic
+      - ECMWF: get_ecmwf_forecast() — same OM rate limiter, 2h cache
+      - tomorrow.io: tomorrow_client.get_forecast() — own rate limiter, 3h cache
+
+    ECMWF and tomorrow.io return None gracefully on failure; GFS is required
+    (same as existing behaviour — unknown cities are skipped entirely).
+
+    Returns dict keyed by (canonical_city, date).
+    """
+    from bonding.tomorrow_client import get_forecast as _tio_get_forecast
+
+    # GFS + near-term (serial, existing rate limiter)
+    gfs_results = await get_all_forecasts(city_date_pairs)
+
+    # Build city → (canonical, lat, lon) lookup for ECMWF and TIO calls
+    city_coords: dict[str, tuple[str, float, float]] = {}
+    for city, _ in city_date_pairs:
+        if city in city_coords:
+            continue
+        try:
+            canonical, lat, lon = _resolve_city(city)
+            city_coords[city] = (canonical, lat, lon)
+        except UnknownCityError:
+            pass  # already logged by get_all_forecasts
+
+    # ECMWF (serial, shares OM rate limiter)
+    ecmwf_results: dict[tuple[str, date], ForecastResult] = {}
+    for city, d in city_date_pairs:
+        coords = city_coords.get(city)
+        if coords is None:
+            continue
+        canonical = coords[0]
+        result = await get_ecmwf_forecast(canonical, d)
+        if result is not None:
+            ecmwf_results[(canonical, d)] = result
+
+    # tomorrow.io (serial, own rate limiter)
+    tio_results: dict[tuple[str, date], ForecastResult] = {}
+    for city, d in city_date_pairs:
+        coords = city_coords.get(city)
+        if coords is None:
+            continue
+        canonical, lat, lon = coords
+        result = await _tio_get_forecast(canonical, lat, lon, d)
+        if result is not None:
+            tio_results[(canonical, d)] = result
+
+    # Assemble SourceConsensus — only for cities where GFS succeeded
+    consensus: dict[tuple[str, date], SourceConsensus] = {}
+    for (city, d), gfs in gfs_results.items():
+        consensus[(city, d)] = SourceConsensus(
+            city=city,
+            target_date=d,
+            gfs=gfs,
+            ecmwf=ecmwf_results.get((city, d)),
+            tomorrowio=tio_results.get((city, d)),
+        )
+
+    n_ecmwf = sum(1 for v in consensus.values() if v.ecmwf is not None)
+    n_tio   = sum(1 for v in consensus.values() if v.tomorrowio is not None)
+    log.info(
+        f"consensus_forecasts: {len(consensus)} pairs — "
+        f"ecmwf={n_ecmwf} tio={n_tio}"
+    )
+    return consensus
+
+
 def prob_in_range(
     forecast: ForecastResult,
     temp_min: float,
