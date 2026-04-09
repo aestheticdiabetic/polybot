@@ -162,8 +162,9 @@ BOND_EARLY_EXIT_PRICE     = 0.97  # sell core when price hits this
 BOND_WING_EXIT_MULTIPLIER = 5.0   # sell wing if price >= cost × this
 BOND_WING_MIN_ABS_GAIN    = 1.00  # AND absolute gain >= this value (USD)
 BOND_GAS_FLOOR_HOURS      = 4     # don't exit within N hours of resolution
-BOND_MIN_ENTRY_HOURS      = 10    # don't enter new positions within N hours of local-day end
-                                  # (10h = block entry after ~14:00 local time, before daily high is set)
+BOND_MIN_ENTRY_HOURS      = 10    # FALLBACK ONLY — superseded by dynamic peak-hour gate
+                                  # (peak_hour_stats.py + historical_peak_seeder.py).
+                                  # Retained as documentation of the old threshold.
 
 # Market-implied confidence cap
 # When our model probability exceeds (ask × this ratio), the model is disagreeing

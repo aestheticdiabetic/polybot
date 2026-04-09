@@ -88,6 +88,19 @@ async def run_bonding_loop(state: StateManager) -> None:
     async def _on_ws_opportunity(opp):
         await _place_bond_order(bond_client, exit_mgr, order_tracker, opp, OrderArgs, OrderType)
 
+    # Load peak hour stats and seed any cities that haven't been bootstrapped yet.
+    # Seeding fetches 2 years of archive data per unseeded city (1 API call/city).
+    # Only runs for cities below SEED_MIN_SAMPLES — already-seeded cities are skipped.
+    from bonding.weather_client import init_peak_stats
+    from bonding.historical_peak_seeder import seed_missing_cities
+    import bonding.weather_client as _wc
+    from config import BOND_CITIES
+
+    init_peak_stats()  # load existing stats into shared in-memory dict
+    await seed_missing_cities(BOND_CITIES, _wc._peak_hour_stats)
+    init_peak_stats()  # reload after seeding to incorporate newly written data
+    log.info("BOND mode: peak hour stats loaded (%d cities)", len(_wc._peak_hour_stats))
+
     # Initial scan to pre-populate the feed before the WS connects.
     # This ensures the WebSocket subscribes to all markets immediately on connect
     # rather than starting with 0 subscriptions and resubscribing ~60s later.
