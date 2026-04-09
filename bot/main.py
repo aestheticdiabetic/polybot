@@ -287,7 +287,7 @@ async def run_paper_loop(state: StateManager) -> None:
     seen_ids: set[str] = _load_seen_market_ids()
     log.info(f"PAPER mode: loaded {len(seen_ids)} previously logged market IDs")
 
-    exit_mgr = PaperExitManager(PAPER_LOG)
+    exit_mgr = PaperExitManager(PAPER_LOG, seen_ids=seen_ids)
 
     async def _on_ws_opportunity(opp):
         if not exit_mgr.has_open_position(opp.token_id):

@@ -47,24 +47,34 @@ def _append_record(record: dict) -> None:
 
 
 def _load_seen_market_ids() -> set[str]:
-    """Return set of market_ids already recorded in the paper log."""
+    """
+    Return set of market_ids that still have an open (unresolved/unsold) paper position.
+
+    A market_id is blocked from re-entry only while its most recent WOULD_BUY record
+    has outcome=None (position still live). Once outcome is set ('SOLD', 'YES', 'NO'),
+    the market is eligible for a fresh entry if conditions are met again.
+    """
     if not PAPER_LOG.exists():
         return set()
-    seen: set[str] = set()
+    # Track the latest WOULD_BUY outcome per market_id (later lines overwrite earlier).
+    latest_outcome: dict[str, str | None] = {}
     try:
         for line in PAPER_LOG.read_text(encoding="utf-8").splitlines():
             line = line.strip()
-            if line:
-                try:
-                    rec = json.loads(line)
-                    mid = rec.get("market_id")
-                    if mid:
-                        seen.add(mid)
-                except Exception:
-                    pass
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if rec.get("event") == "WOULD_BUY":
+                mid = rec.get("market_id")
+                if mid:
+                    latest_outcome[mid] = rec.get("outcome")  # None = open
     except Exception:
         pass
-    return seen
+    # Only block markets whose most recent position is still open.
+    return {mid for mid, outcome in latest_outcome.items() if outcome is None}
 
 
 @dataclass
@@ -96,10 +106,11 @@ class PaperExitManager:
     they survive restarts.
     """
 
-    def __init__(self, paper_log: Path) -> None:
+    def __init__(self, paper_log: Path, seen_ids: set[str] | None = None) -> None:
         self._paper_log = paper_log
         self._ledger = paper_log.parent / "paper_positions.json"
         self._positions: dict[str, PaperPosition] = {}  # token_id → position (all statuses)
+        self._seen_ids = seen_ids  # shared reference; cleared on sell to allow re-entry
         self._load()
 
     def _load(self) -> None:
@@ -131,8 +142,9 @@ class PaperExitManager:
 
     def add_position(self, opp: ScoredOpportunity) -> None:
         """Record a new open paper position after a WOULD_BUY is logged."""
-        if opp.token_id in self._positions:
-            return  # already tracking this token
+        existing = self._positions.get(opp.token_id)
+        if existing is not None and existing.status == "OPEN":
+            return  # already tracking an open position for this token
         pos = PaperPosition(
             market_id=opp.market.market_id,
             token_id=opp.token_id,
@@ -223,6 +235,9 @@ class PaperExitManager:
         }
         _append_record(record)
         self._save()
+        # Allow re-entry into this market if conditions become profitable again.
+        if self._seen_ids is not None:
+            self._seen_ids.discard(pos.market_id)
         log.info(
             f"WOULD_SELL city={pos.city} side={pos.side} tier={pos.tier} "
             f"entry={pos.entry_price:.4f} exit={exit_price:.4f} pnl={pnl:+.2f}"
