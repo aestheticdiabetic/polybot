@@ -177,7 +177,7 @@ BOND_MARKET_DISAGREEMENT_RATIO = 5.0
 TOMORROW_IO_API_KEY           = os.getenv("TOMORROW_IO_API_KEY", "")
 TOMORROW_IO_CACHE_TTL_SECS    = 10_800   # 3 hours
 TOMORROW_IO_MAX_REQ_PER_HOUR  = 20       # headroom below 25/hr hard limit
-ECMWF_ENSEMBLE_MODEL          = "ecmwf_ifs04"  # 50+ members, global, free via Open-Meteo
+ECMWF_ENSEMBLE_MODEL          = "ecmwf_ifs025"  # 50 members, 0.25° global, free via Open-Meteo
 ECMWF_DISK_CACHE_PATH         = os.environ.get("ECMWF_CACHE_PATH", "/app/data/ecmwf_cache.json")
 
 # ─── CERTAIN tier ────────────────────────────────────────────────────────────
