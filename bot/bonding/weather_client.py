@@ -926,7 +926,9 @@ def _parse_ensemble_from_range(city: str, target_date: date, raw: dict) -> Forec
     control_series = daily.get("temperature_2m_max")
     if not control_series:
         raise ValueError(f"Missing temperature_2m_max in ensemble response for {city}")
-    daily_max_c: float = control_series[day_idx]
+    daily_max_c = control_series[day_idx]
+    if daily_max_c is None:
+        raise ValueError(f"Null control temperature for {city} {date_str} (model may not cover this location/date)")
 
     members: list[float] = []
     for key, series in daily.items():
