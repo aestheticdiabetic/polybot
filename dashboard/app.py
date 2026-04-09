@@ -503,11 +503,26 @@ async def create_app(state):
         from datetime import datetime as _dt, timezone as _tz
         starting_balance = float(request.rel_url.query.get("balance", 1000))
         all_records = _load_paper_trades()
+        # Build a fallback map from WOULD_SELL events: market_id → sell record.
+        # Used to handle cases where _patch_would_buy failed or lost a file-write
+        # race with paper-check (both rewrite the whole JSONL atomically).
+        sell_map: dict = {}
+        for r in all_records:
+            if r.get("event") == "WOULD_SELL" and r.get("market_id"):
+                sell_map[r["market_id"]] = r
         # Exclude WOULD_SELL events — they are supplementary sell-side logs.
         # The corresponding WOULD_BUY record is patched with outcome='SOLD' and
         # pnl by PaperExitManager._patch_would_buy, so it is the canonical record.
         # Including WOULD_SELL would double-count capital, pnl, and resolved counts.
-        records = [r for r in all_records if r.get("event") != "WOULD_SELL"]
+        # If the patch didn't take (race condition), fall back to sell_map data.
+        raw_records = [r for r in all_records if r.get("event") != "WOULD_SELL"]
+        records = []
+        for r in raw_records:
+            mid = r.get("market_id")
+            if r.get("outcome") is None and mid and mid in sell_map:
+                sell = sell_map[mid]
+                r = {**r, "outcome": "SOLD", "exit_price": sell.get("exit_price"), "pnl": sell.get("pnl")}
+            records.append(r)
 
         if not records:
             _empty_tier_bd = {t: {"count": 0, "avg_conf": None} for t in ("CORE", "SECONDARY", "WING")}
