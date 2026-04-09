@@ -156,6 +156,7 @@ class PendingOrderTracker:
             entry_time=datetime.now(timezone.utc).isoformat(),
             resolution_time=order.resolution_time,
             status="OPEN",
+            prob=order.prob_at_placement,
         )
         await self._exit_mgr.add_position(pos)
         log.info(

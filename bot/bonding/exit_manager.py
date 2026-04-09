@@ -44,6 +44,7 @@ class BondPosition:
     entry_time: str           # ISO8601
     resolution_time: str      # ISO8601
     status: str               # OPEN | SOLD | RESOLVED
+    prob: float               = 0.0     # weather-model P(YES) at placement time
     exit_price: Optional[float] = None   # filled on SOLD
     exit_time: Optional[str]   = None    # filled on SOLD (ISO8601)
 

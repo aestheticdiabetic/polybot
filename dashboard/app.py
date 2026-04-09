@@ -505,12 +505,16 @@ async def create_app(state):
         records = _load_paper_trades()
 
         if not records:
+            _empty_tier_bd = {t: {"count": 0, "avg_conf": None} for t in ("CORE", "SECONDARY", "WING")}
+            _empty_et = {lbl: {"count": 0, "resolved": 0, "wins": 0, "win_rate": None,
+                               "actual_pnl": 0, "tier_breakdown": _empty_tier_bd}
+                         for lbl in ("0-10h", "10-20h", "20-30h", "30-48h", "48h+")}
             return web.json_response({
                 "total": 0, "cycles": 0, "tier_stats": {},
                 "total_capital": 0, "total_projected_profit": 0,
                 "scaled_projected_profit": 0, "starting_balance": starting_balance,
                 "scale_factor": 0, "actual_pnl": 0, "resolved_count": 0,
-                "entry_time_stats": {}, "side_stats": {},
+                "entry_time_stats": _empty_et, "side_stats": {},
             })
 
         def _is_win(r: dict) -> bool:
@@ -583,12 +587,21 @@ async def create_app(state):
                     bucket.append(r)
             resolved_b = [r for r in bucket if _is_resolved(r)]
             wins_b     = [r for r in resolved_b if _is_win(r)]
+            tier_breakdown: dict = {}
+            for tier in ("CORE", "SECONDARY", "WING"):
+                tb = [r for r in bucket if r.get("tier") == tier]
+                probs = [r["prob"] for r in tb if r.get("prob") is not None]
+                tier_breakdown[tier] = {
+                    "count":    len(tb),
+                    "avg_conf": round(sum(probs) / len(probs), 4) if probs else None,
+                }
             entry_time_stats[label] = {
-                "count":      len(bucket),
-                "resolved":   len(resolved_b),
-                "wins":       len(wins_b),
-                "win_rate":   round(len(wins_b) / len(resolved_b) * 100, 1) if resolved_b else None,
-                "actual_pnl": round(sum(r.get("pnl", 0) for r in bucket if r.get("pnl") is not None), 4),
+                "count":          len(bucket),
+                "resolved":       len(resolved_b),
+                "wins":           len(wins_b),
+                "win_rate":       round(len(wins_b) / len(resolved_b) * 100, 1) if resolved_b else None,
+                "actual_pnl":     round(sum(r.get("pnl", 0) for r in bucket if r.get("pnl") is not None), 4),
+                "tier_breakdown": tier_breakdown,
             }
 
         # ── YES vs NO side stats ──────────────────────────────────────
@@ -624,6 +637,109 @@ async def create_app(state):
             "tier_stats":               tier_stats,
             "entry_time_stats":         entry_time_stats,
             "side_stats":               side_stats,
+        })
+
+    @_auth_required
+    async def api_bond_real_stats(request):
+        """Aggregated REAL bond stats (tier analysis + entry time stats) from the ledger."""
+        from datetime import datetime as _dt, timezone as _tz
+
+        positions = _load_bond_ledger()
+
+        _empty_tier_bd = {t: {"count": 0, "avg_conf": None} for t in ("CORE", "SECONDARY", "WING")}
+        _empty_et = {lbl: {"count": 0, "resolved": 0, "wins": 0, "win_rate": None,
+                            "actual_pnl": 0, "tier_breakdown": _empty_tier_bd}
+                     for lbl in ("0-10h", "10-20h", "20-30h", "30-48h", "48h+")}
+
+        if not positions:
+            return web.json_response({
+                "total": 0, "tier_stats": {}, "entry_time_stats": _empty_et,
+            })
+
+        def _is_win(p: dict) -> bool:
+            ep = p.get("exit_price")
+            return ep is not None and ep > p.get("entry_price", 0)
+
+        def _is_resolved(p: dict) -> bool:
+            return p.get("exit_price") is not None or p.get("status") in ("SOLD", "RESOLVED")
+
+        def _pnl(p: dict) -> float:
+            ep = p.get("exit_price")
+            if ep is None:
+                return 0.0
+            return (ep - p.get("entry_price", 0)) * p.get("shares", 0)
+
+        def _hours_before_resolution(p: dict) -> float | None:
+            try:
+                entry = _dt.fromisoformat(p["entry_time"].replace("Z", "+00:00"))
+                res   = _dt.fromisoformat(p["resolution_time"].replace("Z", "+00:00"))
+                return max(0.0, (res - entry).total_seconds() / 3600)
+            except Exception:
+                return None
+
+        # ── Tier stats ────────────────────────────────────────────────
+        tier_stats: dict = {}
+        for tier in ("CORE", "SECONDARY", "WING"):
+            tp = [p for p in positions if p.get("tier") == tier]
+            if not tp:
+                tier_stats[tier] = {
+                    "count": 0, "capital": 0, "avg_entry": None,
+                    "avg_prob": None, "resolved": 0, "wins": 0,
+                    "win_rate": None, "actual_pnl": 0,
+                }
+                continue
+            resolved = [p for p in tp if _is_resolved(p)]
+            wins     = [p for p in resolved if _is_win(p)]
+            probs    = [p["prob"] for p in tp if p.get("prob")]
+            tier_stats[tier] = {
+                "count":      len(tp),
+                "capital":    round(sum(p.get("shares", 0) * p.get("entry_price", 0) for p in tp), 4),
+                "avg_entry":  round(sum(p.get("entry_price", 0) for p in tp) / len(tp), 4),
+                "avg_prob":   round(sum(probs) / len(probs), 4) if probs else None,
+                "resolved":   len(resolved),
+                "wins":       len(wins),
+                "win_rate":   round(len(wins) / len(resolved) * 100, 1) if resolved else None,
+                "actual_pnl": round(sum(_pnl(p) for p in tp), 4),
+            }
+
+        # ── Entry time stats (bucketed by hours before resolution) ─────
+        _BUCKETS = [
+            ("0-10h",  0,   10),
+            ("10-20h", 10,  20),
+            ("20-30h", 20,  30),
+            ("30-48h", 30,  48),
+            ("48h+",   48,  float("inf")),
+        ]
+        entry_time_stats: dict = {}
+        for label, lo, hi in _BUCKETS:
+            bucket = []
+            for p in positions:
+                h = _hours_before_resolution(p)
+                if h is not None and lo <= h < hi:
+                    bucket.append(p)
+            resolved_b = [p for p in bucket if _is_resolved(p)]
+            wins_b     = [p for p in resolved_b if _is_win(p)]
+            tier_breakdown: dict = {}
+            for tier in ("CORE", "SECONDARY", "WING"):
+                tb = [p for p in bucket if p.get("tier") == tier]
+                probs = [p["prob"] for p in tb if p.get("prob")]
+                tier_breakdown[tier] = {
+                    "count":    len(tb),
+                    "avg_conf": round(sum(probs) / len(probs), 4) if probs else None,
+                }
+            entry_time_stats[label] = {
+                "count":          len(bucket),
+                "resolved":       len(resolved_b),
+                "wins":           len(wins_b),
+                "win_rate":       round(len(wins_b) / len(resolved_b) * 100, 1) if resolved_b else None,
+                "actual_pnl":     round(sum(_pnl(p) for p in bucket), 4),
+                "tier_breakdown": tier_breakdown,
+            }
+
+        return web.json_response({
+            "total":            len(positions),
+            "tier_stats":       tier_stats,
+            "entry_time_stats": entry_time_stats,
         })
 
     @_auth_required
@@ -805,6 +921,7 @@ async def create_app(state):
     app.router.add_get("/api/bond/paper-trades",     api_bond_paper_trades)
     app.router.add_get("/api/bond/paper-stats",      api_bond_paper_stats)
     app.router.add_post("/api/bond/paper-check",     api_bond_paper_check_resolutions)
+    app.router.add_get("/api/bond/real-stats",       api_bond_real_stats)
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
