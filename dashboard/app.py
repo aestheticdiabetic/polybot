@@ -9,7 +9,9 @@ import os
 import time
 import base64
 import secrets
+from datetime import date as _date, datetime as _datetime, timezone as _tz
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import config as _config
 from aiohttp import web
@@ -42,6 +44,25 @@ def _load_paper_trades(n: int = 10000) -> list[dict]:
     except Exception as exc:
         log.debug(f"dashboard: failed to read paper trades: {exc}")
         return []
+
+
+def _end_of_day_utc(city: str, date_str: str) -> str | None:
+    """Return ISO8601 UTC for end of market day in the city's local timezone.
+
+    Gamma stores end_date_iso as midnight UTC at the START of the target date,
+    not the actual resolution time. This function computes the correct end-of-day
+    UTC (23:59:59 in the city's timezone) for dashboard display.
+    """
+    tz_name = _config.BOND_CITY_TIMEZONES.get(city)
+    if not tz_name or not date_str:
+        return None
+    try:
+        d = _date.fromisoformat(date_str[:10])
+        city_tz = ZoneInfo(tz_name)
+        eod = _datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=city_tz)
+        return eod.astimezone(_tz.utc).isoformat()
+    except Exception:
+        return None
 
 
 def _extract_yes_outcome(market_data: dict) -> str | None:
@@ -466,7 +487,15 @@ async def create_app(state):
         n = int(request.rel_url.query.get("n", 200))
         records = _load_paper_trades(n)
         records.sort(key=lambda r: r.get("ts", ""), reverse=True)
-        return web.json_response(records[:n])
+        # Override resolution_time with accurate end-of-day UTC for display.
+        # Gamma's stored end_date_iso is start-of-day UTC, not actual resolution.
+        result = []
+        for rec in records[:n]:
+            corrected = _end_of_day_utc(rec.get("city", ""), rec.get("date", ""))
+            if corrected:
+                rec = {**rec, "resolution_time": corrected}
+            result.append(rec)
+        return web.json_response(result)
 
     @_auth_required
     async def api_bond_paper_stats(request):

@@ -21,6 +21,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from bonding.market_scanner import scan_weather_markets
 from bonding.opportunity_scorer import score_all, ScoredOpportunity, TIER_CORE, TIER_SECONDARY, TIER_WING
@@ -263,6 +264,20 @@ class PaperExitManager:
             log.error(f"paper_exit: failed to patch WOULD_BUY record: {exc}")
 
 
+def _end_of_day_utc(city: str, target_date) -> str:
+    """Return ISO8601 UTC for end of market day in the city's local timezone."""
+    tz_name = _config.BOND_CITY_TIMEZONES.get(city)
+    if tz_name:
+        try:
+            city_tz = ZoneInfo(tz_name)
+            eod = datetime(target_date.year, target_date.month, target_date.day, 23, 59, 59, tzinfo=city_tz)
+            return eod.astimezone(timezone.utc).isoformat()
+        except Exception:
+            pass
+    # fallback: next midnight UTC
+    return (datetime(target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc) + timedelta(days=1)).isoformat()
+
+
 def log_opportunity(opp, seen_ids: set[str]) -> bool:
     """
     Log a single scored opportunity to the JSONL file if not already seen.
@@ -281,7 +296,7 @@ def log_opportunity(opp, seen_ids: set[str]) -> bool:
         "question":        opp.market.question,
         "city":            opp.market.city,
         "date":            opp.market.target_date.isoformat(),
-        "resolution_time": opp.market.resolution_time.isoformat(),
+        "resolution_time": _end_of_day_utc(opp.market.city, opp.market.target_date),
         "tier":            opp.tier,
         "shares":          opp.shares,
         "side":            opp.outcome,       # "YES" or "NO" — which token was bet
