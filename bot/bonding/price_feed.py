@@ -19,9 +19,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import websockets
 
+from bonding import peak_hour_stats as _peak_stats
 from bonding.market_scanner import MarketCandidate
 from bonding.opportunity_scorer import score_market
-from bonding.weather_client import ForecastResult
+from bonding.weather_client import ForecastResult, _peak_hour_stats as _loaded_stats
 from config import CLOB_WS
 
 log = logging.getLogger("bond.feed")
@@ -237,18 +238,14 @@ class BondPriceFeed:
         if forecast is None:
             return
 
-        # If the target day is nearly over, suppress until after local day end.
-        # Use the city's IANA timezone so the gate fires at the same point in the
-        # local day regardless of UTC offset (mirrors the scorer logic exactly).
+        # Dynamic peak-hour gate — mirrors opportunity_scorer logic exactly.
         import config as _config
         tz_name = _config.BOND_CITY_TIMEZONES.get(market.city)
         if not tz_name:
             log.warning(
-                f"feed: {market.city} {market.target_date} — no timezone configured, skipping "
-                f"(add to BOND_CITY_TIMEZONES in config.py)"
+                f"feed: {market.city} {market.target_date} — no timezone configured, skipping"
             )
-            suppress_secs = 300
-            self._cooldowns[asset_id] = time.time() - COOLDOWN_SECS + suppress_secs
+            self._cooldowns[asset_id] = time.time() - COOLDOWN_SECS + 300
             return
         try:
             city_tz = ZoneInfo(tz_name)
@@ -256,25 +253,35 @@ class BondPriceFeed:
             log.warning(
                 f"feed: {market.city} {market.target_date} — invalid timezone '{tz_name}', skipping"
             )
-            suppress_secs = 300
-            self._cooldowns[asset_id] = time.time() - COOLDOWN_SECS + suppress_secs
+            self._cooldowns[asset_id] = time.time() - COOLDOWN_SECS + 300
             return
-        next_day = market.target_date + timedelta(days=1)
-        end_of_day_utc = datetime(
-            next_day.year, next_day.month, next_day.day, 0, 0, 0,
-            tzinfo=city_tz,
-        ).astimezone(timezone.utc)
-        hours_to_day_end = (end_of_day_utc - datetime.now(timezone.utc)).total_seconds() / 3600
-        if 0 < hours_to_day_end < _config.BOND_MIN_ENTRY_HOURS:
-            suppress_secs = max(hours_to_day_end * 3600 + 300, 300)
-            self._cooldowns[asset_id] = time.time() - COOLDOWN_SECS + suppress_secs
-            log.info(
-                f"feed: {market.city} {market.target_date} — "
-                f"{hours_to_day_end:.1f}h until local midnight "
-                f"(gate={_config.BOND_MIN_ENTRY_HOURS}h): "
-                f"suppressed {suppress_secs/3600:.1f}h"
+
+        now_utc   = datetime.now(timezone.utc)
+        now_local = now_utc.astimezone(city_tz)
+
+        if market.target_date == now_local.date():
+            current_local_hour = now_local.hour
+            current_month      = now_local.month
+            forecast_peak_hour = forecast.forecast_peak_hour
+            gate_hour = _peak_stats.get_gate_hour(
+                market.city, forecast_peak_hour, current_month, _loaded_stats
             )
-            return
+            if current_local_hour >= gate_hour:
+                next_day = market.target_date + timedelta(days=1)
+                end_of_day_utc = datetime(
+                    next_day.year, next_day.month, next_day.day, 0, 0, 0,
+                    tzinfo=city_tz,
+                ).astimezone(timezone.utc)
+                suppress_secs = max(
+                    (end_of_day_utc - now_utc).total_seconds(), 0
+                ) + 300
+                self._cooldowns[asset_id] = time.time() - COOLDOWN_SECS + suppress_secs
+                log.info(
+                    f"feed: {market.city} {market.target_date} — "
+                    f"past gate hour {gate_hour} (current={current_local_hour}): "
+                    f"suppressed {suppress_secs/3600:.1f}h"
+                )
+                return
 
         opp = score_market(market, forecast)
         # Always cooldown after scoring — prevents re-evaluating the same token on every tick.
