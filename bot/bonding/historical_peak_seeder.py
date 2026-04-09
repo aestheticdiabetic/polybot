@@ -79,6 +79,7 @@ async def fetch_historical_hourly(
     lon: float,
     start_date: date,
     end_date: date,
+    session: aiohttp.ClientSession,
 ) -> dict:
     """
     Fetch hourly temperature_2m for a lat/lon over a date range from
@@ -93,11 +94,9 @@ async def fetch_historical_hourly(
         "start_date": start_date.isoformat(),
         "end_date":   end_date.isoformat(),
     }
-    timeout = aiohttp.ClientTimeout(total=30)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(HISTORICAL_API_URL, params=params) as resp:
-            resp.raise_for_status()
-            return await resp.json()
+    async with session.get(HISTORICAL_API_URL, params=params) as resp:
+        resp.raise_for_status()
+        return await resp.json()
 
 
 async def seed_missing_cities(
@@ -111,6 +110,9 @@ async def seed_missing_cities(
 
     Cities are processed sequentially with _REQUEST_INTERVAL seconds between
     calls to stay well within Open-Meteo rate limits.
+
+    Seeding is additive for months below SEED_MIN_SAMPLES only; months already
+    at or above threshold are left unchanged.
     """
     end_date   = date.today() - timedelta(days=1)  # archive is not real-time
     start_date = end_date - timedelta(days=365 * _SEED_YEARS)
@@ -122,50 +124,53 @@ async def seed_missing_cities(
 
     log.info(f"peak_seeder: seeding {len(to_seed)} cities from {start_date} to {end_date}")
 
-    last_request = 0.0
-    for city in to_seed:
-        lat, lon = cities[city]
-        gap = time.time() - last_request
-        if gap < _REQUEST_INTERVAL:
-            await asyncio.sleep(_REQUEST_INTERVAL - gap)
+    last_request = 0.0  # Rate limit is per-invocation; designed for single call at startup
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+        for city in to_seed:
+            lat, lon = cities[city]
+            gap = time.time() - last_request
+            if gap < _REQUEST_INTERVAL:
+                await asyncio.sleep(_REQUEST_INTERVAL - gap)
 
-        try:
-            raw = await fetch_historical_hourly(lat, lon, start_date, end_date)
-        except Exception as exc:
-            log.warning(f"peak_seeder: failed to fetch {city}: {exc}")
+            try:
+                raw = await fetch_historical_hourly(lat, lon, start_date, end_date, session)
+            except Exception as exc:
+                log.warning(f"peak_seeder: failed to fetch {city}: {exc}")
+                last_request = time.time()
+                continue
+
             last_request = time.time()
-            continue
+            daily_peaks = extract_daily_peak_hours(raw)
 
-        last_request = time.time()
-        daily_peaks = extract_daily_peak_hours(raw)
+            if city not in stats:
+                stats[city] = {"monthly": {}, "last_seeded": None, "last_observed": None}
 
-        if city not in stats:
-            stats[city] = {"monthly": {}, "last_seeded": None, "last_observed": None}
+            monthly = stats[city].setdefault("monthly", {})
+            for date_str, peak_hour in daily_peaks:
+                month_num = int(date_str[5:7])
+                month_key = str(month_num)
+                if month_key not in monthly:
+                    monthly[month_key] = {
+                        "hour_counts": [0] * 24,
+                        "sample_count": 0,
+                        "p75_peak_hour": 14,
+                    }
+                bucket = monthly[month_key]
+                # already seeded for this month, skip to avoid double-counting
+                if bucket.get("sample_count", 0) >= SEED_MIN_SAMPLES:
+                    continue
+                if 0 <= peak_hour <= 23:
+                    bucket["hour_counts"][peak_hour] += 1
+                    bucket["sample_count"] += 1
 
-        monthly = stats[city].setdefault("monthly", {})
-        for date_str, peak_hour in daily_peaks:
-            month_num = int(date_str[5:7])
-            month_key = str(month_num)
-            if month_key not in monthly:
-                monthly[month_key] = {
-                    "hour_counts": [0] * 24,
-                    "sample_count": 0,
-                    "p75_peak_hour": 14,
-                }
-            bucket = monthly[month_key]
-            if 0 <= peak_hour <= 23:
-                bucket["hour_counts"][peak_hour] += 1
-                bucket["sample_count"] += 1
+            # Recompute P75 for all months after bulk insert
+            for bucket in monthly.values():
+                bucket["p75_peak_hour"] = compute_p75(bucket["hour_counts"])
 
-        # Recompute P75 for all months after bulk insert
-        for bucket in monthly.values():
-            bucket["p75_peak_hour"] = compute_p75(bucket["hour_counts"])
-
-        from datetime import date as _date
-        stats[city]["last_seeded"] = _date.today().isoformat()
-        save_stats(stats, path)
-        log.info(
-            f"peak_seeder: {city} seeded — "
-            f"{len(daily_peaks)} days across "
-            f"{len(monthly)} months"
-        )
+            stats[city]["last_seeded"] = date.today().isoformat()
+            save_stats(stats, path)
+            log.info(
+                f"peak_seeder: {city} seeded — "
+                f"{len(daily_peaks)} days across "
+                f"{len(monthly)} months"
+            )
