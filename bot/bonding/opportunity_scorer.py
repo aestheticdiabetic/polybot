@@ -12,8 +12,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Optional
 
 import config as _config
+from bonding import peak_hour_stats as _peak_stats
 from bonding.market_scanner import MarketCandidate
 from bonding.weather_client import ForecastResult, prob_in_range, fahrenheit_to_celsius
+from bonding.weather_client import _peak_hour_stats as _loaded_stats
 
 log = logging.getLogger("bond.scorer")
 
@@ -103,10 +105,9 @@ def score_market(
     if time.time() < _scan_suppressions.get((market.city, market.target_date), 0.0):
         return None
 
-    # Skip markets where the target day is nearly over — our weather model assimilates
-    # real-time observations during the local afternoon and becomes artificially certain.
-    # We compute hours until LOCAL midnight (not UTC midnight) so the gate fires at the
-    # same point in the city's day regardless of timezone.
+    # Dynamic peak-hour gate: skip markets where the city's forecast peak hour has passed.
+    # gate_hour = max(today_forecast_peak_hour, p75_historical_for_city_month) + 1
+    # Replaces the old hardcoded BOND_MIN_ENTRY_HOURS=10 (~14:00 local) gate.
     tz_name = _config.BOND_CITY_TIMEZONES.get(market.city)
     if not tz_name:
         log.warning(
@@ -118,37 +119,58 @@ def score_market(
         city_tz = ZoneInfo(tz_name)
     except ZoneInfoNotFoundError:
         log.warning(
-            f"scorer: {market.city} {market.target_date} — invalid timezone '{tz_name}', skipping "
-            f"(fix BOND_CITY_TIMEZONES in config.py)"
+            f"scorer: {market.city} {market.target_date} — invalid timezone '{tz_name}', skipping"
         )
         return None
-    next_day = market.target_date + timedelta(days=1)
-    end_of_day_utc = datetime(
-        next_day.year, next_day.month, next_day.day, 0, 0, 0,
-        tzinfo=city_tz,
-    ).astimezone(timezone.utc)
-    hours_to_day_end = (end_of_day_utc - datetime.now(timezone.utc)).total_seconds() / 3600
-    if hours_to_day_end < _config.BOND_MIN_ENTRY_HOURS:
-        if hours_to_day_end > 0:
-            # Approaching local midnight — suppress until midnight passes
-            suppress_secs = hours_to_day_end * 3600
-            reason = (
-                f"{hours_to_day_end:.1f}h until local midnight "
-                f"(gate={_config.BOND_MIN_ENTRY_HOURS}h)"
+
+    now_local = datetime.now(timezone.utc).astimezone(city_tz)
+
+    # Only apply the peak-hour gate to today's markets.
+    # Future-date markets are not close enough to their day-end for the gate to fire.
+    if market.target_date == now_local.date():
+        current_local_hour = now_local.hour
+        current_month      = now_local.month
+        forecast_peak_hour = forecast.forecast_peak_hour  # None for ensemble-based forecasts
+        gate_hour = _peak_stats.get_gate_hour(
+            market.city, forecast_peak_hour, current_month, _loaded_stats
+        )
+        if current_local_hour >= gate_hour:
+            # Suppress until local midnight so REST scan doesn't retry every 60s
+            next_day = market.target_date + timedelta(days=1)
+            end_of_day_utc = datetime(
+                next_day.year, next_day.month, next_day.day, 0, 0, 0,
+                tzinfo=city_tz,
+            ).astimezone(timezone.utc)
+            suppress_secs = max(
+                (end_of_day_utc - datetime.now(timezone.utc)).total_seconds(), 0
+            ) + 300  # 5 min buffer past midnight
+            _scan_suppressions[(market.city, market.target_date)] = (
+                time.time() + suppress_secs
             )
-        else:
-            # Local day has already ended — the original `0 <` guard was missing this case.
-            # Suppress for 24 h so we don't retry a settled market every 60 s.
-            suppress_secs = 24 * 3600
-            reason = f"local day already ended ({abs(hours_to_day_end):.1f}h ago)"
-        _scan_suppressions[(market.city, market.target_date)] = (
-            time.time() + suppress_secs
-        )
-        log.info(
-            f"scorer: {market.city} {market.target_date} — {reason}: "
-            f"skipping, suppressed for {suppress_secs / 3600:.1f}h"
-        )
-        return None
+            log.info(
+                f"scorer: {market.city} {market.target_date} — "
+                f"past gate hour {gate_hour} (current={current_local_hour}, "
+                f"forecast_peak={forecast_peak_hour}, month={current_month}): "
+                f"suppressed for {suppress_secs/3600:.1f}h"
+            )
+            return None
+    else:
+        # For future-date markets: only suppress if the target day has already ended.
+        next_day = market.target_date + timedelta(days=1)
+        end_of_day_utc = datetime(
+            next_day.year, next_day.month, next_day.day, 0, 0, 0,
+            tzinfo=city_tz,
+        ).astimezone(timezone.utc)
+        hours_to_day_end = (end_of_day_utc - datetime.now(timezone.utc)).total_seconds() / 3600
+        if hours_to_day_end <= 0:
+            _scan_suppressions[(market.city, market.target_date)] = (
+                time.time() + 24 * 3600
+            )
+            log.info(
+                f"scorer: {market.city} {market.target_date} — "
+                f"local day already ended: suppressed for 24h"
+            )
+            return None
 
     temp_min, temp_max = _convert_temps(market)
     if temp_min is None or temp_max is None:
