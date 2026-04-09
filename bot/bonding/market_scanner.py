@@ -8,7 +8,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import aiohttp
@@ -123,6 +123,19 @@ async def scan_weather_markets() -> list[MarketCandidate]:
         # Parse resolution time
         resolution_time = _parse_resolution_time(m)
         if resolution_time is None:
+            fail_time += 1
+            continue
+
+        # Sanity-check parsed date against resolution time.
+        # _extract_date() assigns past month/day combos to next year (e.g. "April 8"
+        # on April 9 → 2027-04-08). Cross-checking catches these stale markets before
+        # they propagate 365-day date ranges to weather APIs.
+        target_date = parsed["date"]
+        if target_date > resolution_time.date() + timedelta(days=2):
+            log.debug(
+                f"scanner: skip stale date mismatch — question date {target_date} "
+                f"vs resolution {resolution_time.date()}: {question!r:.60}"
+            )
             fail_time += 1
             continue
 

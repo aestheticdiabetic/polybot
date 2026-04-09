@@ -31,9 +31,17 @@ TOMORROW_IO_URL = "https://api.tomorrow.io/v4/timelines"
 TOMORROW_IO_CACHE_PATH = os.environ.get(
     "TOMORROW_IO_CACHE_PATH", "/app/data/tomorrow_cache.json"
 )
+TOMORROW_IO_CALL_TIMES_PATH = os.environ.get(
+    "TOMORROW_IO_CALL_TIMES_PATH", "/app/data/tomorrow_call_times.json"
+)
+
+# Free-tier forecast horizon: tomorrow.io Developer plan supports up to 5 days ahead.
+# Dates beyond this always return 403; filtering prevents wasted credits.
+TOMORROW_IO_MAX_FORECAST_DAYS = 5
 
 _call_times: list[float] = []
 _call_lock: Optional[asyncio.Lock] = None
+_call_times_loaded: bool = False
 
 _cache: dict[str, tuple[float, dict]] = {}
 _cache_lock: Optional[asyncio.Lock] = None
@@ -52,6 +60,40 @@ def _get_cache_lock() -> asyncio.Lock:
     if _cache_lock is None:
         _cache_lock = asyncio.Lock()
     return _cache_lock
+
+
+def _load_call_times() -> None:
+    """Load persisted call timestamps from disk, pruning entries older than 1 hour."""
+    global _call_times_loaded
+    if _call_times_loaded:
+        return
+    _call_times_loaded = True
+    try:
+        with open(TOMORROW_IO_CALL_TIMES_PATH) as f:
+            saved: list = json.load(f)
+        cutoff = time.time() - 3600
+        recent = [t for t in saved if t > cutoff]
+        _call_times.extend(recent)
+        if recent:
+            log.info(f"tomorrow: restored {len(recent)} call timestamps from disk")
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        log.warning(f"tomorrow: failed to load call times: {exc}")
+
+
+def _save_call_times() -> None:
+    """Persist recent call timestamps to disk for cross-restart rate limiting."""
+    try:
+        Path(TOMORROW_IO_CALL_TIMES_PATH).parent.mkdir(parents=True, exist_ok=True)
+        cutoff = time.time() - 3600
+        to_save = [t for t in _call_times if t > cutoff]
+        tmp = TOMORROW_IO_CALL_TIMES_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(to_save, f)
+        os.replace(tmp, TOMORROW_IO_CALL_TIMES_PATH)
+    except Exception as exc:
+        log.warning(f"tomorrow: failed to save call times: {exc}")
 
 
 def _load_disk_cache() -> None:
@@ -93,6 +135,7 @@ def _save_disk_cache() -> None:
 
 def _check_rate_limit() -> bool:
     """Returns True if a request is allowed. Prunes stale entries as side-effect."""
+    _load_call_times()
     now = time.time()
     cutoff = now - 3600
     while _call_times and _call_times[0] < cutoff:
@@ -102,6 +145,7 @@ def _check_rate_limit() -> bool:
 
 def _record_call() -> None:
     _call_times.append(time.time())
+    _save_call_times()
 
 
 def _make_forecast_result(city: str, target_date: date, temp_max_c: float) -> ForecastResult:

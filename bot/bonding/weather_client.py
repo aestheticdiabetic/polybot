@@ -490,12 +490,18 @@ async def get_consensus_forecasts(
     log.info(f"ECMWF fetch complete: {len(ecmwf_results)} results from {n_ecmwf_cities} cities")
 
     # tomorrow.io — one batched call per city (reduces calls from N pairs to N cities)
+    # Filter to free-tier forecast horizon only: dates beyond this return 403 and waste credits.
+    from bonding.tomorrow_client import TOMORROW_IO_MAX_FORECAST_DAYS
+    tio_horizon = today_d + timedelta(days=TOMORROW_IO_MAX_FORECAST_DAYS)
     tio_results: dict[tuple[str, date], ForecastResult] = {}
     n_tio_cities = len(city_groups)
     for i, (canonical, lat, lon, dates) in enumerate(city_groups.values()):
         if i % 10 == 0 and i > 0:
             log.info(f"TIO fetch: {i}/{n_tio_cities} cities done")
-        batch = await _tio_get_forecasts_batch(canonical, lat, lon, sorted(dates))
+        tio_dates = sorted(d for d in dates if d <= tio_horizon)
+        if not tio_dates:
+            continue
+        batch = await _tio_get_forecasts_batch(canonical, lat, lon, tio_dates)
         for d, result in batch.items():
             tio_results[(canonical, d)] = result
     log.info(f"TIO fetch complete: {len(tio_results)} results from {n_tio_cities} cities")
