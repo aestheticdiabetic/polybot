@@ -34,6 +34,7 @@ from typing import Optional
 
 import aiohttp
 import config as _config
+from bonding import peak_hour_stats as _peak_stats
 
 log = logging.getLogger("bond.weather")
 
@@ -86,6 +87,7 @@ class ForecastResult:
     target_date: date
     daily_max_c: float            # ensemble control or hourly forecast daily high (°C)
     ensemble_members: list[float] # daily max from each member (real or synthetic) (°C)
+    forecast_peak_hour: Optional[int] = None  # local hour (0-23) of forecast daily max; None for ensemble
 
 
 # ── Ensemble cache (disk-persistent, 2h TTL) ─────────────────────────────────
@@ -98,6 +100,13 @@ _nearterm_cache: dict[tuple, tuple[float, dict]] = {}
 _nearterm_cache_lock = asyncio.Lock()
 _nearterm_disk_cache_loaded = False
 
+# In-memory peak hour stats — loaded once at startup via init_peak_stats()
+_peak_hour_stats: dict = {}
+
+# (city, date) pairs for which a peak-hour observation has already been recorded today.
+# Cleared of stale entries on each call to _parse_nearterm_forecast.
+_observation_recorded: set[tuple[str, date]] = set()
+
 # Serial rate limiter (shared by all API calls)
 _rate_lock: Optional[asyncio.Lock] = None
 _last_request_time: float = 0.0
@@ -108,6 +117,16 @@ def _get_rate_lock() -> asyncio.Lock:
     if _rate_lock is None:
         _rate_lock = asyncio.Lock()
     return _rate_lock
+
+
+def init_peak_stats(path: Optional[str] = None) -> None:
+    """Load peak hour stats into module-level cache. Call once at bot startup."""
+    global _peak_hour_stats
+    if path:
+        _peak_hour_stats = _peak_stats.load_stats(path)
+    else:
+        _peak_hour_stats = _peak_stats.load_stats()
+    log.info(f"weather: loaded peak hour stats for {len(_peak_hour_stats)} cities")
 
 
 def _check_limits() -> None:
@@ -542,6 +561,9 @@ def _parse_nearterm_forecast(city: str, target_date: date, raw: dict) -> Forecas
         utc_offset_secs: int = raw.get("utc_offset_seconds", 0)
         local_ts = datetime.now(timezone.utc).timestamp() + utc_offset_secs
         current_hour_local = int((local_ts % 86400) // 3600)
+        # Use city's local time for month (approximate via utc_offset)
+        local_dt = datetime.now(timezone.utc) + timedelta(seconds=utc_offset_secs)
+        current_month = local_dt.month
 
         observed = [
             float(t) for ts, t in zip(times, temps)
@@ -552,7 +574,6 @@ def _parse_nearterm_forecast(city: str, target_date: date, raw: dict) -> Forecas
         sigma = NEARTERM_SIGMA_SAME_DAY
 
         # Incorporate real-time current temperature (Open-Meteo ~15-min refresh).
-        # More recent than the hourly model-analysis values; use as additional floor.
         raw_ct = (raw.get("current") or {}).get("temperature_2m")
         if raw_ct is not None:
             try:
@@ -561,22 +582,65 @@ def _parse_nearterm_forecast(city: str, target_date: date, raw: dict) -> Forecas
             except (TypeError, ValueError):
                 pass
 
-        # Post-peak decay: 14:00–16:00 local. Linearly weights forecast_max toward
-        # running_max and sigma toward 0. At full decay (16:00+): all synthetic
-        # members equal running_max — market is skipped if target not yet reached.
-        if running_max is not None and current_hour_local >= _POST_PEAK_HOUR_LOCAL:
-            hours_past_peak = current_hour_local - _POST_PEAK_HOUR_LOCAL
+        # Extract forecast peak hour: local hour with highest forecast temp today.
+        hour_temps = [
+            (int(ts[11:13]), float(t))
+            for ts, t in zip(times, temps)
+            if ts.startswith(date_str) and t is not None
+        ]
+        forecast_peak_hour: Optional[int] = (
+            max(hour_temps, key=lambda x: x[1])[0] if hour_temps else None
+        )
+
+        # Dynamic post-peak decay anchor using city's peak hour stats.
+        # gate_hour = max(forecast_peak, p75_historical) + 1
+        # Decay starts 1 hour before the gate (gate_hour - 1).
+        gate_hour = _peak_stats.get_gate_hour(
+            city, forecast_peak_hour, current_month, _peak_hour_stats
+        )
+        post_peak_hour = gate_hour - 1  # decay starts here
+
+        # Post-peak decay: linearly weight forecast_max → running_max over 2 hours.
+        if running_max is not None and current_hour_local >= post_peak_hour:
+            hours_past_peak = current_hour_local - post_peak_hour
             decay_weight = min(hours_past_peak / _POST_PEAK_DECAY_HOURS, 1.0)
             forecast_max = (1.0 - decay_weight) * forecast_max + decay_weight * running_max
             forecast_max = max(running_max, forecast_max)
             sigma *= (1.0 - decay_weight)
             log.debug(
                 f"weather nearterm: {city} {date_str} post-peak decay "
-                f"hour={current_hour_local} weight={decay_weight:.2f} "
+                f"hour={current_hour_local} post_peak_hour={post_peak_hour} "
+                f"weight={decay_weight:.2f} "
                 f"→ forecast_max={forecast_max:.1f}°C sigma={sigma:.2f}"
             )
+
+        # Record observation once per city-day after the gate hour has fully passed.
+        if running_max is not None and current_hour_local >= gate_hour:
+            global _observation_recorded
+            today_date = date.today()
+            # Clear stale entries from previous days
+            _observation_recorded = {
+                (c, d) for c, d in _observation_recorded if d >= today_date
+            }
+            obs_key = (city, target_date)
+            if obs_key not in _observation_recorded:
+                # Find the hour of observed peak temperature
+                peak_obs_hour: Optional[int] = None
+                peak_obs_temp = float("-inf")
+                for ts, t in zip(times, temps):
+                    if (ts.startswith(date_str) and t is not None
+                            and int(ts[11:13]) <= current_hour_local):
+                        if float(t) > peak_obs_temp:
+                            peak_obs_temp = float(t)
+                            peak_obs_hour = int(ts[11:13])
+                if peak_obs_hour is not None:
+                    _peak_stats.record_observation(
+                        city, current_month, peak_obs_hour, _peak_hour_stats
+                    )
+                    _observation_recorded.add(obs_key)
     else:
         sigma = NEARTERM_SIGMA_NEXT_DAY
+        forecast_peak_hour = None
 
     # Per-city bias correction (°C) derived from ERA5 calibration.
     # Shifts forecast_max before generating ensemble members.
@@ -609,6 +673,7 @@ def _parse_nearterm_forecast(city: str, target_date: date, raw: dict) -> Forecas
         target_date=target_date,
         daily_max_c=control,
         ensemble_members=members,
+        forecast_peak_hour=forecast_peak_hour,
     )
 
 
