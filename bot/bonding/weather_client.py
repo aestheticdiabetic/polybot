@@ -224,7 +224,13 @@ def _load_disk_cache() -> None:
             age = now - entry.get("fetched_at", 0)
             if age < DISK_CACHE_TTL_SECS:
                 parts = key_str.split("|")
-                key = (float(parts[0]), float(parts[1]), parts[2], parts[3])
+                if len(parts) == 5:
+                    key = (float(parts[0]), float(parts[1]), parts[2], parts[3], parts[4])
+                elif len(parts) == 4:
+                    # Legacy GFS entry without model — skip, will re-fetch with new 5-tuple key
+                    continue
+                else:
+                    continue
                 _cache[key] = (entry["fetched_at"], entry["data"])
                 loaded += 1
         if loaded:
@@ -242,7 +248,7 @@ def _save_disk_cache() -> None:
         to_save: dict = {}
         for key, (fetched_at, data) in _cache.items():
             if now - fetched_at < DISK_CACHE_TTL_SECS:
-                key_str = f"{key[0]}|{key[1]}|{key[2]}|{key[3]}"
+                key_str = "|".join(str(k) for k in key)
                 to_save[key_str] = {"fetched_at": fetched_at, "data": data}
         tmp = DISK_CACHE_PATH + ".tmp"
         with open(tmp, "w") as f:
@@ -397,6 +403,35 @@ async def get_all_forecasts(
     fetched = (n_nearterm + n_ensemble) - failed
     log.info(f"BOND_WEATHER_DONE fetched={fetched} failed={failed}")
     return results
+
+
+async def get_ecmwf_forecast(city: str, target_date: date) -> Optional[ForecastResult]:
+    """
+    Fetch ECMWF IFS ensemble daily max for a single city/date.
+    Uses the same Open-Meteo ensemble endpoint with model=ECMWF_ENSEMBLE_MODEL.
+    Returns None on any error (unknown city, API failure, date too far out).
+    """
+    today = date.today()
+    if target_date > today + timedelta(days=15):
+        return None
+
+    try:
+        canonical, lat, lon = _resolve_city(city)
+    except UnknownCityError:
+        log.warning(f"weather ecmwf: unknown city '{city}'")
+        return None
+
+    start_date = max(today, target_date - timedelta(days=1))
+    end_date   = target_date + timedelta(days=1)
+
+    try:
+        raw = await _fetch_ensemble_range(
+            lat, lon, start_date, end_date, model=_config.ECMWF_ENSEMBLE_MODEL
+        )
+        return _parse_ensemble_from_range(canonical, target_date, raw)
+    except Exception as exc:
+        log.warning(f"weather ecmwf: failed for {city} {target_date}: {exc}")
+        return None
 
 
 def prob_in_range(
@@ -716,11 +751,13 @@ def _parse_nearterm_forecast(city: str, target_date: date, raw: dict) -> Forecas
 
 
 async def _fetch_ensemble_range(
-    lat: float, lon: float, start_date: date, end_date: date
+    lat: float, lon: float, start_date: date, end_date: date,
+    model: str = ENSEMBLE_MODEL,
 ) -> dict:
     """
-    Fetch GFS ensemble daily max temperatures for a date range.
+    Fetch ensemble daily max temperatures for a date range.
     Disk-persistent 2-hour cache. Uses shared serial rate limiter.
+    Supports any Open-Meteo ensemble model (GFS, ECMWF, etc.).
     """
     global _last_request_time
 
@@ -728,7 +765,8 @@ async def _fetch_ensemble_range(
 
     start_str = start_date.isoformat()
     end_str   = end_date.isoformat()
-    cache_key = (round(lat, 4), round(lon, 4), start_str, end_str)
+    # Include model in key so GFS and ECMWF caches don't collide
+    cache_key = (round(lat, 4), round(lon, 4), start_str, end_str, model)
 
     async with _cache_lock:
         if cache_key in _cache:
@@ -741,7 +779,7 @@ async def _fetch_ensemble_range(
         "latitude":   lat,
         "longitude":  lon,
         "daily":      "temperature_2m_max",
-        "models":     ENSEMBLE_MODEL,
+        "models":     model,
         "timezone":   "auto",
         "start_date": start_str,
         "end_date":   end_str,
