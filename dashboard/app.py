@@ -502,7 +502,12 @@ async def create_app(state):
         """Aggregated paper sim stats with P&L projection for a given starting balance."""
         from datetime import datetime as _dt, timezone as _tz
         starting_balance = float(request.rel_url.query.get("balance", 1000))
-        records = _load_paper_trades()
+        all_records = _load_paper_trades()
+        # Exclude WOULD_SELL events — they are supplementary sell-side logs.
+        # The corresponding WOULD_BUY record is patched with outcome='SOLD' and
+        # pnl by PaperExitManager._patch_would_buy, so it is the canonical record.
+        # Including WOULD_SELL would double-count capital, pnl, and resolved counts.
+        records = [r for r in all_records if r.get("event") != "WOULD_SELL"]
 
         if not records:
             _empty_tier_bd = {t: {"count": 0, "avg_conf": None} for t in ("CORE", "SECONDARY", "WING")}

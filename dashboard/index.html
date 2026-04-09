@@ -1475,11 +1475,16 @@ function updatePaperStats(s) {
 function renderPaperTrades() {
   const tierFilt    = document.getElementById('paper-tier-filter').value;
   const outcomeFilt = document.getElementById('paper-outcome-filter').value;
+  const _isSoldEvent = r => r.event === 'WOULD_SELL';
+  const _isEffectiveWin  = r => _isSoldEvent(r) ? (r.pnl || 0) > 0 : (r.outcome != null && (r.pnl || 0) > 0);
+  const _isEffectiveLoss = r => _isSoldEvent(r) ? (r.pnl != null && (r.pnl || 0) <= 0) : (r.outcome != null && (r.pnl || 0) <= 0);
+  const _isPending       = r => !_isSoldEvent(r) && r.outcome == null;
+
   let records = [...paperRecords];
   if (tierFilt) records = records.filter(r => r.tier === tierFilt);
-  if (outcomeFilt === 'pending') records = records.filter(r => r.outcome == null);
-  else if (outcomeFilt === 'won')  records = records.filter(r => r.outcome != null && (r.pnl || 0) > 0);
-  else if (outcomeFilt === 'lost') records = records.filter(r => r.outcome != null && (r.pnl || 0) <= 0);
+  if (outcomeFilt === 'pending') records = records.filter(_isPending);
+  else if (outcomeFilt === 'won')  records = records.filter(_isEffectiveWin);
+  else if (outcomeFilt === 'lost') records = records.filter(_isEffectiveLoss);
 
   const tbody = document.getElementById('paper-trades-tbody'); tbody.innerHTML = '';
   if (!records.length) {
@@ -1487,21 +1492,31 @@ function renderPaperTrades() {
     return;
   }
   records.forEach(r => {
+    const isSold = _isSoldEvent(r);
     const projProfit = (r.ev || 0) * (r.shares || 0);
-    const actualWin = r.outcome != null && (r.pnl || 0) > 0;
-    const outcomeHtml = r.outcome == null
-      ? '<span style="color:var(--muted)">pending</span>'
-      : actualWin
-        ? `<span class="pill pill-won">${r.outcome} ✓</span>`
-        : `<span class="pill pill-lost">${r.outcome} ✗</span>`;
+    const actualWin = _isEffectiveWin(r);
+    const outcomeHtml = isSold
+      ? `<span class="pill ${actualWin ? 'pill-won' : 'pill-lost'}">sold ${actualWin ? '✓' : '✗'}</span>`
+      : r.outcome == null
+        ? '<span style="color:var(--muted)">pending</span>'
+        : actualWin
+          ? `<span class="pill pill-won">${r.outcome} ✓</span>`
+          : `<span class="pill pill-lost">${r.outcome} ✗</span>`;
     const pnlHtml = r.pnl != null
       ? `<span class="${r.pnl >= 0 ? 'green' : 'red'}">${r.pnl >= 0 ? '+' : ''}$${parseFloat(r.pnl).toFixed(4)}</span>`
       : '—';
-    const resLeft = resolutionSecsLeft(r.resolution_time);
-    const resStr  = fmtTimeLeft(resLeft);
-    const resClass = resLeft != null && resLeft < 0 ? 'muted'
-                   : resLeft != null && resLeft < 3600 * 4 ? 'red'
-                   : resLeft != null && resLeft < 3600 * 24 ? 'amber' : '';
+    let resStr, resClass;
+    if (isSold) {
+      const exitP = r.exit_price != null ? parseFloat(r.exit_price).toFixed(4) : '?';
+      resStr  = `sold @ ${exitP}`;
+      resClass = 'muted';
+    } else {
+      const resLeft = resolutionSecsLeft(r.resolution_time);
+      resStr  = fmtTimeLeft(resLeft);
+      resClass = resLeft != null && resLeft < 0 ? 'muted'
+               : resLeft != null && resLeft < 3600 * 4 ? 'red'
+               : resLeft != null && resLeft < 3600 * 24 ? 'amber' : '';
+    }
     const tr = document.createElement('tr');
     const ts = r.ts ? new Date(r.ts).toLocaleString() : '—';
     tr.innerHTML = `
@@ -1510,7 +1525,7 @@ function renderPaperTrades() {
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)">${r.question || ''}</td>
       <td><span class="pill pill-${(r.tier||'').toLowerCase()}">${r.tier||'?'}</span></td>
       <td>${r.shares || 0}</td>
-      <td>${parseFloat(r.ask || 0).toFixed(4)}</td>
+      <td>${isSold ? parseFloat(r.entry_price||0).toFixed(4) : parseFloat(r.ask||0).toFixed(4)}</td>
       <td>${r.prob != null ? (r.prob*100).toFixed(1)+'%' : '—'}</td>
       <td class="${(r.ev||0)>0?'green':''}">${r.ev != null ? r.ev.toFixed(4) : '—'}</td>
       <td class="amber">$${parseFloat(r.capital||0).toFixed(4)}</td>
