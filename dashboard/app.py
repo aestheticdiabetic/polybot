@@ -753,10 +753,37 @@ async def create_app(state):
         Updates both the paper trades JSONL and the bonding ledger in-place.
         """
         import aiohttp as _aiohttp
-        from datetime import datetime, timezone as _tz
+        from datetime import datetime, timedelta, timezone as _tz
         from pathlib import Path as _Path
 
         now = datetime.now(_tz.utc)
+
+        from zoneinfo import ZoneInfo as _ZoneInfo
+
+        def _resolution_deadline(city: str, resolution_time_str: str) -> datetime:
+            """Return the UTC time after which a market's outcome can be scored.
+
+            Uses 18:00 local time in the city's timezone — the same convention as
+            _end_of_day_utc() in paper_sim.py and the peak-hour gate in the scorer.
+            Falls back to midnight UTC of date+1 if the city is unknown, ensuring we
+            never score a market that is still running on its calendar day.
+
+            This replaces the old approach of comparing resolution_time < now directly,
+            which caused midnight-start-of-day timestamps (the raw Gamma end_date_iso
+            value) to be treated as past deadlines for current-day markets.
+            """
+            date_str = resolution_time_str[:10]  # "YYYY-MM-DD"
+            year, month, day = int(date_str[:4]), int(date_str[5:7]), int(date_str[8:10])
+            tz_name = _config.BOND_CITY_TIMEZONES.get(city)
+            if tz_name:
+                try:
+                    city_tz = _ZoneInfo(tz_name)
+                    eod = datetime(year, month, day, 18, 0, 0, tzinfo=city_tz)
+                    return eod.astimezone(_tz.utc)
+                except Exception:
+                    pass
+            # Fallback: midnight UTC of following day
+            return datetime.fromisoformat(date_str + "T00:00:00+00:00") + timedelta(days=1)
 
         # ── Collect market IDs that need resolution ───────────────────
         paper_records = _load_paper_trades()
@@ -764,7 +791,7 @@ async def create_app(state):
             r for r in paper_records
             if r.get("outcome") is None
             and r.get("resolution_time")
-            and datetime.fromisoformat(r["resolution_time"].replace("Z", "+00:00")) < now
+            and _resolution_deadline(r.get("city", ""), r["resolution_time"]) < now
         ]
 
         live_positions = _load_bond_ledger()
@@ -772,7 +799,7 @@ async def create_app(state):
             p for p in live_positions
             if p.get("status") == "OPEN"
             and p.get("resolution_time")
-            and datetime.fromisoformat(p["resolution_time"].replace("Z", "+00:00")) < now
+            and _resolution_deadline(p.get("city", ""), p["resolution_time"]) < now
         ]
 
         all_market_ids = {r["market_id"] for r in pending_paper if r.get("market_id")}
@@ -844,9 +871,7 @@ async def create_app(state):
                         p.get("status") == "OPEN"
                         and mid in outcome_map
                         and p.get("resolution_time")
-                        and datetime.fromisoformat(
-                            p["resolution_time"].replace("Z", "+00:00")
-                        ) < now
+                        and _resolution_deadline(p.get("city", ""), p["resolution_time"]) < now
                     ):
                         exit_price = 1.0 if outcome_map[mid] == "YES" else 0.0
                         p["status"]     = "RESOLVED"
@@ -877,6 +902,81 @@ async def create_app(state):
             "paper_resolved": paper_resolved,
             "live_resolved":  live_resolved,
         })
+
+    @_auth_required
+    async def api_bond_paper_revert_resolutions(request):
+        """
+        Revert paper-trade WOULD_BUY records whose outcome was set prematurely —
+        i.e., where the calendar day has not yet ended (end-of-day = midnight UTC
+        of date+1 is still in the future).
+
+        Accepts optional query param ?date=YYYY-MM-DD to target a specific date,
+        otherwise reverts any record whose date's end-of-day is still in the future.
+        """
+        from datetime import datetime, timedelta, timezone as _tz
+        from pathlib import Path as _Path
+        from zoneinfo import ZoneInfo as _ZoneInfo
+
+        now = datetime.now(_tz.utc)
+        target_date = request.rel_url.query.get("date")  # optional filter
+
+        def _eod(city: str, date_str: str) -> datetime:
+            tz_name = _config.BOND_CITY_TIMEZONES.get(city)
+            year, month, day = int(date_str[:4]), int(date_str[5:7]), int(date_str[8:10])
+            if tz_name:
+                try:
+                    eod = datetime(year, month, day, 18, 0, 0, tzinfo=_ZoneInfo(tz_name))
+                    return eod.astimezone(_tz.utc)
+                except Exception:
+                    pass
+            return datetime.fromisoformat(date_str + "T00:00:00+00:00") + timedelta(days=1)
+
+        paper_records = _load_paper_trades()
+        reverted = 0
+        updated = []
+
+        for r in paper_records:
+            rec = dict(r)
+            res_time = rec.get("resolution_time", "")
+            if not res_time:
+                updated.append(rec)
+                continue
+
+            date_str = res_time[:10]
+            if target_date and date_str != target_date:
+                updated.append(rec)
+                continue
+
+            eod = _eod(rec.get("city", ""), date_str)
+            outcome = rec.get("outcome")
+
+            # Only revert if: outcome was set (YES/NO) AND the day hasn't ended yet
+            if outcome in ("YES", "NO") and eod > now:
+                log.info(
+                    f"revert-resolutions: clearing outcome={outcome} "
+                    f"city={rec.get('city')} tier={rec.get('tier')} "
+                    f"date={date_str} market={rec.get('market_id','')[:8]}"
+                )
+                rec["outcome"] = None
+                rec["pnl"]     = None
+                reverted += 1
+
+            updated.append(rec)
+
+        if reverted:
+            try:
+                tmp = PAPER_LOG.with_suffix(".tmp")
+                tmp.write_text(
+                    "\n".join(json.dumps(rec) for rec in updated) + "\n",
+                    encoding="utf-8",
+                )
+                tmp.replace(PAPER_LOG)
+            except Exception as exc:
+                log.error(f"revert-resolutions: file update failed: {exc}")
+                return web.json_response({"ok": False, "error": str(exc)})
+
+        log.info(f"revert-resolutions: reverted={reverted}")
+        return web.json_response({"ok": True, "reverted": reverted})
 
     # ── Static dashboard HTML ────────────────────────────────────
 
@@ -920,8 +1020,9 @@ async def create_app(state):
     app.router.add_get("/api/bond/discover-cities",  api_bond_discover_cities)
     app.router.add_get("/api/bond/paper-trades",     api_bond_paper_trades)
     app.router.add_get("/api/bond/paper-stats",      api_bond_paper_stats)
-    app.router.add_post("/api/bond/paper-check",     api_bond_paper_check_resolutions)
-    app.router.add_get("/api/bond/real-stats",       api_bond_real_stats)
+    app.router.add_post("/api/bond/paper-check",      api_bond_paper_check_resolutions)
+    app.router.add_post("/api/bond/paper-revert",     api_bond_paper_revert_resolutions)
+    app.router.add_get("/api/bond/real-stats",        api_bond_real_stats)
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
