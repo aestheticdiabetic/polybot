@@ -59,6 +59,20 @@ def test_get_gate_hour_fallback_when_no_month_bucket():
     assert get_gate_hour("Seattle", forecast_peak_hour=None, month=4, stats=stats) == 15
 
 
+def test_get_gate_hour_with_none_forecast_uses_p75_only():
+    """When forecast_peak_hour is None, gate = p75 + 1."""
+    stats = {
+        "Seattle": {
+            "monthly": {
+                "4": {"hour_counts": [0]*24, "sample_count": 61, "p75_peak_hour": 15}
+            },
+            "last_seeded": None,
+            "last_observed": None,
+        }
+    }
+    assert get_gate_hour("Seattle", forecast_peak_hour=None, month=4, stats=stats) == 16
+
+
 def test_record_observation_updates_counts_and_p75():
     """record_observation increments hour_counts and recomputes p75_peak_hour."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:

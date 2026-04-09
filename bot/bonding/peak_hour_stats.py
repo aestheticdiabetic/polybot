@@ -18,7 +18,7 @@ log = logging.getLogger("bond.peak_stats")
 
 _STATS_PATH = os.environ.get("PEAK_HOUR_STATS_PATH", "/app/data/peak_hour_stats.json")
 _FALLBACK_GATE_HOUR = 15  # 14 + 1: safe default when no data exists
-_SEED_MIN_SAMPLES = 100   # minimum sample_count before a city-month is considered seeded
+SEED_MIN_SAMPLES = 100   # minimum sample_count before a city-month is considered seeded
 
 
 def compute_p75(hour_counts: list[int]) -> int:
@@ -54,11 +54,17 @@ def load_stats(path: str = _STATS_PATH) -> dict:
 
 def save_stats(stats: dict, path: str = _STATS_PATH) -> None:
     """Persist stats dict to JSON, creating parent directories if needed."""
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(stats, f, indent=2)
-    os.replace(tmp, path)
+    abs_path = os.path.abspath(path)
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+    tmp = abs_path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(stats, f, indent=2)
+        os.replace(tmp, abs_path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
 
 
 def get_gate_hour(
@@ -102,6 +108,10 @@ def record_observation(
     Record a confirmed daily peak hour observation for a city-month bucket.
     Recomputes p75_peak_hour and persists to disk.
     """
+    if not (0 <= peak_hour <= 23):
+        log.warning(f"peak_stats: invalid peak_hour={peak_hour} for {city}, skipping")
+        return
+
     if city not in stats:
         stats[city] = {"monthly": {}, "last_seeded": None, "last_observed": None}
 
@@ -115,10 +125,9 @@ def record_observation(
         }
 
     bucket = monthly[month_key]
-    if 0 <= peak_hour <= 23:
-        bucket["hour_counts"][peak_hour] += 1
-        bucket["sample_count"] += 1
-        bucket["p75_peak_hour"] = compute_p75(bucket["hour_counts"])
+    bucket["hour_counts"][peak_hour] += 1
+    bucket["sample_count"] += 1
+    bucket["p75_peak_hour"] = compute_p75(bucket["hour_counts"])
 
     stats[city]["last_observed"] = date.today().isoformat()
     save_stats(stats, path)
