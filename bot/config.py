@@ -173,6 +173,25 @@ BOND_MIN_ENTRY_HOURS      = 10    # FALLBACK ONLY — superseded by dynamic peak
 # means we will never claim more than 0.5% probability for that side.
 BOND_MARKET_DISAGREEMENT_RATIO = 5.0
 
+# ─── Cross-source weather ─────────────────────────────────────────────────────
+TOMORROW_IO_API_KEY           = os.getenv("TOMORROW_IO_API_KEY", "")
+TOMORROW_IO_CACHE_TTL_SECS    = 10_800   # 3 hours
+TOMORROW_IO_MAX_REQ_PER_HOUR  = 20       # headroom below 25/hr hard limit
+ECMWF_ENSEMBLE_MODEL          = "ecmwf_ifs04"  # 50+ members, global, free via Open-Meteo
+ECMWF_DISK_CACHE_PATH         = os.environ.get("ECMWF_CACHE_PATH", "/app/data/ecmwf_cache.json")
+
+# ─── CERTAIN tier ────────────────────────────────────────────────────────────
+CERTAIN_ASK_MIN                  = 0.75   # min YES ask — market sees it as likely
+CERTAIN_ASK_MAX                  = 0.95   # max YES ask — still room for edge
+CERTAIN_MIN_SOURCE_PROB          = 0.88   # each source must reach this individually
+CERTAIN_MAX_TEMP_DELTA_C         = 2.0    # max °C between source point forecasts
+CERTAIN_MAX_SPREAD_C             = 1.5    # max std dev of all combined ensemble members
+CERTAIN_MIN_CONSENSUS_PROB       = 0.90   # averaged probability floor
+CERTAIN_MIN_SOURCES              = 3      # all three sources must be present
+CERTAIN_MIN_EDGE                 = 0.05   # consensus_prob − ask
+CERTAIN_SHARES                   = 20     # conservative during validation
+CERTAIN_MAX_CAPITAL_PER_CLUSTER  = 20.00  # separate from BOND_MAX_CAPITAL_PER_CLUSTER
+
 # Per-city forecast bias corrections (°C).
 # Applied to daily_max_c before generating synthetic ensemble members.
 # Populate using bot/calibrate_forecasts.py and update as new data arrives.
