@@ -514,12 +514,14 @@ async def create_app(state):
         # The corresponding WOULD_BUY record is patched with outcome='SOLD' and
         # pnl by PaperExitManager._patch_would_buy, so it is the canonical record.
         # Including WOULD_SELL would double-count capital, pnl, and resolved counts.
-        # If the patch didn't take (race condition), fall back to sell_map data.
+        # If sell_map has an entry for a market, the early-exit ALWAYS takes priority:
+        # paper-check may have raced and overwritten the patch with a market-resolution
+        # outcome (e.g. 'NO'), but the actual realized trade was the early sell.
         raw_records = [r for r in all_records if r.get("event") != "WOULD_SELL"]
         records = []
         for r in raw_records:
             mid = r.get("market_id")
-            if r.get("outcome") is None and mid and mid in sell_map:
+            if mid and mid in sell_map:
                 sell = sell_map[mid]
                 r = {**r, "outcome": "SOLD", "exit_price": sell.get("exit_price"), "pnl": sell.get("pnl")}
             records.append(r)
