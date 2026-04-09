@@ -349,6 +349,10 @@ BOND_CITY_TIMEZONES: dict[str, str] = {
     "Shenzhen":       "Asia/Shanghai",
     # Central America
     "Panama City":    "America/Panama",
+    # Middle East
+    "Jeddah":         "Asia/Riyadh",
+    # Africa
+    "Cape Town":      "Africa/Johannesburg",
 }
 
 # City name aliases — maps Polymarket's naming variants to canonical names above
