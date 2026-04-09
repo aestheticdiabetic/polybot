@@ -11,6 +11,7 @@ Usage:
     asyncio.create_task(feed.run())              # start WS listener
 """
 import asyncio
+import config as _config
 import json
 import logging
 import time
@@ -239,7 +240,6 @@ class BondPriceFeed:
             return
 
         # Dynamic peak-hour gate — mirrors opportunity_scorer logic exactly.
-        import config as _config
         tz_name = _config.BOND_CITY_TIMEZONES.get(market.city)
         if not tz_name:
             log.warning(

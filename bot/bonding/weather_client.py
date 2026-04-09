@@ -121,11 +121,9 @@ def _get_rate_lock() -> asyncio.Lock:
 
 def init_peak_stats(path: Optional[str] = None) -> None:
     """Load peak hour stats into module-level cache. Call once at bot startup."""
-    global _peak_hour_stats
-    if path:
-        _peak_hour_stats = _peak_stats.load_stats(path)
-    else:
-        _peak_hour_stats = _peak_stats.load_stats()
+    loaded = _peak_stats.load_stats(path) if path else _peak_stats.load_stats()
+    _peak_hour_stats.clear()
+    _peak_hour_stats.update(loaded)
     log.info(f"weather: loaded peak hour stats for {len(_peak_hour_stats)} cities")
 
 
