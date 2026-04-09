@@ -262,7 +262,7 @@ class BondPriceFeed:
         if market.target_date == now_local.date():
             current_local_hour = now_local.hour
             current_month      = now_local.month
-            forecast_peak_hour = forecast.forecast_peak_hour
+            forecast_peak_hour = forecast.gfs.forecast_peak_hour
             gate_hour = _peak_stats.get_gate_hour(
                 market.city, forecast_peak_hour, current_month, _loaded_stats
             )

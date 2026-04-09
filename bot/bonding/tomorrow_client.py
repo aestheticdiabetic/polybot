@@ -132,6 +132,78 @@ def _extract_temp_max(raw: dict, target_date: date) -> Optional[float]:
     return None
 
 
+async def get_forecasts_batch(
+    city: str, lat: float, lon: float, dates: list[date]
+) -> dict[date, ForecastResult]:
+    """
+    Fetch daily max temperatures for multiple dates in a single API call.
+    Returns a dict of {date: ForecastResult} for dates where data was available.
+    Cache key is per city+range so one call covers all requested dates.
+    """
+    if not _config.TOMORROW_IO_API_KEY or not dates:
+        return {}
+
+    _load_disk_cache()
+
+    start_d = min(dates)
+    end_d   = max(dates)
+    cache_key = f"{round(lat, 4)}|{round(lon, 4)}|{start_d.isoformat()}|{end_d.isoformat()}"
+
+    raw = None
+    async with _get_cache_lock():
+        if cache_key in _cache:
+            fetched_at, cached_raw = _cache[cache_key]
+            if time.time() - fetched_at < _config.TOMORROW_IO_CACHE_TTL_SECS:
+                log.debug(f"tomorrow: batch cache hit for {city}")
+                raw = cached_raw
+
+    if raw is None:
+        async with _get_call_lock():
+            if not _check_rate_limit():
+                log.warning(
+                    f"tomorrow: hourly rate limit ({_config.TOMORROW_IO_MAX_REQ_PER_HOUR}/hr) "
+                    f"reached — skipping {city} ({len(dates)} dates)"
+                )
+                return {}
+
+            start_time = start_d.isoformat() + "T00:00:00Z"
+            end_time   = (end_d + timedelta(days=1)).isoformat() + "T00:00:00Z"
+            params = {
+                "location":   f"{lat},{lon}",
+                "fields":     "temperatureMax",
+                "timesteps":  "1d",
+                "units":      "metric",
+                "startTime":  start_time,
+                "endTime":    end_time,
+                "apikey":     _config.TOMORROW_IO_API_KEY,
+            }
+            timeout = aiohttp.ClientTimeout(total=10)
+            try:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(TOMORROW_IO_URL, params=params) as resp:
+                        if resp.status == 429:
+                            log.warning(f"tomorrow: 429 rate limit for {city}")
+                            return {}
+                        resp.raise_for_status()
+                        raw = await resp.json()
+            except Exception as exc:
+                log.warning(f"tomorrow: batch fetch failed for {city}: {exc}")
+                return {}
+
+            _record_call()
+
+        async with _get_cache_lock():
+            _cache[cache_key] = (time.time(), raw)
+        _save_disk_cache()
+
+    results: dict[date, ForecastResult] = {}
+    for d in dates:
+        temp_max = _extract_temp_max(raw, d)
+        if temp_max is not None:
+            results[d] = _make_forecast_result(city, d, temp_max)
+    return results
+
+
 async def get_forecast(
     city: str, lat: float, lon: float, target_date: date
 ) -> Optional[ForecastResult]:

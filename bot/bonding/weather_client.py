@@ -450,43 +450,55 @@ async def get_consensus_forecasts(
 
     Returns dict keyed by (canonical_city, date).
     """
-    from bonding.tomorrow_client import get_forecast as _tio_get_forecast
+    from bonding.tomorrow_client import get_forecasts_batch as _tio_get_forecasts_batch
 
     # GFS + near-term (serial, existing rate limiter)
     gfs_results = await get_all_forecasts(city_date_pairs)
 
-    # Build city → (canonical, lat, lon) lookup for ECMWF and TIO calls
-    city_coords: dict[str, tuple[str, float, float]] = {}
-    for city, _ in city_date_pairs:
-        if city in city_coords:
-            continue
+    # Build city → (canonical, lat, lon, {dates}) lookup for ECMWF and TIO calls
+    today_d = date.today()
+    city_groups: dict[str, tuple[str, float, float, set[date]]] = {}
+    for city, d in city_date_pairs:
         try:
             canonical, lat, lon = _resolve_city(city)
-            city_coords[city] = (canonical, lat, lon)
         except UnknownCityError:
-            pass  # already logged by get_all_forecasts
+            continue
+        if canonical not in city_groups:
+            city_groups[canonical] = (canonical, lat, lon, set())
+        city_groups[canonical][3].add(d)
 
-    # ECMWF (serial, shares OM rate limiter)
+    # ECMWF — one range call per city (same batching pattern as GFS ensemble)
     ecmwf_results: dict[tuple[str, date], ForecastResult] = {}
-    for city, d in city_date_pairs:
-        coords = city_coords.get(city)
-        if coords is None:
+    n_ecmwf_cities = len(city_groups)
+    for i, (canonical, lat, lon, dates) in enumerate(city_groups.values()):
+        if i % 10 == 0 and i > 0:
+            log.info(f"ECMWF fetch: {i}/{n_ecmwf_cities} cities done")
+        dates_valid = {d for d in dates if d <= today_d + timedelta(days=15)}
+        if not dates_valid:
             continue
-        canonical = coords[0]
-        result = await get_ecmwf_forecast(canonical, d)
-        if result is not None:
-            ecmwf_results[(canonical, d)] = result
+        start_d = max(today_d, min(dates_valid) - timedelta(days=1))
+        end_d   = max(dates_valid) + timedelta(days=1)
+        try:
+            raw = await _fetch_ensemble_range(lat, lon, start_d, end_d, model=_config.ECMWF_ENSEMBLE_MODEL)
+            for d in dates_valid:
+                try:
+                    ecmwf_results[(canonical, d)] = _parse_ensemble_from_range(canonical, d, raw)
+                except Exception as exc:
+                    log.warning(f"weather ecmwf: parse failed {canonical} {d}: {exc}")
+        except Exception as exc:
+            log.warning(f"weather ecmwf: fetch failed {canonical} {start_d}–{end_d}: {exc}")
+    log.info(f"ECMWF fetch complete: {len(ecmwf_results)} results from {n_ecmwf_cities} cities")
 
-    # tomorrow.io (serial, own rate limiter)
+    # tomorrow.io — one batched call per city (reduces calls from N pairs to N cities)
     tio_results: dict[tuple[str, date], ForecastResult] = {}
-    for city, d in city_date_pairs:
-        coords = city_coords.get(city)
-        if coords is None:
-            continue
-        canonical, lat, lon = coords
-        result = await _tio_get_forecast(canonical, lat, lon, d)
-        if result is not None:
+    n_tio_cities = len(city_groups)
+    for i, (canonical, lat, lon, dates) in enumerate(city_groups.values()):
+        if i % 10 == 0 and i > 0:
+            log.info(f"TIO fetch: {i}/{n_tio_cities} cities done")
+        batch = await _tio_get_forecasts_batch(canonical, lat, lon, sorted(dates))
+        for d, result in batch.items():
             tio_results[(canonical, d)] = result
+    log.info(f"TIO fetch complete: {len(tio_results)} results from {n_tio_cities} cities")
 
     # Assemble SourceConsensus — only for cities where GFS succeeded
     consensus: dict[tuple[str, date], SourceConsensus] = {}
