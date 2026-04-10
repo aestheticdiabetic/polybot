@@ -666,11 +666,14 @@ async def create_app(state):
         actual_pnl             = sum(r.get("pnl", 0) for r in resolved_records)
 
         # ── Order book depth stats ────────────────────────────────────
-        # DEPTH_MISS events are in all_records but excluded from records (WOULD_BUY only).
+        # Only count WOULD_BUY records that have shares_wanted — these are the
+        # depth-aware records logged after the depth-check was introduced.
+        # Old records (no shares_wanted field) are excluded so they don't
+        # inflate fill rates. DEPTH_MISS events track confirmed no-depth cases.
         miss_records = [r for r in all_records if r.get("event") == "DEPTH_MISS"]
         depth_stats: dict = {}
         for tier in ("CORE", "SECONDARY", "WING"):
-            buy_recs  = [r for r in records  if r.get("tier") == tier]
+            buy_recs  = [r for r in records if r.get("tier") == tier and "shares_wanted" in r]
             miss_recs = [r for r in miss_records if r.get("tier") == tier]
             fillable_ids  = {r["market_id"] for r in buy_recs  if r.get("market_id")}
             miss_only_ids = {r["market_id"] for r in miss_recs if r.get("market_id")} - fillable_ids
@@ -678,14 +681,14 @@ async def create_app(state):
             n_miss     = len(miss_only_ids)
             n_total    = n_fillable + n_miss
             fill_rate  = round(n_fillable / n_total * 100, 1) if n_total > 0 else None
-            avg_depth   = round(sum(r.get("shares", 0) for r in buy_recs) / len(buy_recs), 1) if buy_recs else None
-            avg_wanted  = round(sum(r.get("shares_wanted", r.get("shares", 0)) for r in buy_recs) / len(buy_recs), 1) if buy_recs else None
+            avg_depth  = round(sum(r.get("shares", 0) for r in buy_recs) / len(buy_recs), 1) if buy_recs else None
+            avg_wanted = round(sum(r["shares_wanted"] for r in buy_recs) / len(buy_recs), 1) if buy_recs else None
             depth_stats[tier] = {
-                "fillable":  n_fillable,
-                "no_depth":  n_miss,
-                "total":     n_total,
-                "fill_rate": fill_rate,
-                "avg_depth": avg_depth,
+                "fillable":   n_fillable,
+                "no_depth":   n_miss,
+                "total":      n_total,
+                "fill_rate":  fill_rate,
+                "avg_depth":  avg_depth,
                 "avg_wanted": avg_wanted,
             }
 
