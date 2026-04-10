@@ -660,6 +660,8 @@ async def create_app(state):
         total_projected_profit = sum(r.get("ev", 0) * r.get("shares", 0) for r in records)
         scale                  = min(1.0, starting_balance / total_capital) if total_capital > 0 else 0
         resolved_records       = [r for r in records if r.get("pnl") is not None]
+        active_records         = [r for r in records if r.get("outcome") is None]
+        active_capital         = sum(r.get("capital", 0) for r in active_records)
         actual_pnl             = sum(r.get("pnl", 0) for r in resolved_records)
 
         # ── Order book depth stats ────────────────────────────────────
@@ -699,6 +701,8 @@ async def create_app(state):
             "scale_factor":             round(scale, 4),
             "actual_pnl":               round(actual_pnl, 4),
             "resolved_count":           len(resolved_records),
+            "active_capital":           round(active_capital, 4),
+            "active_count":             len(active_records),
             "tier_stats":               tier_stats,
             "entry_time_stats":         entry_time_stats,
             "side_stats":               side_stats,

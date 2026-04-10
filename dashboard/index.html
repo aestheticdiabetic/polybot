@@ -564,9 +564,9 @@
       <div class="metric-sub" id="pm-scale">all cycles combined</div>
     </div>
     <div class="metric">
-      <div class="metric-label">Projected PnL</div>
-      <div class="metric-value" id="pm-proj-pnl">—</div>
-      <div class="metric-sub" id="pm-proj-sub">at $<span id="pm-bal-display">1000</span> starting</div>
+      <div class="metric-label">Capital at Risk</div>
+      <div class="metric-value amber" id="pm-active-capital">—</div>
+      <div class="metric-sub" id="pm-active-count">0 active bets</div>
     </div>
     <div class="metric">
       <div class="metric-label">CORE Opps</div>
@@ -1366,7 +1366,6 @@ async function loadPaperTrades() {
 
 function recalcPaper() {
   const b = parseFloat(document.getElementById('paper-balance').value) || 1000;
-  document.getElementById('pm-bal-display').textContent = b;
   loadPaperStats(b);
 }
 
@@ -1412,12 +1411,9 @@ function updatePaperStats(s) {
   document.getElementById('pm-total').textContent        = s.total  || '—';
   document.getElementById('pm-resolved-count').textContent = `${s.resolved_count || 0} resolved`;
   document.getElementById('pm-capital').textContent      = '$' + parseFloat(s.total_capital || 0).toFixed(2);
-  document.getElementById('pm-bal-display').textContent  = b;
 
-  const scaledProfit = s.scaled_projected_profit || 0;
-  const projEl = document.getElementById('pm-proj-pnl');
-  projEl.textContent = (scaledProfit >= 0 ? '+' : '') + '$' + parseFloat(scaledProfit).toFixed(4);
-  projEl.className   = 'metric-value ' + (scaledProfit > 0 ? 'green' : scaledProfit < 0 ? 'red' : '');
+  document.getElementById('pm-active-capital').textContent = '$' + parseFloat(s.active_capital || 0).toFixed(2);
+  document.getElementById('pm-active-count').textContent   = `${s.active_count || 0} active bets`;
 
   const scalePct = s.scale_factor < 1
     ? ` (${(s.scale_factor*100).toFixed(0)}% of opps — limited by balance)`
