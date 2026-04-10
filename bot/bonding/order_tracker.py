@@ -13,6 +13,7 @@ import logging
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 import aiohttp
 import config as _config
@@ -43,6 +44,8 @@ class PendingOrder:
     resolution_time: str       # ISO8601
     status: str                # PENDING | FILLED | CANCELLED
     outcome: str = "YES"       # "YES" or "NO"; default preserves existing ledger records
+    temp_min_c: Optional[float] = None  # lower bound of temperature bucket (°C)
+    temp_max_c: Optional[float] = None  # upper bound of temperature bucket (°C)
 
 
 class PendingOrderTracker:
@@ -157,6 +160,8 @@ class PendingOrderTracker:
             resolution_time=order.resolution_time,
             status="OPEN",
             prob=order.prob_at_placement,
+            temp_min_c=order.temp_min_c,
+            temp_max_c=order.temp_max_c,
         )
         await self._exit_mgr.add_position(pos)
         log.info(

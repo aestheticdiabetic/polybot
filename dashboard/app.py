@@ -484,7 +484,7 @@ async def create_app(state):
     @_auth_required
     async def api_bond_paper_trades(request):
         """Return last N paper trade records from paper_trades.jsonl."""
-        n = int(request.rel_url.query.get("n", 200))
+        n = int(request.rel_url.query.get("n", 5000))
         records = _load_paper_trades(n)
         records.sort(key=lambda r: r.get("ts", ""), reverse=True)
         # Override resolution_time with accurate end-of-day UTC for display.

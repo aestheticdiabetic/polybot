@@ -118,6 +118,7 @@ async def run_bonding_loop(state: StateManager) -> None:
 
     feed = BondPriceFeed(on_opportunity=_on_ws_opportunity)
     feed.update_markets(markets, forecasts)  # pre-populate; WS not connected yet so no resubscribe
+    exit_mgr.set_price_feed(feed)            # wire feed so confidence exits can read live forecasts
     feed_task = asyncio.get_running_loop().create_task(feed.run())  # now connects subscribed
 
     state.set_running(True)
@@ -191,6 +192,16 @@ async def _place_bond_order(client, exit_mgr, order_tracker, opp, OrderArgs, Ord
     from bonding.order_tracker import PendingOrder
     loop = asyncio.get_running_loop()
 
+    # Convert temp range to Celsius once — used by both FOK position and GTC pending order
+    from bonding.weather_client import fahrenheit_to_celsius
+    _temp_min_c = opp.market.temp_min
+    _temp_max_c = opp.market.temp_max
+    if opp.market.unit == "F":
+        if _temp_min_c is not None:
+            _temp_min_c = fahrenheit_to_celsius(_temp_min_c)
+        if _temp_max_c is not None:
+            _temp_max_c = fahrenheit_to_celsius(_temp_max_c)
+
     # ── Phase 1: immediate FOK fill ───────────────────────────────
     if opp.shares_immediate > 0:
         fok_args = OrderArgs(
@@ -221,6 +232,9 @@ async def _place_bond_order(client, exit_mgr, order_tracker, opp, OrderArgs, Ord
                 entry_time=datetime.now(timezone.utc).isoformat(),
                 resolution_time=opp.market.resolution_time.isoformat(),
                 status="OPEN",
+                prob=opp.prob,
+                temp_min_c=_temp_min_c,
+                temp_max_c=_temp_max_c,
             )
             await exit_mgr.add_position(pos)
         except Exception as exc:
@@ -258,6 +272,8 @@ async def _place_bond_order(client, exit_mgr, order_tracker, opp, OrderArgs, Ord
                     resolution_time=opp.market.resolution_time.isoformat(),
                     status="PENDING",
                     outcome=opp.outcome,
+                    temp_min_c=_temp_min_c,
+                    temp_max_c=_temp_max_c,
                 )
                 await order_tracker.add_order(pending)
             else:

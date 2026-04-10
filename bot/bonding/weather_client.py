@@ -160,6 +160,10 @@ _nearterm_cache: dict[tuple, tuple[float, dict]] = {}
 _nearterm_cache_lock = asyncio.Lock()
 _nearterm_disk_cache_loaded = False
 
+# ── Current observation cache (in-memory only, 15-min TTL) ───────────────────
+CURRENT_OBS_CACHE_TTL_SECS = 900   # 15 minutes — Open-Meteo current refreshes ~15-min
+_current_obs_cache: dict[tuple, tuple[float, float]] = {}  # (lat, lon) → (fetched_at, temp_c)
+
 # In-memory peak hour stats — loaded once at startup via init_peak_stats()
 _peak_hour_stats: dict = {}
 
@@ -569,6 +573,97 @@ def prob_in_range(
     members = forecast.ensemble_members
     if not members:
         return 0.0
+    count = sum(1 for m in members if temp_min <= m <= temp_max)
+    return count / len(members)
+
+
+async def get_current_observation(city: str, lat: float, lon: float) -> Optional[float]:
+    """
+    Fetch the latest observed temperature for a city from Open-Meteo (~15-min lag).
+
+    Uses the shared serial rate limiter and a 15-min in-memory cache.
+    Returns None on any failure; callers treat None as "no observation available".
+    Counts as 1 API call (single `current` parameter, not ensemble).
+    """
+    global _last_request_time
+
+    cache_key = (round(lat, 4), round(lon, 4))
+    now = time.time()
+
+    # Fast path: valid cached observation
+    cached = _current_obs_cache.get(cache_key)
+    if cached and now - cached[0] < CURRENT_OBS_CACHE_TTL_SECS:
+        return cached[1]
+
+    async with _get_rate_lock():
+        # Re-check under lock to avoid duplicate fetches from concurrent callers
+        cached = _current_obs_cache.get(cache_key)
+        if cached and time.time() - cached[0] < CURRENT_OBS_CACHE_TTL_SECS:
+            return cached[1]
+
+        elapsed = time.time() - _last_request_time
+        if elapsed < _MIN_REQUEST_INTERVAL:
+            await asyncio.sleep(_MIN_REQUEST_INTERVAL - elapsed)
+
+        try:
+            _check_limits()
+        except RuntimeError as exc:
+            log.warning(f"weather: current obs skipped for {city}: {exc}")
+            return None
+
+        params = {
+            "latitude":  lat,
+            "longitude": lon,
+            "current":   "temperature_2m",
+        }
+        timeout = aiohttp.ClientTimeout(total=10)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(OPEN_METEO_FORECAST_URL, params=params) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+            _last_request_time = time.time()
+            _record_api_call()
+
+            raw = (data.get("current") or {}).get("temperature_2m")
+            if raw is None:
+                log.debug(f"weather: current obs missing temperature_2m for {city}")
+                return None
+            temp_c = float(raw)
+            _current_obs_cache[cache_key] = (time.time(), temp_c)
+            log.debug(f"weather: current obs {city} = {temp_c:.1f}°C")
+            return temp_c
+        except Exception as exc:
+            log.debug(f"weather: current obs fetch failed for {city}: {exc}")
+            return None
+
+
+def prob_with_current_obs(
+    forecast: ForecastResult,
+    current_temp_c: float,
+    temp_min: float,
+    temp_max: float,
+) -> float:
+    """
+    Compute an updated same-day P(YES) incorporating a real-time temperature observation.
+
+    The current observation acts as a hard running-maximum floor:
+    - If observation already exceeds temp_max → market cannot resolve YES → 0.0
+    - Otherwise: synthesise NEARTERM_MEMBERS members from
+      N(max(forecast.daily_max_c, current_temp_c), NEARTERM_SIGMA_SAME_DAY²)
+      floored at current_temp_c, then count members in [temp_min, temp_max].
+
+    Uses the same sigma and member count as the near-term hourly path so probabilities
+    are directly comparable to the entry probability stored in BondPosition.prob.
+    """
+    if current_temp_c > temp_max:
+        return 0.0
+
+    running_max = max(current_temp_c, forecast.daily_max_c)
+    members = [
+        max(random.gauss(running_max, NEARTERM_SIGMA_SAME_DAY), current_temp_c)
+        for _ in range(NEARTERM_MEMBERS)
+    ]
     count = sum(1 for m in members if temp_min <= m <= temp_max)
     return count / len(members)
 

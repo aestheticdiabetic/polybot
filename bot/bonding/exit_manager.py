@@ -8,7 +8,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, asdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -46,8 +46,10 @@ class BondPosition:
     resolution_time: str      # ISO8601
     status: str               # OPEN | SOLD | RESOLVED
     prob: float               = 0.0     # weather-model P(YES) at placement time
-    exit_price: Optional[float] = None   # filled on SOLD
-    exit_time: Optional[str]   = None    # filled on SOLD (ISO8601)
+    temp_min_c: Optional[float] = None  # lower bound of temperature bucket (°C)
+    temp_max_c: Optional[float] = None  # upper bound of temperature bucket (°C)
+    exit_price: Optional[float] = None  # filled on SOLD
+    exit_time: Optional[str]   = None   # filled on SOLD (ISO8601)
 
 
 class ExitManager:
@@ -59,6 +61,11 @@ class ExitManager:
     def __init__(self, client: ClobClient):
         self._client      = client
         self._ledger_path = Path(_config.BOND_LEDGER_FILE)
+        self._feed        = None   # set via set_price_feed() after feed construction
+
+    def set_price_feed(self, feed) -> None:
+        """Wire the price feed so confidence exits can read live forecasts."""
+        self._feed = feed
 
     async def run(self) -> None:
         log.info("ExitManager started")
@@ -117,6 +124,8 @@ class ExitManager:
             current_price = await self._get_current_price(pos.token_id)
             if self._should_exit(pos, current_price, hours_left):
                 await self._execute_sell(pos, current_price)
+            elif await self._check_confidence_exits(pos, market_data, current_price, hours_left):
+                await self._execute_sell(pos, current_price)
             else:
                 log.debug(
                     f"BOND_EXIT_SKIPPED market={pos.market_id[:8]} tier={pos.tier} "
@@ -167,6 +176,130 @@ class ExitManager:
         # Rule 5 — sub-cent cost basis: hold unless significant reprice
         if pos.entry_price < 0.01 and price < 0.50:
             return False
+
+        return False
+
+    async def _check_confidence_exits(
+        self,
+        pos: BondPosition,
+        market_data: dict,
+        current_price: float,
+        hours_left: float,
+    ) -> bool:
+        """
+        Weather-confidence exit check using real-time Open-Meteo observations.
+
+        Only fires for same-day markets within the monitoring window (10:00–gate_hour local).
+        Gate sequence:
+          0. Feed available and position has temp bounds stored
+          1. Gas floor: skip if hours_left < BOND_GAS_FLOOR_HOURS
+          2. Same-day: skip if market resolves on a future date
+          3. Monitoring window: 10 ≤ local_hour < get_gate_hour(city, ...)
+          4. Min proceeds: skip if current_price × shares < BOND_CONF_EXIT_MIN_PROCEEDS
+          5a. Profit-lock (any tier): price ≥ entry × MULT and prob drop ≥ PROFIT_DROP
+          5b. Confidence drop (CERTAIN/CORE): drop ≥ threshold and current_prob < abs_floor
+        """
+        import zoneinfo
+        import bonding.weather_client as _wc
+        from bonding.peak_hour_stats import get_gate_hour
+
+        # Gate 0: prerequisites
+        if self._feed is None:
+            return False
+        if pos.temp_min_c is None or pos.temp_max_c is None:
+            return False
+
+        # Gate 1: gas floor
+        if hours_left < _config.BOND_GAS_FLOOR_HOURS:
+            return False
+
+        # Gate 2: same-day only
+        tz_name = _config.BOND_CITY_TIMEZONES.get(pos.city)
+        if not tz_name:
+            return False
+        try:
+            tz = zoneinfo.ZoneInfo(tz_name)
+        except Exception:
+            return False
+
+        now_local   = datetime.now(tz)
+        target_date = date.fromisoformat(pos.resolution_time[:10])
+        if target_date != now_local.date():
+            return False
+
+        # Gate 3: monitoring window [BOND_CONF_MONITORING_START_HOUR, gate_hour)
+        local_hour = now_local.hour
+        if local_hour < _config.BOND_CONF_MONITORING_START_HOUR:
+            return False
+
+        consensus = self._feed._forecasts.get((pos.city, target_date))
+        if consensus is None:
+            return False
+
+        gate_hour = get_gate_hour(
+            pos.city,
+            consensus.gfs.forecast_peak_hour,
+            now_local.month,
+            _wc._peak_hour_stats,
+        )
+        if local_hour >= gate_hour:
+            return False
+
+        # Gate 4: minimum proceeds
+        if current_price * pos.shares < _config.BOND_CONF_EXIT_MIN_PROCEEDS:
+            return False
+
+        # Fetch real-time observation
+        coords = _config.BOND_CITIES.get(pos.city)
+        if not coords:
+            return False
+        lat, lon = coords
+
+        current_temp = await _wc.get_current_observation(pos.city, lat, lon)
+        if current_temp is None:
+            return False
+
+        current_prob = _wc.prob_with_current_obs(
+            consensus.gfs, current_temp, pos.temp_min_c, pos.temp_max_c
+        )
+        prob_drop = pos.prob - current_prob
+
+        log.debug(
+            f"BOND_CONF_CHECK market={pos.market_id[:8]} city={pos.city} "
+            f"tier={pos.tier} entry_prob={pos.prob:.3f} current_prob={current_prob:.3f} "
+            f"drop={prob_drop:.3f} obs_temp={current_temp:.1f}°C"
+        )
+
+        # Gate 5a: profit-lock (any tier)
+        if (
+            current_price >= pos.entry_price * _config.BOND_CONF_PROFIT_MULT
+            and prob_drop >= _config.BOND_CONF_PROFIT_DROP
+        ):
+            log.info(
+                f"BOND_CONF_PROFITLOCK market={pos.market_id[:8]} city={pos.city} "
+                f"tier={pos.tier} entry={pos.entry_price:.4f} current={current_price:.4f} "
+                f"prob_drop={prob_drop:.3f} obs_temp={current_temp:.1f}°C"
+            )
+            return True
+
+        # Gate 5b: confidence drop (CERTAIN/CORE only)
+        if pos.tier == TIER_CERTAIN:
+            threshold = _config.BOND_CONF_CERTAIN_DROP
+            abs_floor  = _config.BOND_CONF_CERTAIN_ABS
+        elif pos.tier == TIER_CORE:
+            threshold = _config.BOND_CONF_CORE_DROP
+            abs_floor  = _config.BOND_CONF_CORE_ABS
+        else:
+            return False
+
+        if prob_drop >= threshold and current_prob < abs_floor:
+            log.info(
+                f"BOND_CONF_EXIT market={pos.market_id[:8]} city={pos.city} "
+                f"tier={pos.tier} entry_prob={pos.prob:.3f} current_prob={current_prob:.3f} "
+                f"drop={prob_drop:.3f} threshold={threshold:.2f} "
+                f"abs_floor={abs_floor:.2f} obs_temp={current_temp:.1f}°C"
+            )
+            return True
 
         return False
 

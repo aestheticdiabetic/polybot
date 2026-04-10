@@ -341,8 +341,8 @@ def get_statistical_forecast(
 
     log.debug(
         f"statistical: {city} {target_date} "
-        f"naive={naive_p:.1f if naive_p is not None else 'N/A'} "
-        f"arima={arima_p:.1f if arima_p is not None else 'N/A'} "
+        f"naive={f'{naive_p:.1f}' if naive_p is not None else 'N/A'} "
+        f"arima={f'{arima_p:.1f}' if arima_p is not None else 'N/A'} "
         f"blend={point_forecast:.1f}°C"
     )
 

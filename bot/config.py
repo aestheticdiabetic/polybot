@@ -63,10 +63,9 @@ class StrategyConfig:
     # bracket_threshold (break-even = 1 / (1 + fee); at 10% that's ~0.909, not 0.97).
     # Verify per-market via: GET /fee-rate?token_id=<id>
     taker_fee_pct: float = 0.01   # TODO: confirm 1% vs 10% before adjusting
-    polygon_gas_gwei: float = 30  # estimated gas for redemption tx
-    # Estimated gas cost per on-chain redemption (MATIC → USDC conversion).
-    # Polygon at 30 gwei, ~150k gas, MATIC ~$0.50: ≈ $0.002.  Used in live net estimate.
-    gas_fee_live_usdc: float = 0.002
+    polygon_gas_gwei: float = 130  # estimated gas price in gwei (Polygon, April 2026)
+    # Estimated gas cost per on-chain sell: ~207k gas × 128 gwei × $0.086/POL ≈ $0.004.
+    gas_fee_live_usdc: float = 0.004
 
     # Order type for live entry orders
     order_type: str = "FOK"   # Fill-Or-Kill: fills immediately or auto-cancels
@@ -162,6 +161,17 @@ BOND_EARLY_EXIT_PRICE     = 0.97  # sell core when price hits this
 BOND_WING_EXIT_MULTIPLIER = 5.0   # sell wing if price >= cost × this
 BOND_WING_MIN_ABS_GAIN    = 1.00  # AND absolute gain >= this value (USD)
 BOND_GAS_FLOOR_HOURS      = 4     # don't exit within N hours of resolution
+
+# Confidence-based early exit thresholds (same-day current-obs monitoring)
+BOND_CONF_CERTAIN_DROP:        float = 0.20  # CERTAIN: exit if prob drops ≥ this from entry
+BOND_CONF_CORE_DROP:           float = 0.25  # CORE: exit if prob drops ≥ this from entry
+BOND_CONF_CERTAIN_ABS:         float = 0.55  # CERTAIN: and current prob < this absolute floor
+BOND_CONF_CORE_ABS:            float = 0.40  # CORE: and current prob < this absolute floor
+BOND_CONF_PROFIT_MULT:         float = 2.0   # profit-lock: current_price >= entry × this
+BOND_CONF_PROFIT_DROP:         float = 0.20  # profit-lock: and prob dropped ≥ this
+BOND_CONF_EXIT_MIN_PROCEEDS:   float = 0.50  # min sell proceeds (USD) to justify gas cost
+BOND_CONF_MONITORING_START_HOUR: int = 10    # earliest local hour to begin current-obs checks
+
 BOND_MIN_ENTRY_HOURS      = 10    # FALLBACK ONLY — superseded by dynamic peak-hour gate
                                   # (peak_hour_stats.py + historical_peak_seeder.py).
                                   # Retained as documentation of the old threshold.
