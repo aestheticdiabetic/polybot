@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
+import asyncio
 import aiohttp
 
 from bonding.weather_client import _resolve_city, UnknownCityError
@@ -258,7 +259,9 @@ async def _fetch_gamma_markets() -> list[dict]:
     # total= is a session-level budget: once it expires every subsequent page
     # request raises TimeoutError immediately, causing after_filter=0 when
     # temperature markets happen to sit in the later pages of ~50k results.
-    timeout = aiohttp.ClientTimeout(sock_connect=10, sock_read=30)
+    # sock_read=60 gives each individual page response up to 60s to arrive.
+    timeout = aiohttp.ClientTimeout(sock_connect=10, sock_read=60)
+    _MAX_PAGE_RETRIES = 2
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         while True:
@@ -269,22 +272,39 @@ async def _fetch_gamma_markets() -> list[dict]:
                 "offset":       offset,
                 "tag_slug":     "weather",  # primary filter
             }
-            try:
-                async with session.get(f"{GAMMA_API}/markets", params=params) as resp:
-                    resp.raise_for_status()
-                    data = await resp.json()
-            except Exception as exc:
-                log.warning(
-                    f"scanner: Gamma API fetch failed at offset={offset}: "
-                    f"{type(exc).__name__}: {exc!r}"
-                )
-                break
 
-            # Gamma returns a list or a dict with "data" key depending on version
-            if isinstance(data, list):
-                page = data
-            else:
-                page = data.get("data", data.get("markets", []))
+            # Retry each page independently so transient timeouts don't abort
+            # the whole fetch (temperature markets are deep in the result set).
+            page = None
+            for attempt in range(_MAX_PAGE_RETRIES + 1):
+                try:
+                    async with session.get(f"{GAMMA_API}/markets", params=params) as resp:
+                        resp.raise_for_status()
+                        data = await resp.json()
+                    # Gamma returns a list or a dict with "data" key depending on version
+                    if isinstance(data, list):
+                        page = data
+                    else:
+                        page = data.get("data", data.get("markets", []))
+                    break  # success
+                except Exception as exc:
+                    if attempt < _MAX_PAGE_RETRIES:
+                        wait = 2 ** attempt
+                        log.warning(
+                            f"scanner: Gamma API fetch failed at offset={offset} "
+                            f"(attempt {attempt + 1}/{_MAX_PAGE_RETRIES + 1}): "
+                            f"{type(exc).__name__}: {exc!r} — retrying in {wait}s"
+                        )
+                        await asyncio.sleep(wait)
+                    else:
+                        log.warning(
+                            f"scanner: Gamma API fetch failed at offset={offset} "
+                            f"after {_MAX_PAGE_RETRIES + 1} attempts: "
+                            f"{type(exc).__name__}: {exc!r} — aborting fetch"
+                        )
+
+            if page is None:
+                break
 
             if not page:
                 break
