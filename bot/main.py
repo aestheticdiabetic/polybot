@@ -244,7 +244,14 @@ async def _place_bond_order(client, exit_mgr, order_tracker, opp, OrderArgs, Ord
             )
 
     # ── Phase 2: GTC limit for remainder ─────────────────────────
-    if opp.shares_limit > 0:
+    from config import BOND_MIN_GTC_ORDER_USDC
+    gtc_capital = opp.shares_limit * opp.limit_price
+    if opp.shares_limit > 0 and gtc_capital < BOND_MIN_GTC_ORDER_USDC:
+        log.debug(
+            f"BOND_GTC_SKIP city={opp.market.city} tier={opp.tier} "
+            f"shares_limit={opp.shares_limit} capital=${gtc_capital:.3f} < min=${BOND_MIN_GTC_ORDER_USDC}"
+        )
+    if opp.shares_limit > 0 and gtc_capital >= BOND_MIN_GTC_ORDER_USDC:
         gtc_args = OrderArgs(
             token_id=opp.token_id,
             price=opp.limit_price,

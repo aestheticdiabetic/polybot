@@ -153,7 +153,7 @@ class PaperExitManager:
             date=opp.market.target_date.isoformat(),
             resolution_time=opp.market.resolution_time.isoformat(),
             tier=opp.tier,
-            shares=opp.shares,
+            shares=opp.shares_immediate,  # only what FOK would fill
             side=opp.outcome,
             entry_price=opp.side_ask,
             entry_ts=datetime.now(timezone.utc).isoformat(),
@@ -297,13 +297,47 @@ def log_opportunity(opp, seen_ids: set[str]) -> bool:
     """
     Log a single scored opportunity to the JSONL file if not already seen.
 
-    Updates seen_ids in-place. Returns True if logged, False if skipped.
+    Uses depth-aware share counts: only logs shares_immediate (what a FOK order
+    would actually fill given current ask book depth).
+
+    When shares_immediate == 0 the opportunity is logged as a DEPTH_MISS event
+    (not added to seen_ids so the market stays eligible for re-check each cycle)
+    and False is returned — no position is tracked.
+
+    When shares_immediate > 0 a WOULD_BUY is logged, the market_id is added to
+    seen_ids, and True is returned so the caller tracks a paper position.
+
+    Updates seen_ids in-place. Returns True if a WOULD_BUY was logged.
     Used by both the REST fallback pass and the WS price-feed callback.
     """
     if opp.market.market_id in seen_ids:
         return False
 
+    source = "ws" if opp.market.ask_book else "rest"
+
+    # No profitable depth available — log for stats but don't block re-entry.
+    if opp.shares_immediate == 0:
+        record = {
+            "ts":          datetime.now(timezone.utc).isoformat(),
+            "event":       "DEPTH_MISS",
+            "market_id":   opp.market.market_id,
+            "city":        opp.market.city,
+            "date":        opp.market.target_date.isoformat(),
+            "tier":        opp.tier,
+            "shares_wanted": opp.shares,
+            "side":        opp.outcome,
+            "ask":         opp.side_ask,
+            "source":      source,
+        }
+        _append_record(record)
+        log.debug(
+            f"DEPTH_MISS city={opp.market.city} date={opp.market.target_date} "
+            f"side={opp.outcome} tier={opp.tier} ask={opp.side_ask:.4f}"
+        )
+        return False
+
     seen_ids.add(opp.market.market_id)
+    fillable_capital = round(opp.shares_immediate * opp.side_ask, 4)
     record = {
         "ts":              datetime.now(timezone.utc).isoformat(),
         "event":           "WOULD_BUY",
@@ -313,21 +347,24 @@ def log_opportunity(opp, seen_ids: set[str]) -> bool:
         "date":            opp.market.target_date.isoformat(),
         "resolution_time": _end_of_day_utc(opp.market.city, opp.market.target_date),
         "tier":            opp.tier,
-        "shares":          opp.shares,
-        "side":            opp.outcome,       # "YES" or "NO" — which token was bet
+        "shares":          opp.shares_immediate,  # depth-aware: only what FOK would fill
+        "shares_wanted":   opp.shares,            # total target before depth cap
+        "shares_limit":    opp.shares_limit,       # remainder that would queue as GTC
+        "side":            opp.outcome,            # "YES" or "NO" — which token was bet
         "ask":             opp.side_ask,
         "prob":            round(opp.prob, 4),
         "ev":              round(opp.ev, 4),
         "edge":            round(opp.edge, 4),
-        "capital":         round(opp.capital, 4),
+        "capital":         fillable_capital,       # cost basis for shares_immediate only
         "outcome":         None,  # filled post-resolution by analysis script
         "pnl":             None,
-        "source":          "ws" if opp.market.ask_book else "rest",
+        "source":          source,
     }
     _append_record(record)
+    depth_note = f"depth={opp.shares_immediate}/{opp.shares}" if opp.shares_limit > 0 else f"shares={opp.shares_immediate}"
     log.info(
-        f"WOULD_BUY [{record['source'].upper()}] city={opp.market.city} "
-        f"date={opp.market.target_date} side={opp.outcome} tier={opp.tier} shares={opp.shares} "
+        f"WOULD_BUY [{source.upper()}] city={opp.market.city} "
+        f"date={opp.market.target_date} side={opp.outcome} tier={opp.tier} {depth_note} "
         f"ask={opp.side_ask:.4f} ev={opp.ev:.4f} edge={opp.edge:.4f}"
     )
     return True
@@ -384,15 +421,25 @@ def analyse(log_path: str = str(PAPER_LOG)) -> None:
         python -c "from bonding.paper_sim import analyse; analyse()"
     """
     from collections import defaultdict
-    records = [json.loads(l) for l in Path(log_path).read_text().splitlines() if l.strip()]
-    by_tier: dict[str, list] = defaultdict(list)
-    for r in records:
-        by_tier[r["tier"]].append(r)
 
-    print(f"\nPaper simulation summary — {len(records)} total bets")
+    all_records = [json.loads(l) for l in Path(log_path).read_text().splitlines() if l.strip()]
+
+    buys: dict[str, list] = defaultdict(list)       # tier → WOULD_BUY records
+    misses: dict[str, list] = defaultdict(list)      # tier → DEPTH_MISS records
+    for r in all_records:
+        tier = r.get("tier", "UNKNOWN")
+        if r.get("event") == "WOULD_BUY":
+            buys[tier].append(r)
+        elif r.get("event") == "DEPTH_MISS":
+            misses[tier].append(r)
+
+    total_buys = sum(len(v) for v in buys.values())
+    print(f"\nPaper simulation summary — {total_buys} simulated bets")
     print(f"Log file: {log_path}\n")
+
+    # ── YES / NO bets by tier ─────────────────────────────────────
     for tier in ("CORE", "SECONDARY", "WING"):
-        recs = by_tier.get(tier, [])
+        recs = buys.get(tier, [])
         if not recs:
             continue
         total_cap = sum(r["capital"] for r in recs)
@@ -405,6 +452,43 @@ def analyse(log_path: str = str(PAPER_LOG)) -> None:
             f"avg_ev={avg_ev:.4f}  "
             + (f"win_rate={win_rate:.1%} ({len(wins)}/{len(resolved)})" if win_rate is not None else "no outcomes yet")
         )
+
+    # ── Order book depth stats ────────────────────────────────────
+    print(f"\n  {'─' * 70}")
+    print(f"  Order book depth at profitable prices\n")
+    print(
+        f"  {'Tier':<12}  {'Fillable':>8}  {'No depth':>8}  "
+        f"{'Fill rate':>9}  {'Avg depth':>12}"
+    )
+    print(f"  {'─' * 12}  {'─' * 8}  {'─' * 8}  {'─' * 9}  {'─' * 12}")
+    for tier in ("CORE", "SECONDARY", "WING"):
+        buy_recs  = buys.get(tier, [])
+        miss_recs = misses.get(tier, [])
+
+        # Deduplicate by market_id: count unique markets that were fillable vs
+        # markets that only ever appeared as DEPTH_MISS.
+        fillable_ids  = {r["market_id"] for r in buy_recs}
+        miss_only_ids = {r["market_id"] for r in miss_recs} - fillable_ids
+        n_fillable    = len(fillable_ids)
+        n_miss        = len(miss_only_ids)
+        n_total       = n_fillable + n_miss
+
+        if n_total == 0:
+            continue
+
+        fill_rate = n_fillable / n_total
+        if buy_recs:
+            avg_shares    = sum(r["shares"] for r in buy_recs) / len(buy_recs)
+            avg_wanted    = sum(r.get("shares_wanted", r["shares"]) for r in buy_recs) / len(buy_recs)
+            depth_str     = f"{avg_shares:.1f} / {avg_wanted:.0f}"
+        else:
+            depth_str = "—"
+
+        print(
+            f"  {tier:<12}  {n_fillable:>8d}  {n_miss:>8d}  "
+            f"{fill_rate:>8.1%}  {depth_str:>12}"
+        )
+    print()
 
 
 if __name__ == "__main__":

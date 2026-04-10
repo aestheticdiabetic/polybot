@@ -155,6 +155,7 @@ BOND_SHARES_CORE             = 25    # shares for core bonds
 BOND_SHARES_SECONDARY        = 15    # shares for secondary positions
 BOND_SHARES_WING             = 20    # shares for wing bets (cheap, more shares)
 BOND_MAX_CAPITAL_PER_CLUSTER = 4.00  # max $ across all buckets for one city/date
+BOND_MIN_GTC_ORDER_USDC      = 1.00  # minimum capital for a GTC limit order (CLOB rejects below this)
 
 # Exit thresholds
 BOND_EARLY_EXIT_PRICE     = 0.97  # sell core when price hits this
