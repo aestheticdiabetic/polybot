@@ -144,24 +144,22 @@ BOND_LOG_FILE    = os.getenv("BOND_LOG_FILE",    "/app/logs/polybot_bond.log")
 BOND_LEDGER_FILE = os.getenv("BOND_LEDGER_FILE", "/app/logs/bonding_positions.json")
 
 # Entry thresholds
-BOND_MIN_EV_CORE       = 0.02   # min expected value per share, core tier
-BOND_MIN_EV_SECONDARY  = 0.01   # min EV, secondary tier
-BOND_CONFIDENCE_FLOOR  = 0.20   # min forecast probability to enter CORE tier
-                                 # (ensemble model: 30 members → max ~33% per 2°F bucket)
-BOND_EDGE_FLOOR        = 0.15   # min gap between true probability and market ask
+BOND_MIN_EDGE_CHEAP    = 0.03   # min edge (prob - ask) for CHEAP tier (2-8¢ tokens)
+BOND_MIN_EDGE_CORE     = 0.15   # min edge (prob - ask) for CORE tier (8-30¢ tokens)
 
 # Position sizing
-BOND_SHARES_CORE             = 25    # shares for core bonds
-BOND_SHARES_SECONDARY        = 15    # shares for secondary positions
-BOND_SHARES_WING             = 20    # shares for wing bets (cheap, more shares)
+# CHEAP: adaptive shares = ceil(1.00 / ask), capped at BOND_SHARES_CHEAP_MAX
+# CORE:  max(BOND_SHARES_CORE, ceil(1.00 / ask)) — ensures >= $1 order at low end of range
+BOND_SHARES_CHEAP_MAX        = 75    # cap on adaptive share count for CHEAP tier
+BOND_SHARES_CORE             = 10    # base share count for CORE tier
 BOND_MAX_CAPITAL_PER_CLUSTER = 4.00  # max $ across all buckets for one city/date
 BOND_MIN_GTC_ORDER_USDC      = 1.00  # minimum capital for a GTC limit order (CLOB rejects below this)
 
 # Exit thresholds
-BOND_EARLY_EXIT_PRICE     = 0.97  # sell core when price hits this
-BOND_WING_EXIT_MULTIPLIER = 5.0   # sell wing if price >= cost × this
-BOND_WING_MIN_ABS_GAIN    = 1.00  # AND absolute gain >= this value (USD)
-BOND_GAS_FLOOR_HOURS      = 4     # don't exit within N hours of resolution
+BOND_EARLY_EXIT_PRICE      = 0.97  # sell when price hits near-certainty (both tiers)
+BOND_CHEAP_EXIT_MULTIPLIER = 5.0   # sell CHEAP if price >= cost × this
+BOND_CHEAP_MIN_ABS_GAIN    = 1.00  # AND absolute gain >= this value (USD)
+BOND_GAS_FLOOR_HOURS       = 4     # don't exit within N hours of resolution
 
 # Confidence-based early exit thresholds (same-day current-obs monitoring)
 BOND_CONF_CERTAIN_DROP:        float = 0.20  # CERTAIN: exit if prob drops ≥ this from entry

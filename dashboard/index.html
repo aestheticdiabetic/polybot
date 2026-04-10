@@ -85,8 +85,8 @@
   .pill-lost      { background: #ef444422; color: #ef4444; }
   .pill-cancelled { background: #5a6a8222; color: #5a6a82; }
   .pill-core      { background: #3b82f622; color: #3b82f6; }
-  .pill-secondary { background: #f59e0b22; color: #f59e0b; }
-  .pill-wing      { background: #8b5cf622; color: #8b5cf6; }
+  .pill-cheap     { background: #f59e0b22; color: #f59e0b; }
+  .pill-certain   { background: #10b98122; color: #10b981; }
 
   /* Config panels */
   .config-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -341,13 +341,13 @@
       <div class="metric-sub" id="bm-core-wl">0 sold</div>
     </div>
     <div class="metric">
-      <div class="metric-label">SECONDARY Win Rate</div>
+      <div class="metric-label">CHEAP Win Rate</div>
       <div class="metric-value amber" id="bm-sec-wr">—</div>
       <div class="metric-sub" id="bm-sec-wl">0 sold</div>
     </div>
     <div class="metric">
-      <div class="metric-label">WING Win Rate</div>
-      <div class="metric-value purple" id="bm-wing-wr">—</div>
+      <div class="metric-label">CERTAIN Win Rate</div>
+      <div class="metric-value green" id="bm-wing-wr">—</div>
       <div class="metric-sub" id="bm-wing-wl">0 sold</div>
     </div>
     <div class="metric">
@@ -402,9 +402,9 @@
       <span class="tier-header">WINS</span>
       <span class="tier-header">WIN RATE</span>
       <span class="tier-header">ACTUAL PnL</span>
+      <span class="tier-header">CHEAP (n/conf)</span>
       <span class="tier-header">CORE (n/conf)</span>
-      <span class="tier-header">SECONDARY (n/conf)</span>
-      <span class="tier-header">WING (n/conf)</span>
+      <span class="tier-header">CERTAIN (n/conf)</span>
     </div>
     <div id="bond-entry-time-rows"></div>
   </div>
@@ -420,9 +420,9 @@
       </select>
       <select id="pos-tier-filter" onchange="renderPositions()" style="font-size:11px;padding:4px 8px;">
         <option value="">all tiers</option>
+        <option value="CHEAP">CHEAP</option>
         <option value="CORE">CORE</option>
-        <option value="SECONDARY">SECONDARY</option>
-        <option value="WING">WING</option>
+        <option value="CERTAIN">CERTAIN</option>
       </select>
     </div>
     <div class="scroll-table">
@@ -574,13 +574,13 @@
       <div class="metric-sub" id="pm-core-ev">avg ev —</div>
     </div>
     <div class="metric">
-      <div class="metric-label">SECONDARY Opps</div>
+      <div class="metric-label">CHEAP Opps</div>
       <div class="metric-value amber" id="pm-sec-count">—</div>
       <div class="metric-sub" id="pm-sec-ev">avg ev —</div>
     </div>
     <div class="metric">
-      <div class="metric-label">WING Opps</div>
-      <div class="metric-value purple" id="pm-wing-count">—</div>
+      <div class="metric-label">CERTAIN Opps</div>
+      <div class="metric-value green" id="pm-wing-count">—</div>
       <div class="metric-sub" id="pm-wing-ev">avg ev —</div>
     </div>
     <div class="metric">
@@ -618,9 +618,9 @@
       <span class="tier-header">WINS</span>
       <span class="tier-header">WIN RATE</span>
       <span class="tier-header">ACTUAL PnL</span>
+      <span class="tier-header">CHEAP (n/conf)</span>
       <span class="tier-header">CORE (n/conf)</span>
-      <span class="tier-header">SECONDARY (n/conf)</span>
-      <span class="tier-header">WING (n/conf)</span>
+      <span class="tier-header">CERTAIN (n/conf)</span>
     </div>
     <div id="entry-time-rows"></div>
   </div>
@@ -659,9 +659,9 @@
       <span class="section-title" style="margin-bottom:0;">Recent Paper Trades</span>
       <select id="paper-tier-filter" onchange="paperPage=1;renderPaperTrades()" style="font-size:11px;padding:4px 8px;">
         <option value="">all tiers</option>
+        <option value="CHEAP">CHEAP</option>
         <option value="CORE">CORE</option>
-        <option value="SECONDARY">SECONDARY</option>
-        <option value="WING">WING</option>
+        <option value="CERTAIN">CERTAIN</option>
       </select>
       <select id="paper-outcome-filter" onchange="paperPage=1;renderPaperTrades()" style="font-size:11px;padding:4px 8px;">
         <option value="">all outcomes</option>
@@ -998,8 +998,8 @@ function updateBondMetrics(d) {
   const ts = d.tier_stats || {};
   for (const [tier, id_wr, id_wl] of [
     ['CORE','bm-core-wr','bm-core-wl'],
-    ['SECONDARY','bm-sec-wr','bm-sec-wl'],
-    ['WING','bm-wing-wr','bm-wing-wl'],
+    ['CHEAP','bm-sec-wr','bm-sec-wl'],
+    ['CERTAIN','bm-wing-wr','bm-wing-wl'],
   ]) {
     const t = ts[tier] || {};
     const el = document.getElementById(id_wr);
@@ -1019,7 +1019,7 @@ function updateBondMetrics(d) {
 
   // Tier perf rows
   const rows = document.getElementById('tier-perf-rows'); rows.innerHTML='';
-  for (const [tier, cls] of [['CORE','blue'],['SECONDARY','amber'],['WING','purple']]) {
+  for (const [tier, cls] of [['CHEAP','amber'],['CORE','blue'],['CERTAIN','green']]) {
     const t = ts[tier] || {open:0,sold:0,wins:0,win_rate:null,pnl:0};
     const div = document.createElement('div');
     div.className='tier-row';
@@ -1057,9 +1057,9 @@ function _renderEntryTimeRows(containerId, et) {
       <span>${b.wins}</span>
       <span class="${wrCls}">${wr}${b.resolved ? ` (${b.wins}/${b.resolved})` : ''}</span>
       <span class="${ap>0?'green':ap<0?'red':''}">${ap>=0?'+':''}$${ap.toFixed(4)}</span>
+      <span class="amber">${fmtTier('CHEAP')}</span>
       <span class="blue">${fmtTier('CORE')}</span>
-      <span class="amber">${fmtTier('SECONDARY')}</span>
-      <span class="purple">${fmtTier('WING')}</span>`;
+      <span class="green">${fmtTier('CERTAIN')}</span>`;
     container.appendChild(div);
   }
 }
@@ -1068,7 +1068,7 @@ function updateBondRealStats(s) {
   // Tier analysis rows
   const ts = s.tier_stats || {};
   const taRows = document.getElementById('bond-tier-analysis-rows'); taRows.innerHTML = '';
-  for (const [tier, cls] of [['CORE','blue'],['SECONDARY','amber'],['WING','purple']]) {
+  for (const [tier, cls] of [['CHEAP','amber'],['CORE','blue'],['CERTAIN','green']]) {
     const t = ts[tier] || {count:0,capital:0,avg_entry:null,avg_prob:null,resolved:0,wins:0,win_rate:null,actual_pnl:0};
     const div = document.createElement('div');
     div.style.cssText = 'display:grid;grid-template-columns:80px 60px 80px 70px 70px 80px 80px 80px;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:12px;';
@@ -1155,17 +1155,14 @@ function renderSoldPositions() {
 
 // Bond config
 const BOND_CFG_META = {
-  BOND_MIN_EV_CORE:            { label:'Min EV Core',            step:0.001, desc:'Min expected value per share (CORE tier)' },
-  BOND_MIN_EV_SECONDARY:       { label:'Min EV Secondary',       step:0.001, desc:'Min expected value per share (SECONDARY)' },
-  BOND_CONFIDENCE_FLOOR:       { label:'Confidence Floor',       step:0.01,  desc:'Min forecast probability to enter any position' },
-  BOND_EDGE_FLOOR:             { label:'Edge Floor',             step:0.01,  desc:'Min gap between true probability and ask' },
-  BOND_SHARES_CORE:            { label:'Shares Core',            step:1,     desc:'Shares per CORE buy order' },
-  BOND_SHARES_SECONDARY:       { label:'Shares Secondary',       step:1,     desc:'Shares per SECONDARY buy order' },
-  BOND_SHARES_WING:            { label:'Shares Wing',            step:1,     desc:'Shares per WING buy order' },
+  BOND_MIN_EDGE_CHEAP:         { label:'Min Edge Cheap',         step:0.005, desc:'Min edge (prob - ask) for CHEAP tier (2-8¢)' },
+  BOND_MIN_EDGE_CORE:          { label:'Min Edge Core',          step:0.01,  desc:'Min edge (prob - ask) for CORE tier (8-30¢)' },
+  BOND_SHARES_CHEAP_MAX:       { label:'Shares Cheap Max',       step:5,     desc:'Max share cap for adaptive CHEAP sizing' },
+  BOND_SHARES_CORE:            { label:'Shares Core',            step:1,     desc:'Base share count for CORE buy orders' },
   BOND_MAX_CAPITAL_PER_CLUSTER:{ label:'Max Capital/Cluster $',  step:0.5,   desc:'Max $ across all buckets for one city/date' },
-  BOND_EARLY_EXIT_PRICE:       { label:'Early Exit Price',       step:0.01,  desc:'Sell CORE when price hits this' },
-  BOND_WING_EXIT_MULTIPLIER:   { label:'Wing Exit Multiplier',   step:0.5,   desc:'Sell WING/SEC if price ≥ cost × this' },
-  BOND_WING_MIN_ABS_GAIN:      { label:'Wing Min Abs Gain $',    step:0.25,  desc:'AND absolute gain ≥ this (USD)' },
+  BOND_EARLY_EXIT_PRICE:       { label:'Early Exit Price',       step:0.01,  desc:'Sell CORE when price hits near-certainty' },
+  BOND_CHEAP_EXIT_MULTIPLIER:  { label:'Cheap Exit Multiplier',  step:0.5,   desc:'Sell CHEAP if price ≥ cost × this' },
+  BOND_CHEAP_MIN_ABS_GAIN:     { label:'Cheap Min Abs Gain $',   step:0.25,  desc:'AND absolute gain ≥ this (USD)' },
   BOND_GAS_FLOOR_HOURS:        { label:'Gas Floor Hours',        step:1,     desc:"Don't exit within N hours of resolution" },
   BOND_POLL_INTERVAL_SECS:     { label:'Poll Interval (s)',      step:30,    desc:'Seconds between full market scans' },
   BOND_MAX_MARKETS_PER_RUN:    { label:'Max Orders/Run',         step:10,    desc:'Max orders placed per scan cycle' },
@@ -1435,8 +1432,8 @@ function updatePaperStats(s) {
   const ts = s.tier_stats || {};
   for (const [tier, count_id, ev_id] of [
     ['CORE','pm-core-count','pm-core-ev'],
-    ['SECONDARY','pm-sec-count','pm-sec-ev'],
-    ['WING','pm-wing-count','pm-wing-ev'],
+    ['CHEAP','pm-sec-count','pm-sec-ev'],
+    ['CERTAIN','pm-wing-count','pm-wing-ev'],
   ]) {
     const t = ts[tier] || {};
     document.getElementById(count_id).textContent = t.count || 0;
@@ -1445,7 +1442,7 @@ function updatePaperStats(s) {
 
   // Tier rows
   const rows = document.getElementById('paper-tier-rows'); rows.innerHTML = '';
-  for (const [tier, cls] of [['CORE','blue'],['SECONDARY','amber'],['WING','purple']]) {
+  for (const [tier, cls] of [['CHEAP','amber'],['CORE','blue'],['CERTAIN','green']]) {
     const t = ts[tier] || {count:0,capital:0,avg_ask:null,avg_prob:null,avg_ev:null,projected_profit:0,actual_pnl:0,resolved:0,wins:0,win_rate:null};
     const div = document.createElement('div');
     div.style.cssText = 'display:grid;grid-template-columns:80px 60px 80px 70px 70px 70px 80px 80px 80px 80px;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:12px;';
@@ -1491,7 +1488,7 @@ function updatePaperStats(s) {
   // Depth rows
   const depthRows = document.getElementById('depth-stat-rows'); depthRows.innerHTML = '';
   const ds = s.depth_stats || {};
-  for (const [tier, cls] of [['CORE','blue'],['SECONDARY','amber'],['WING','purple']]) {
+  for (const [tier, cls] of [['CHEAP','amber'],['CORE','blue']]) {
     const d = ds[tier] || {fillable:0,no_depth:0,total:0,fill_rate:null,avg_depth:null,avg_wanted:null};
     const div = document.createElement('div');
     div.style.cssText = 'display:grid;grid-template-columns:100px 80px 80px 80px 100px 120px;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:12px;';

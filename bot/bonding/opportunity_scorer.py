@@ -2,9 +2,10 @@
 opportunity_scorer.py — Join forecast data with market data.
 
 Computes expected value per share for each market candidate, assigns a
-position tier (CORE / SECONDARY / WING), and enforces per-cluster capital caps.
+position tier (CHEAP / CORE), and enforces per-cluster capital caps.
 """
 import logging
+import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -24,17 +25,14 @@ log = logging.getLogger("bond.scorer")
 # re-evaluating the same market every 60 s until local midnight passes.
 _scan_suppressions: dict[tuple, float] = {}
 
-TIER_CORE      = "CORE"
-TIER_SECONDARY = "SECONDARY"
-TIER_WING      = "WING"
+TIER_CHEAP = "CHEAP"
+TIER_CORE  = "CORE"
 
 # Ask price ranges that define each tier
-_CORE_ASK_MAX = 0.08
-_CORE_ASK_MIN = 0.02
-_SECONDARY_ASK_MAX = 0.019
-_SECONDARY_ASK_MIN = 0.009
-_WING_ASK_MAX = 0.008
-_WING_ASK_MIN = 0.001
+_CHEAP_ASK_MIN = 0.02   # 2¢ — minimum for $1 order with reasonable share count
+_CHEAP_ASK_MAX = 0.08   # 8¢
+_CORE_ASK_MIN  = 0.08   # 8¢
+_CORE_ASK_MAX  = 0.30   # 30¢
 
 
 @dataclass
@@ -44,7 +42,7 @@ class ScoredOpportunity:
     prob: float          # P(this token resolves $1): P(YES) for YES side, P(NO) for NO side
     ev: float            # expected value per share = prob - side_ask
     edge: float          # prob - side_ask (true vs implied probability gap)
-    tier: str            # CORE | SECONDARY | WING
+    tier: str            # CHEAP | CORE
     shares: int          # total target shares
     capital: float       # total cost basis = shares * side_ask
     shares_immediate: int  # shares to buy now via FOK (available at profitable prices)
@@ -61,7 +59,7 @@ def passes_time_gate(market: "MarketCandidate", forecast_peak_hour: Optional[int
     Shared by score_market() and sure_thing_scorer.score_certain().
 
     Side-effect: populates _scan_suppressions on gate-fail so subsequent REST scan
-    iterations skip re-evaluating the same market until local midnight.
+    iterations skip re-evaluating the same market until local midnight passes.
     """
     if time.time() < _scan_suppressions.get((market.city, market.target_date), 0.0):
         return False
@@ -241,26 +239,23 @@ def _score_side(
     ev   = prob - ask
     edge = ev
 
-    tier = assign_tier(ask, ev, prob)
+    tier = assign_tier(ask, edge)
     if tier is None:
         return None
 
-    # BOND_EDGE_FLOOR is a CORE-tier gate: it requires meaningful gap between model
-    # and market. WING and SECONDARY have their own entry criteria (ev > 0 and
-    # BOND_MIN_EV_SECONDARY respectively) already enforced by assign_tier(), and their
-    # post-market-cap EV ceiling is structurally below 0.15, so applying the floor
-    # here would permanently suppress them.
-    if tier == TIER_CORE and edge < _config.BOND_EDGE_FLOOR:
+    min_edge = (
+        _config.BOND_MIN_EDGE_CHEAP if tier == TIER_CHEAP else _config.BOND_MIN_EDGE_CORE
+    )
+    if edge < min_edge:
         log.debug(
             f"scorer: {market.city} {market.target_date} {outcome} ask={ask:.4f} "
-            f"edge={edge:.4f} < BOND_EDGE_FLOOR — skip"
+            f"edge={edge:.4f} < {min_edge} ({tier} min) — skip"
         )
         return None
 
-    shares = _shares_for_tier(tier)
-    # For CORE, max fill price requires full edge gap. For WING/SECONDARY we accept
-    # any fill at or below prob (positive EV is the only gate).
-    max_profitable_price = (prob - _config.BOND_EDGE_FLOOR) if tier == TIER_CORE else prob
+    shares = _shares_for_tier(tier, ask)
+    # Only fill at prices that maintain the tier's minimum edge requirement.
+    max_profitable_price = prob - min_edge
     shares_immediate, shares_limit = _compute_fill_split(ask_book, shares, max_profitable_price)
 
     if shares_immediate == 0 and shares_limit == 0:
@@ -286,24 +281,36 @@ def _score_side(
     )
 
 
-def assign_tier(ask: float, ev: float, prob: float) -> Optional[str]:
+def assign_tier(ask: float, edge: float) -> Optional[str]:
     """
-    Assign a position tier based on ask price, EV, and probability.
+    Assign a position tier based on ask price and edge.
     Returns None if no tier criteria are met.
+
+    CHEAP: 2-8¢  — long-shot bets, edge >= BOND_MIN_EDGE_CHEAP
+    CORE:  8-30¢ — underdog bets, edge >= BOND_MIN_EDGE_CORE
     """
+    if _CHEAP_ASK_MIN <= ask < _CHEAP_ASK_MAX:
+        return TIER_CHEAP
+
     if _CORE_ASK_MIN <= ask <= _CORE_ASK_MAX:
-        if ev > _config.BOND_MIN_EV_CORE and prob > _config.BOND_CONFIDENCE_FLOOR:
-            return TIER_CORE
-
-    if _SECONDARY_ASK_MIN <= ask <= _SECONDARY_ASK_MAX:
-        if ev > _config.BOND_MIN_EV_SECONDARY:
-            return TIER_SECONDARY
-
-    if _WING_ASK_MIN <= ask <= _WING_ASK_MAX:
-        if ev > 0:  # positive EV is sufficient for wing bets
-            return TIER_WING
+        return TIER_CORE
 
     return None
+
+
+def _shares_for_tier(tier: str, ask: float) -> int:
+    """
+    Compute share count for a given tier and ask price.
+
+    CHEAP: adaptive — ceil(1.00 / ask), capped at BOND_SHARES_CHEAP_MAX.
+           Ensures every order costs >= $1 at the CLOB minimum.
+    CORE:  max(BOND_SHARES_CORE, ceil(1.00 / ask)) — uses target count but
+           floors up to hit $1 minimum at the low end of the price range.
+    """
+    if tier == TIER_CHEAP:
+        return min(math.ceil(1.00 / ask), _config.BOND_SHARES_CHEAP_MAX)
+    # CORE
+    return max(_config.BOND_SHARES_CORE, math.ceil(1.00 / ask))
 
 
 def _compute_fill_split(
@@ -325,14 +332,6 @@ def _compute_fill_split(
     shares_immediate = min(shares_wanted, int(available))
     shares_limit = shares_wanted - shares_immediate
     return shares_immediate, shares_limit
-
-
-def _shares_for_tier(tier: str) -> int:
-    if tier == TIER_CORE:
-        return _config.BOND_SHARES_CORE
-    if tier == TIER_SECONDARY:
-        return _config.BOND_SHARES_SECONDARY
-    return _config.BOND_SHARES_WING
 
 
 def _apply_cluster_caps(

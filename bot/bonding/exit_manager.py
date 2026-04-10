@@ -26,10 +26,9 @@ STATUS_OPEN     = "OPEN"
 STATUS_SOLD     = "SOLD"
 STATUS_RESOLVED = "RESOLVED"
 
-TIER_CORE      = "CORE"
-TIER_SECONDARY = "SECONDARY"
-TIER_WING      = "WING"
-TIER_CERTAIN   = "CERTAIN"
+TIER_CHEAP   = "CHEAP"
+TIER_CORE    = "CORE"
+TIER_CERTAIN = "CERTAIN"
 
 
 @dataclass
@@ -39,7 +38,7 @@ class BondPosition:
     question: str
     city: str
     outcome: str              # always "YES"
-    tier: str                 # CORE | SECONDARY | WING
+    tier: str                 # CHEAP | CORE | CERTAIN
     shares: int
     entry_price: float
     entry_time: str           # ISO8601
@@ -136,14 +135,14 @@ class ExitManager:
         self, pos: BondPosition, price: float, hours: float
     ) -> bool:
         """
-        Exit decision tree (from strategy document §2.4):
+        Exit decision tree:
 
         1. Hours to resolution < BOND_GAS_FLOOR_HOURS → HOLD (gas not worth it)
-        2. Core: price >= BOND_EARLY_EXIT_PRICE → SELL
-        3. Any tier: price >= entry * 10 → SELL
-        4. Wing/secondary: price >= entry * BOND_WING_EXIT_MULTIPLIER
-                           AND gain >= BOND_WING_MIN_ABS_GAIN → SELL
-        5. Sub-cent entry AND price < 0.50 → HOLD (gas cost floor)
+        2. CORE: price >= BOND_EARLY_EXIT_PRICE → SELL (near-certainty)
+        3. Any tier: price >= entry * 10 → SELL (10× windfall)
+        4. CHEAP: price >= entry * BOND_CHEAP_EXIT_MULTIPLIER
+                  AND gain >= BOND_CHEAP_MIN_ABS_GAIN → SELL
+        5. CERTAIN is held to resolution (excluded from rules 2 and 4)
         """
         if price <= 0.0:
             return False
@@ -156,7 +155,7 @@ class ExitManager:
             )
             return False
 
-        # Rule 2 — core early exit (CERTAIN tier is excluded — hold to resolution)
+        # Rule 2 — CORE near-certainty exit (CERTAIN held to resolution)
         if pos.tier == TIER_CORE and price >= _config.BOND_EARLY_EXIT_PRICE:
             return True
 
@@ -164,18 +163,14 @@ class ExitManager:
         if price >= pos.entry_price * 10:
             return True
 
-        # Rule 4 — wing/secondary multiplier + absolute gain
-        if pos.tier in (TIER_WING, TIER_SECONDARY):
+        # Rule 4 — CHEAP multiplier + absolute gain floor
+        if pos.tier == TIER_CHEAP:
             gain = (price - pos.entry_price) * pos.shares
             if (
-                price >= pos.entry_price * _config.BOND_WING_EXIT_MULTIPLIER
-                and gain >= _config.BOND_WING_MIN_ABS_GAIN
+                price >= pos.entry_price * _config.BOND_CHEAP_EXIT_MULTIPLIER
+                and gain >= _config.BOND_CHEAP_MIN_ABS_GAIN
             ):
                 return True
-
-        # Rule 5 — sub-cent cost basis: hold unless significant reprice
-        if pos.entry_price < 0.01 and price < 0.50:
-            return False
 
         return False
 
@@ -282,7 +277,7 @@ class ExitManager:
             )
             return True
 
-        # Gate 5b: confidence drop (CERTAIN/CORE only)
+        # Gate 5b: confidence drop (CERTAIN/CORE only — CHEAP held without confidence exit)
         if pos.tier == TIER_CERTAIN:
             threshold = _config.BOND_CONF_CERTAIN_DROP
             abs_floor  = _config.BOND_CONF_CERTAIN_ABS

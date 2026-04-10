@@ -24,7 +24,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from bonding.market_scanner import scan_weather_markets
-from bonding.opportunity_scorer import score_all, ScoredOpportunity, TIER_CORE, TIER_SECONDARY, TIER_WING
+from bonding.opportunity_scorer import score_all, ScoredOpportunity, TIER_CHEAP, TIER_CORE
 from bonding.weather_client import get_consensus_forecasts
 import config as _config
 from config import LOG_LEVEL
@@ -192,23 +192,20 @@ class PaperExitManager:
         # Rule 1: too close to resolution — gas not worth it (same discipline as live)
         if hours < _config.BOND_GAS_FLOOR_HOURS:
             return False
-        # Rule 2: core early exit
+        # Rule 2: CORE near-certainty exit
         if pos.tier == TIER_CORE and price >= _config.BOND_EARLY_EXIT_PRICE:
             return True
         # Rule 3: 10× on any tier
         if price >= pos.entry_price * 10:
             return True
-        # Rule 4: wing/secondary multiplier + absolute gain threshold
-        if pos.tier in (TIER_SECONDARY, TIER_WING):
+        # Rule 4: CHEAP multiplier + absolute gain threshold
+        if pos.tier == TIER_CHEAP:
             gain = (price - pos.entry_price) * pos.shares
             if (
-                price >= pos.entry_price * _config.BOND_WING_EXIT_MULTIPLIER
-                and gain >= _config.BOND_WING_MIN_ABS_GAIN
+                price >= pos.entry_price * _config.BOND_CHEAP_EXIT_MULTIPLIER
+                and gain >= _config.BOND_CHEAP_MIN_ABS_GAIN
             ):
                 return True
-        # Rule 5: sub-cent cost basis — hold unless significant reprice
-        if pos.entry_price < 0.01 and price < 0.50:
-            return False
         return False
 
     def _record_sell(self, pos: PaperPosition, exit_price: float) -> None:
@@ -438,7 +435,7 @@ def analyse(log_path: str = str(PAPER_LOG)) -> None:
     print(f"Log file: {log_path}\n")
 
     # ── YES / NO bets by tier ─────────────────────────────────────
-    for tier in ("CORE", "SECONDARY", "WING"):
+    for tier in ("CHEAP", "CORE"):
         recs = buys.get(tier, [])
         if not recs:
             continue
@@ -461,7 +458,7 @@ def analyse(log_path: str = str(PAPER_LOG)) -> None:
         f"{'Fill rate':>9}  {'Avg depth':>12}"
     )
     print(f"  {'─' * 12}  {'─' * 8}  {'─' * 8}  {'─' * 9}  {'─' * 12}")
-    for tier in ("CORE", "SECONDARY", "WING"):
+    for tier in ("CHEAP", "CORE"):
         buy_recs  = buys.get(tier, [])
         miss_recs = misses.get(tier, [])
 

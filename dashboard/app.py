@@ -311,7 +311,7 @@ async def create_app(state):
         )
 
         tier_stats: dict = {}
-        for tier in ("CORE", "SECONDARY", "WING"):
+        for tier in ("CHEAP", "CORE", "CERTAIN"):
             tier_sold = [p for p in sold_pos if p["tier"] == tier and p.get("exit_price") is not None]
             wins      = [p for p in tier_sold if p["exit_price"] > p["entry_price"]]
             tier_stats[tier] = {
@@ -349,20 +349,17 @@ async def create_app(state):
     async def api_bond_config_get(request):
         """Return current BOND_* config values."""
         return web.json_response({
-            "BOND_MIN_EV_CORE":            _config.BOND_MIN_EV_CORE,
-            "BOND_MIN_EV_SECONDARY":       _config.BOND_MIN_EV_SECONDARY,
-            "BOND_CONFIDENCE_FLOOR":       _config.BOND_CONFIDENCE_FLOOR,
-            "BOND_EDGE_FLOOR":             _config.BOND_EDGE_FLOOR,
-            "BOND_SHARES_CORE":            _config.BOND_SHARES_CORE,
-            "BOND_SHARES_SECONDARY":       _config.BOND_SHARES_SECONDARY,
-            "BOND_SHARES_WING":            _config.BOND_SHARES_WING,
+            "BOND_MIN_EDGE_CHEAP":          _config.BOND_MIN_EDGE_CHEAP,
+            "BOND_MIN_EDGE_CORE":           _config.BOND_MIN_EDGE_CORE,
+            "BOND_SHARES_CHEAP_MAX":        _config.BOND_SHARES_CHEAP_MAX,
+            "BOND_SHARES_CORE":             _config.BOND_SHARES_CORE,
             "BOND_MAX_CAPITAL_PER_CLUSTER": _config.BOND_MAX_CAPITAL_PER_CLUSTER,
-            "BOND_EARLY_EXIT_PRICE":       _config.BOND_EARLY_EXIT_PRICE,
-            "BOND_WING_EXIT_MULTIPLIER":   _config.BOND_WING_EXIT_MULTIPLIER,
-            "BOND_WING_MIN_ABS_GAIN":      _config.BOND_WING_MIN_ABS_GAIN,
-            "BOND_GAS_FLOOR_HOURS":        _config.BOND_GAS_FLOOR_HOURS,
-            "BOND_POLL_INTERVAL_SECS":     _config.BOND_POLL_INTERVAL_SECS,
-            "BOND_MAX_MARKETS_PER_RUN":    _config.BOND_MAX_MARKETS_PER_RUN,
+            "BOND_EARLY_EXIT_PRICE":        _config.BOND_EARLY_EXIT_PRICE,
+            "BOND_CHEAP_EXIT_MULTIPLIER":   _config.BOND_CHEAP_EXIT_MULTIPLIER,
+            "BOND_CHEAP_MIN_ABS_GAIN":      _config.BOND_CHEAP_MIN_ABS_GAIN,
+            "BOND_GAS_FLOOR_HOURS":         _config.BOND_GAS_FLOOR_HOURS,
+            "BOND_POLL_INTERVAL_SECS":      _config.BOND_POLL_INTERVAL_SECS,
+            "BOND_MAX_MARKETS_PER_RUN":     _config.BOND_MAX_MARKETS_PER_RUN,
         })
 
     @_auth_required
@@ -370,13 +367,13 @@ async def create_app(state):
         """Live-update BOND_* numeric parameters."""
         data = await request.json()
         _float_keys = {
-            "BOND_MIN_EV_CORE", "BOND_MIN_EV_SECONDARY", "BOND_CONFIDENCE_FLOOR",
-            "BOND_EDGE_FLOOR", "BOND_MAX_CAPITAL_PER_CLUSTER",
-            "BOND_EARLY_EXIT_PRICE", "BOND_WING_EXIT_MULTIPLIER", "BOND_WING_MIN_ABS_GAIN",
+            "BOND_MIN_EDGE_CHEAP", "BOND_MIN_EDGE_CORE",
+            "BOND_MAX_CAPITAL_PER_CLUSTER",
+            "BOND_EARLY_EXIT_PRICE", "BOND_CHEAP_EXIT_MULTIPLIER", "BOND_CHEAP_MIN_ABS_GAIN",
         }
         _int_keys = {
-            "BOND_GAS_FLOOR_HOURS", "BOND_SHARES_CORE", "BOND_SHARES_SECONDARY",
-            "BOND_SHARES_WING", "BOND_POLL_INTERVAL_SECS", "BOND_MAX_MARKETS_PER_RUN",
+            "BOND_GAS_FLOOR_HOURS", "BOND_SHARES_CORE", "BOND_SHARES_CHEAP_MAX",
+            "BOND_POLL_INTERVAL_SECS", "BOND_MAX_MARKETS_PER_RUN",
         }
         updated = {}
         for k, v in data.items():
@@ -546,7 +543,7 @@ async def create_app(state):
             records.append(r)
 
         if not records:
-            _empty_tier_bd = {t: {"count": 0, "avg_conf": None} for t in ("CORE", "SECONDARY", "WING")}
+            _empty_tier_bd = {t: {"count": 0, "avg_conf": None} for t in ("CHEAP", "CORE", "CERTAIN")}
             _empty_et = {lbl: {"count": 0, "resolved": 0, "wins": 0, "win_rate": None,
                                "actual_pnl": 0, "tier_breakdown": _empty_tier_bd}
                          for lbl in ("0-10h", "10-20h", "20-30h", "30-48h", "48h+")}
@@ -584,7 +581,7 @@ async def create_app(state):
 
         # ── Tier stats ────────────────────────────────────────────────
         tier_stats: dict = {}
-        for tier in ("CORE", "SECONDARY", "WING"):
+        for tier in ("CHEAP", "CORE", "CERTAIN"):
             tr_list = [r for r in records if r.get("tier") == tier]
             if not tr_list:
                 tier_stats[tier] = {
@@ -629,7 +626,7 @@ async def create_app(state):
             resolved_b = [r for r in bucket if _is_resolved(r)]
             wins_b     = [r for r in resolved_b if _is_win(r)]
             tier_breakdown: dict = {}
-            for tier in ("CORE", "SECONDARY", "WING"):
+            for tier in ("CHEAP", "CORE", "CERTAIN"):
                 tb = [r for r in bucket if r.get("tier") == tier]
                 probs = [r["prob"] for r in tb if r.get("prob") is not None]
                 tier_breakdown[tier] = {
@@ -672,7 +669,7 @@ async def create_app(state):
         # inflate fill rates. DEPTH_MISS events track confirmed no-depth cases.
         miss_records = [r for r in all_records if r.get("event") == "DEPTH_MISS"]
         depth_stats: dict = {}
-        for tier in ("CORE", "SECONDARY", "WING"):
+        for tier in ("CHEAP", "CORE"):
             buy_recs  = [r for r in records if r.get("tier") == tier and "shares_wanted" in r]
             miss_recs = [r for r in miss_records if r.get("tier") == tier]
             fillable_ids  = {r["market_id"] for r in buy_recs  if r.get("market_id")}
@@ -715,7 +712,7 @@ async def create_app(state):
 
         positions = _load_bond_ledger()
 
-        _empty_tier_bd = {t: {"count": 0, "avg_conf": None} for t in ("CORE", "SECONDARY", "WING")}
+        _empty_tier_bd = {t: {"count": 0, "avg_conf": None} for t in ("CHEAP", "CORE", "CERTAIN")}
         _empty_et = {lbl: {"count": 0, "resolved": 0, "wins": 0, "win_rate": None,
                             "actual_pnl": 0, "tier_breakdown": _empty_tier_bd}
                      for lbl in ("0-10h", "10-20h", "20-30h", "30-48h", "48h+")}
@@ -748,7 +745,7 @@ async def create_app(state):
 
         # ── Tier stats ────────────────────────────────────────────────
         tier_stats: dict = {}
-        for tier in ("CORE", "SECONDARY", "WING"):
+        for tier in ("CHEAP", "CORE", "CERTAIN"):
             tp = [p for p in positions if p.get("tier") == tier]
             if not tp:
                 tier_stats[tier] = {
@@ -789,7 +786,7 @@ async def create_app(state):
             resolved_b = [p for p in bucket if _is_resolved(p)]
             wins_b     = [p for p in resolved_b if _is_win(p)]
             tier_breakdown: dict = {}
-            for tier in ("CORE", "SECONDARY", "WING"):
+            for tier in ("CHEAP", "CORE", "CERTAIN"):
                 tb = [p for p in bucket if p.get("tier") == tier]
                 probs = [p["prob"] for p in tb if p.get("prob")]
                 tier_breakdown[tier] = {
