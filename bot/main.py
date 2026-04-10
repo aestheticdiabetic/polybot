@@ -101,6 +101,13 @@ async def run_bonding_loop(state: StateManager) -> None:
     init_peak_stats()  # reload after seeding to incorporate newly written data
     log.info("BOND mode: peak hour stats loaded (%d cities)", len(_wc._peak_hour_stats))
 
+    # Seed/update 2-year daily max temp history for statistical (ARIMA/Naïve) source.
+    # First run fetches ~2 years per city (~3 min for all cities); subsequent runs
+    # only fill the last few missing days and complete in seconds.
+    from bonding.statistical_forecast import seed_all_cities as _seed_statistical
+    log.info("BOND mode: seeding statistical temp history...")
+    await _seed_statistical(BOND_CITIES)
+
     # Initial scan to pre-populate the feed before the WS connects.
     # This ensures the WebSocket subscribes to all markets immediately on connect
     # rather than starting with 0 subscriptions and resubscribing ~60s later.
@@ -297,6 +304,12 @@ async def run_paper_loop(state: StateManager) -> None:
 
     async def _on_price_tick(token_id: str, price: float) -> None:
         await exit_mgr.on_price_tick(token_id, price)
+
+    # Seed/update statistical temp history (shared with BOND mode cache on disk).
+    from bonding.statistical_forecast import seed_all_cities as _seed_statistical
+    from config import BOND_CITIES
+    log.info("PAPER mode: seeding statistical temp history...")
+    await _seed_statistical(BOND_CITIES)
 
     # Initial scan to pre-populate the feed before the WS connects.
     # This ensures the WebSocket subscribes to all markets immediately on connect

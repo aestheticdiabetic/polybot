@@ -92,27 +92,46 @@ class ForecastResult:
 
 @dataclass
 class SourceConsensus:
-    """Aggregates GFS, ECMWF, and tomorrow.io forecasts for a single city/date."""
+    """Aggregates GFS, ECMWF, tomorrow.io, and statistical forecasts for a single city/date."""
     city: str
     target_date: date
     gfs: ForecastResult
     ecmwf: Optional[ForecastResult]
     tomorrowio: Optional[ForecastResult]
+    statistical: Optional[ForecastResult] = None
 
     def consensus_prob(self, temp_min: float, temp_max: float) -> float:
-        """Average P(YES) across all available sources."""
-        probs = [prob_in_range(self.gfs, temp_min, temp_max)]
+        """
+        Weighted average P(YES) across all available sources.
+
+        Meteorological sources (GFS, ECMWF, TIO) each carry weight 1.0.
+        The statistical source (ARIMA/Naïve blend) carries BOND_STATISTICAL_WEIGHT
+        (< 1.0) — it contributes directional signal without overriding physics-
+        based ensemble agreement.
+        """
+        import config as _config
+        w_stat = _config.BOND_STATISTICAL_WEIGHT
+
+        weighted: list[tuple[float, float]] = [
+            (prob_in_range(self.gfs, temp_min, temp_max), 1.0),
+        ]
         if self.ecmwf is not None:
-            probs.append(prob_in_range(self.ecmwf, temp_min, temp_max))
+            weighted.append((prob_in_range(self.ecmwf, temp_min, temp_max), 1.0))
         if self.tomorrowio is not None:
-            probs.append(prob_in_range(self.tomorrowio, temp_min, temp_max))
-        return sum(probs) / len(probs)
+            weighted.append((prob_in_range(self.tomorrowio, temp_min, temp_max), 1.0))
+        if self.statistical is not None:
+            weighted.append((prob_in_range(self.statistical, temp_min, temp_max), w_stat))
+
+        total_w = sum(w for _, w in weighted)
+        return sum(p * w for p, w in weighted) / total_w
 
     def available_sources(self) -> int:
+        """Count of meteorological sources present (GFS, ECMWF, TIO only).
+        Statistical source is excluded — CERTAIN tier gates on met-source agreement."""
         return sum(1 for s in [self.gfs, self.ecmwf, self.tomorrowio] if s is not None)
 
     def point_forecasts(self) -> list[float]:
-        """Return point forecast (daily_max_c) from each available source."""
+        """Return point forecast (daily_max_c) from each meteorological source."""
         result = [self.gfs.daily_max_c]
         if self.ecmwf is not None:
             result.append(self.ecmwf.daily_max_c)
@@ -121,7 +140,8 @@ class SourceConsensus:
         return result
 
     def all_ensemble_members(self) -> list[float]:
-        """Concatenate ensemble members from all available sources."""
+        """Concatenate ensemble members from meteorological sources only.
+        Statistical synthetic members are excluded from spread/delta gates."""
         members = list(self.gfs.ensemble_members)
         if self.ecmwf is not None:
             members.extend(self.ecmwf.ensemble_members)
@@ -506,6 +526,15 @@ async def get_consensus_forecasts(
             tio_results[(canonical, d)] = result
     log.info(f"TIO fetch complete: {len(tio_results)} results from {n_tio_cities} cities")
 
+    # Statistical (ARIMA/Naïve) — in-memory lookups after startup seeding; no API calls
+    from bonding.statistical_forecast import get_statistical_forecasts_batch
+    stat_results: dict[tuple[str, date], ForecastResult] = {}
+    try:
+        stat_results = await get_statistical_forecasts_batch(city_groups)
+        log.info(f"statistical fetch complete: {len(stat_results)} results")
+    except Exception as exc:
+        log.warning(f"statistical fetch failed (non-fatal): {exc}")
+
     # Assemble SourceConsensus — only for cities where GFS succeeded
     consensus: dict[tuple[str, date], SourceConsensus] = {}
     for (city, d), gfs in gfs_results.items():
@@ -515,13 +544,15 @@ async def get_consensus_forecasts(
             gfs=gfs,
             ecmwf=ecmwf_results.get((city, d)),
             tomorrowio=tio_results.get((city, d)),
+            statistical=stat_results.get((city, d)),
         )
 
     n_ecmwf = sum(1 for v in consensus.values() if v.ecmwf is not None)
     n_tio   = sum(1 for v in consensus.values() if v.tomorrowio is not None)
+    n_stat  = sum(1 for v in consensus.values() if v.statistical is not None)
     log.info(
         f"consensus_forecasts: {len(consensus)} pairs — "
-        f"ecmwf={n_ecmwf} tio={n_tio}"
+        f"ecmwf={n_ecmwf} tio={n_tio} statistical={n_stat}"
     )
     return consensus
 

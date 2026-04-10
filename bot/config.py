@@ -175,7 +175,7 @@ BOND_MARKET_DISAGREEMENT_RATIO = 5.0
 
 # ─── Cross-source weather ─────────────────────────────────────────────────────
 TOMORROW_IO_API_KEY           = os.getenv("TOMORROW_IO_API_KEY", "")
-TOMORROW_IO_CACHE_TTL_SECS    = 10_800   # 3 hours
+TOMORROW_IO_CACHE_TTL_SECS    = 21_600   # 6 hours — 74 cities / 6h = ~12 calls/hr, under 20/hr cap
 TOMORROW_IO_MAX_REQ_PER_HOUR  = 20       # headroom below 25/hr hard limit
 ECMWF_ENSEMBLE_MODEL          = "ecmwf_ifs025"  # 50 members, 0.25° global, free via Open-Meteo
 ECMWF_DISK_CACHE_PATH         = os.environ.get("ECMWF_CACHE_PATH", "/app/data/ecmwf_cache.json")
@@ -196,6 +196,18 @@ CERTAIN_MAX_CAPITAL_PER_CLUSTER  = 20.00  # separate from BOND_MAX_CAPITAL_PER_C
 # Applied to daily_max_c before generating synthetic ensemble members.
 # Populate using bot/calibrate_forecasts.py and update as new data arrives.
 BOND_CITY_BIAS_CORRECTIONS: dict[str, float] = {}
+
+# ─── Statistical forecast (ARIMA/Naïve 4th source) ───────────────────────────
+# Weight applied to the statistical source in consensus_prob() relative to each
+# meteorological source (GFS, ECMWF, TIO each have weight 1.0).
+# 0.5 means the statistical signal contributes half as much as one met source.
+BOND_STATISTICAL_WEIGHT: float = 0.5
+
+# Disk path for per-city daily max temperature history (JSON).
+# Seeded with 2 years of archive data at startup; updated daily thereafter.
+BOND_STATISTICAL_CACHE_PATH: str = os.environ.get(
+    "STATISTICAL_CACHE_PATH", "/app/data/statistical_temp_cache.json"
+)
 
 # Scanner settings
 BOND_POLL_INTERVAL_SECS  = 60    # seconds between REST market discovery scans (WS handles real-time pricing)

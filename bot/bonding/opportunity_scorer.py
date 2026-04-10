@@ -245,7 +245,12 @@ def _score_side(
     if tier is None:
         return None
 
-    if edge < _config.BOND_EDGE_FLOOR:
+    # BOND_EDGE_FLOOR is a CORE-tier gate: it requires meaningful gap between model
+    # and market. WING and SECONDARY have their own entry criteria (ev > 0 and
+    # BOND_MIN_EV_SECONDARY respectively) already enforced by assign_tier(), and their
+    # post-market-cap EV ceiling is structurally below 0.15, so applying the floor
+    # here would permanently suppress them.
+    if tier == TIER_CORE and edge < _config.BOND_EDGE_FLOOR:
         log.debug(
             f"scorer: {market.city} {market.target_date} {outcome} ask={ask:.4f} "
             f"edge={edge:.4f} < BOND_EDGE_FLOOR — skip"
@@ -253,7 +258,9 @@ def _score_side(
         return None
 
     shares = _shares_for_tier(tier)
-    max_profitable_price = prob - _config.BOND_EDGE_FLOOR
+    # For CORE, max fill price requires full edge gap. For WING/SECONDARY we accept
+    # any fill at or below prob (positive EV is the only gate).
+    max_profitable_price = (prob - _config.BOND_EDGE_FLOOR) if tier == TIER_CORE else prob
     shares_immediate, shares_limit = _compute_fill_split(ask_book, shares, max_profitable_price)
 
     if shares_immediate == 0 and shares_limit == 0:
