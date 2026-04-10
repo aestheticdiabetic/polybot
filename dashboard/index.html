@@ -1478,10 +1478,9 @@ function updatePaperStats(s) {
 function renderPaperTrades() {
   const tierFilt    = document.getElementById('paper-tier-filter').value;
   const outcomeFilt = document.getElementById('paper-outcome-filter').value;
-  const _isSoldEvent = r => r.event === 'WOULD_SELL';
-  const _isEffectiveWin  = r => _isSoldEvent(r) ? (r.pnl || 0) > 0 : (r.outcome != null && (r.pnl || 0) > 0);
-  const _isEffectiveLoss = r => _isSoldEvent(r) ? (r.pnl != null && (r.pnl || 0) <= 0) : (r.outcome != null && (r.pnl || 0) <= 0);
-  const _isPending       = r => !_isSoldEvent(r) && r.outcome == null;
+  const _isEffectiveWin  = r => r.outcome != null && (r.pnl || 0) > 0;
+  const _isEffectiveLoss = r => r.outcome != null && (r.pnl == null || (r.pnl || 0) <= 0);
+  const _isPending       = r => r.outcome == null;
 
   // Filter across ALL records first, then paginate
   let filtered = [...paperRecords];
@@ -1528,21 +1527,18 @@ function renderPaperTrades() {
     return;
   }
   records.forEach(r => {
-    const isSold = _isSoldEvent(r);
     const projProfit = (r.ev || 0) * (r.shares || 0);
     const actualWin = _isEffectiveWin(r);
-    const outcomeHtml = isSold
-      ? `<span class="pill ${actualWin ? 'pill-won' : 'pill-lost'}">sold ${actualWin ? '✓' : '✗'}</span>`
-      : r.outcome == null
-        ? '<span style="color:var(--muted)">pending</span>'
-        : actualWin
-          ? `<span class="pill pill-won">${r.outcome} ✓</span>`
-          : `<span class="pill pill-lost">${r.outcome} ✗</span>`;
+    const outcomeHtml = r.outcome == null
+      ? '<span style="color:var(--muted)">pending</span>'
+      : actualWin
+        ? `<span class="pill pill-won">${r.outcome} ✓</span>`
+        : `<span class="pill pill-lost">${r.outcome} ✗</span>`;
     const pnlHtml = r.pnl != null
       ? `<span class="${r.pnl >= 0 ? 'green' : 'red'}">${r.pnl >= 0 ? '+' : ''}$${parseFloat(r.pnl).toFixed(4)}</span>`
       : '—';
     let resStr, resClass;
-    if (isSold) {
+    if (r.outcome === 'SOLD') {
       const exitP = r.exit_price != null ? parseFloat(r.exit_price).toFixed(4) : '?';
       resStr  = `sold @ ${exitP}`;
       resClass = 'muted';
@@ -1561,7 +1557,7 @@ function renderPaperTrades() {
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)">${r.question || ''}</td>
       <td><span class="pill pill-${(r.tier||'').toLowerCase()}">${r.tier||'?'}</span></td>
       <td>${r.shares || 0}</td>
-      <td>${isSold ? parseFloat(r.entry_price||0).toFixed(4) : parseFloat(r.ask||0).toFixed(4)}</td>
+      <td>${parseFloat(r.ask||0).toFixed(4)}</td>
       <td>${r.prob != null ? (r.prob*100).toFixed(1)+'%' : '—'}</td>
       <td class="${(r.ev||0)>0?'green':''}">${r.ev != null ? r.ev.toFixed(4) : '—'}</td>
       <td class="amber">$${parseFloat(r.capital||0).toFixed(4)}</td>

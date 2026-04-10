@@ -485,7 +485,26 @@ async def create_app(state):
     async def api_bond_paper_trades(request):
         """Return last N paper trade records from paper_trades.jsonl."""
         n = int(request.rel_url.query.get("n", 5000))
-        records = _load_paper_trades(n)
+        all_records = _load_paper_trades(n)
+        # Build a fallback map from WOULD_SELL events: market_id → sell record.
+        # Used when _patch_would_buy failed or lost a file-write race — the WOULD_SELL
+        # event is the only source of exit_price/pnl in that case.
+        sell_map: dict = {}
+        for r in all_records:
+            if r.get("event") == "WOULD_SELL" and r.get("market_id"):
+                sell_map[r["market_id"]] = r
+        # Return only WOULD_BUY records — WOULD_SELL are supplementary sell-side logs.
+        # Patch any WOULD_BUY record whose WOULD_BUY patch was incomplete using sell_map,
+        # preserving all original fields (prob, ev, capital, etc.) for display.
+        records = []
+        for r in all_records:
+            if r.get("event") == "WOULD_SELL":
+                continue
+            mid = r.get("market_id")
+            if mid and mid in sell_map and r.get("outcome") != "SOLD":
+                sell = sell_map[mid]
+                r = {**r, "outcome": "SOLD", "exit_price": sell.get("exit_price"), "pnl": sell.get("pnl")}
+            records.append(r)
         records.sort(key=lambda r: r.get("ts", ""), reverse=True)
         # Override resolution_time with accurate end-of-day UTC for display.
         # Gamma's stored end_date_iso is start-of-day UTC, not actual resolution.
