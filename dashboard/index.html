@@ -639,6 +639,20 @@
     <div id="side-stat-rows"></div>
   </div>
 
+  <!-- Order book depth stats -->
+  <div class="section">
+    <div class="section-title">Order Book Depth at Profitable Prices</div>
+    <div style="display:grid;grid-template-columns:100px 80px 80px 80px 100px 120px;gap:8px;padding:0 0 8px;border-bottom:1px solid var(--border);">
+      <span class="tier-header">TIER</span>
+      <span class="tier-header">FILLABLE</span>
+      <span class="tier-header">NO DEPTH</span>
+      <span class="tier-header">TOTAL</span>
+      <span class="tier-header">FILL RATE</span>
+      <span class="tier-header">AVG DEPTH</span>
+    </div>
+    <div id="depth-stat-rows"></div>
+  </div>
+
   <!-- Recent opportunities table -->
   <div class="section">
     <div style="display:flex;align-items:center;margin-bottom:14px;gap:12px;">
@@ -1472,6 +1486,25 @@ function updatePaperStats(s) {
       <span class="${wrCls}">${wr}${b.resolved ? ` (${b.wins}/${b.resolved})` : ''}</span>
       <span class="${ap>0?'green':ap<0?'red':''}">${ap>=0?'+':''}$${ap.toFixed(4)}</span>`;
     sideRows.appendChild(div);
+  }
+
+  // Depth rows
+  const depthRows = document.getElementById('depth-stat-rows'); depthRows.innerHTML = '';
+  const ds = s.depth_stats || {};
+  for (const [tier, cls] of [['CORE','blue'],['SECONDARY','amber'],['WING','purple']]) {
+    const d = ds[tier] || {fillable:0,no_depth:0,total:0,fill_rate:null,avg_depth:null,avg_wanted:null};
+    const div = document.createElement('div');
+    div.style.cssText = 'display:grid;grid-template-columns:100px 80px 80px 80px 100px 120px;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:12px;';
+    const frCls  = d.fill_rate != null ? (d.fill_rate >= 70 ? 'green' : d.fill_rate >= 40 ? 'amber' : 'red') : '';
+    const frTxt  = d.fill_rate != null ? d.fill_rate + '%' : '—';
+    const depTxt = d.avg_depth != null ? `${d.avg_depth} / ${d.avg_wanted}` : '—';
+    div.innerHTML = `<span><span class="pill pill-${tier.toLowerCase()}">${tier}</span></span>
+      <span class="green">${d.fillable}</span>
+      <span class="red">${d.no_depth}</span>
+      <span style="color:var(--muted)">${d.total}</span>
+      <span class="${frCls}">${frTxt}</span>
+      <span style="color:var(--muted)">${depTxt}</span>`;
+    depthRows.appendChild(div);
   }
 }
 

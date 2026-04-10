@@ -665,6 +665,30 @@ async def create_app(state):
         resolved_records       = [r for r in records if r.get("pnl") is not None]
         actual_pnl             = sum(r.get("pnl", 0) for r in resolved_records)
 
+        # ── Order book depth stats ────────────────────────────────────
+        # DEPTH_MISS events are in all_records but excluded from records (WOULD_BUY only).
+        miss_records = [r for r in all_records if r.get("event") == "DEPTH_MISS"]
+        depth_stats: dict = {}
+        for tier in ("CORE", "SECONDARY", "WING"):
+            buy_recs  = [r for r in records  if r.get("tier") == tier]
+            miss_recs = [r for r in miss_records if r.get("tier") == tier]
+            fillable_ids  = {r["market_id"] for r in buy_recs  if r.get("market_id")}
+            miss_only_ids = {r["market_id"] for r in miss_recs if r.get("market_id")} - fillable_ids
+            n_fillable = len(fillable_ids)
+            n_miss     = len(miss_only_ids)
+            n_total    = n_fillable + n_miss
+            fill_rate  = round(n_fillable / n_total * 100, 1) if n_total > 0 else None
+            avg_depth   = round(sum(r.get("shares", 0) for r in buy_recs) / len(buy_recs), 1) if buy_recs else None
+            avg_wanted  = round(sum(r.get("shares_wanted", r.get("shares", 0)) for r in buy_recs) / len(buy_recs), 1) if buy_recs else None
+            depth_stats[tier] = {
+                "fillable":  n_fillable,
+                "no_depth":  n_miss,
+                "total":     n_total,
+                "fill_rate": fill_rate,
+                "avg_depth": avg_depth,
+                "avg_wanted": avg_wanted,
+            }
+
         return web.json_response({
             "total":                    len(records),
             "cycles":                   cycles,
@@ -678,6 +702,7 @@ async def create_app(state):
             "tier_stats":               tier_stats,
             "entry_time_stats":         entry_time_stats,
             "side_stats":               side_stats,
+            "depth_stats":              depth_stats,
         })
 
     @_auth_required
