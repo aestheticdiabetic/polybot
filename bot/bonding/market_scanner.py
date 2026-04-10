@@ -80,6 +80,7 @@ async def scan_weather_markets() -> list[MarketCandidate]:
 
         parsed = parse_market_question(question)
         if parsed is None:
+            log.debug(f"scanner: parse failed for: {question!r:.100}")
             fail_parse += 1
             continue
 
@@ -177,6 +178,8 @@ async def scan_weather_markets() -> list[MarketCandidate]:
         f"fail_token={fail_token} fail_ask={fail_ask} fail_time={fail_time} "
         f"qualifying={len(candidates)}"
     )
+    if len(candidates) == 0 and len(raw_markets) > 0:
+        log.info("scanner: no city-level daily temperature markets found on Polymarket — bot is idle")
     if unknown_cities:
         top = sorted(unknown_cities, key=lambda c: -unknown_cities[c])[:15]
         log.info(f"BOND_UNKNOWN_CITIES (not in city list, top 15 by frequency): {top}")
@@ -267,7 +270,10 @@ async def _fetch_gamma_markets() -> list[dict]:
                     resp.raise_for_status()
                     data = await resp.json()
             except Exception as exc:
-                log.warning(f"scanner: Gamma API fetch failed: {exc}")
+                log.warning(
+                    f"scanner: Gamma API fetch failed at offset={offset}: "
+                    f"{type(exc).__name__}: {exc!r}"
+                )
                 break
 
             # Gamma returns a list or a dict with "data" key depending on version
@@ -297,11 +303,18 @@ async def _fetch_gamma_markets() -> list[dict]:
 
     # Client-side keyword filter: only keep temperature-related questions.
     # Guards against tag_slug being ignored by the API (which returns all ~50k markets).
+    # Note: \bF\b and \bC\b removed — too broad; they match non-temperature markets.
+    # "global temperature" anomaly markets (climate change) are also excluded since
+    # they have no city component and will always fail parse.
     _TEMP_RE = re.compile(
-        r"temperature|°[CcFf]|\bF\b|\bC\b|degrees?|daily.?high|highest.?temp|high.?temp",
+        r"(?:highest?|daily).{0,10}(?:temp|high)|temperature in [A-Z]|°[CcFf]|\d+\s*°|\d+\s*degrees?",
         re.IGNORECASE,
     )
-    filtered = [m for m in unique if _TEMP_RE.search(m.get("question", ""))]
+    filtered = [
+        m for m in unique
+        if _TEMP_RE.search(m.get("question", ""))
+        and "global temperature" not in m.get("question", "").lower()
+    ]
     log.info(f"BOND_GAMMA_KEYWORD_FILTER raw={len(unique)} after_filter={len(filtered)}")
     return filtered
 
