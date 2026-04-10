@@ -254,7 +254,11 @@ async def _fetch_gamma_markets() -> list[dict]:
     """
     all_markets: list[dict] = []
     offset = 0
-    timeout = aiohttp.ClientTimeout(total=15)
+    # Use per-request timeouts (sock_connect + sock_read), NOT total=N.
+    # total= is a session-level budget: once it expires every subsequent page
+    # request raises TimeoutError immediately, causing after_filter=0 when
+    # temperature markets happen to sit in the later pages of ~50k results.
+    timeout = aiohttp.ClientTimeout(sock_connect=10, sock_read=30)
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         while True:
