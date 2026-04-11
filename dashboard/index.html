@@ -657,7 +657,7 @@
   <div class="section" id="hourly-entries-section">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
       <div style="display:flex;align-items:center;gap:10px;">
-        <div class="section-title" style="margin-bottom:0;">Positions Entered — Hourly</div>
+        <div class="section-title" style="margin-bottom:0;">Positions Entered — 3-Day View</div>
         <span style="font-size:12px;color:var(--muted);">total: <span id="hourly-total-label" style="color:var(--green);font-weight:600;">—</span></span>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
@@ -1596,34 +1596,32 @@ function renderCapitalHistory(data) {
 
 async function loadHourlyEntries(offset) {
   try {
-    const data = await apiFetch(`/api/bond/hourly-entries?week_offset=${offset}`);
+    const data = await apiFetch(`/api/bond/hourly-entries?period_offset=${offset}`);
     renderHourlyEntries(data);
   } catch(e) { console.error('Hourly entries load failed:', e); }
 }
 
 function renderHourlyEntries(data) {
   if (!data) return;
-  hourlyMaxOffset = data.max_offset || 0;
+  hourlyMaxOffset  = data.max_offset || 0;
   hourlyWeekOffset = Math.min(hourlyWeekOffset, hourlyMaxOffset);
 
-  document.getElementById('hourly-week-label').textContent = data.week_label || '—';
+  document.getElementById('hourly-week-label').textContent  = data.period_label || '—';
   document.getElementById('hourly-total-label').textContent = data.total_entries ?? '—';
 
-  // Update nav button states
   document.getElementById('hourly-prev-btn').disabled = (hourlyWeekOffset >= hourlyMaxOffset);
   document.getElementById('hourly-next-btn').disabled = (hourlyWeekOffset <= 0);
 
-  const labels = Array.from({length:24}, (_,i) => String(i).padStart(2,'0') + ':00');
-  const counts = data.hourly   || Array(24).fill(0);
-  const avgs   = data.avg_hourly || Array(24).fill(0);
+  const hours  = data.hours || [];
+  const labels = hours.map(h => h.label);
+  const counts = hours.map(h => h.count);
 
   const canvas = document.getElementById('chart-hourly-entries');
   if (!canvas) return;
 
   if (hourlyEntriesChart) {
-    hourlyEntriesChart.data.labels = labels;
-    hourlyEntriesChart.data.datasets[0].data = counts;
-    hourlyEntriesChart.data.datasets[1].data = avgs;
+    hourlyEntriesChart.data.labels              = labels;
+    hourlyEntriesChart.data.datasets[0].data    = counts;
     hourlyEntriesChart.update('none');
     return;
   }
@@ -1634,25 +1632,11 @@ function renderHourlyEntries(data) {
       labels,
       datasets: [
         {
-          label: 'This week',
+          label: 'Entries',
           data: counts,
           backgroundColor: 'rgba(52,211,153,0.55)',
           borderColor: 'rgba(52,211,153,0.9)',
           borderWidth: 1,
-          order: 2,
-        },
-        {
-          label: 'Avg all weeks',
-          data: avgs,
-          type: 'line',
-          borderColor: 'rgba(245,158,11,0.75)',
-          backgroundColor: 'transparent',
-          borderWidth: 1.5,
-          borderDash: [5, 4],
-          pointRadius: 0,
-          fill: false,
-          tension: 0.3,
-          order: 1,
         }
       ]
     },
@@ -1664,16 +1648,20 @@ function renderHourlyEntries(data) {
         legend: { display: false },
         tooltip: {
           callbacks: {
-            label: ctx => {
-              if (ctx.datasetIndex === 1) return 'avg ' + ctx.parsed.y.toFixed(1);
-              return 'entries: ' + ctx.parsed.y;
-            },
+            title: ctx => ctx[0]?.label || '',
+            label: ctx => 'entries: ' + ctx.parsed.y,
           }
         },
       },
       scales: {
         x: {
-          ticks: { color: '#64748b', font: { size: 10 }, maxRotation: 0 },
+          ticks: {
+            color: '#64748b',
+            font: { size: 10 },
+            maxRotation: 0,
+            // Show a tick every 6 hours to avoid crowding 72 labels
+            callback: (val, idx) => (idx % 6 === 0) ? labels[idx] : '',
+          },
           grid: { color: 'rgba(255,255,255,0.04)' },
         },
         y: {

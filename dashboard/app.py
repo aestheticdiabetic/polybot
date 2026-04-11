@@ -783,26 +783,24 @@ async def create_app(state):
 
     @_auth_required
     async def api_bond_hourly_entries(request):
-        """Hourly positions-entered breakdown for a given ISO week.
+        """Actual positions-entered per hour across a 3-day rolling window.
 
         Query params:
-          week_offset=0  (0 = current week Mon–Sun, 1 = prev week, …)
+          period_offset=0  (0 = most recent 3 days ending now, 1 = previous 3-day block, …)
 
         Returns:
-          week_label     : "Apr 7 – Apr 13, 2026"
-          week_start_iso : "2026-04-07"
-          hourly         : list[int] length 24  — entries per hour-of-day for the selected week
-          avg_hourly     : list[float] length 24 — average entries per hour across ALL weeks
-          total_entries  : int   total WOULD_BUY in this week
-          max_offset     : int   highest valid week_offset (oldest week available)
+          period_label   : "Apr 10 – Apr 12"
+          period_start   : ISO timestamp of window start
+          hours          : list of 72 objects {label: "Apr 10 14:00", count: int}
+          total_entries  : int   total WOULD_BUY in this window
+          max_offset     : int   highest valid period_offset (oldest available period)
         """
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
-        import math
 
         try:
-            week_offset = max(0, int(request.rel_url.query.get("week_offset", 0)))
+            period_offset = max(0, int(request.rel_url.query.get("period_offset", 0)))
         except (ValueError, TypeError):
-            week_offset = 0
+            period_offset = 0
 
         all_records = _load_paper_trades()
         buy_records = [r for r in all_records if r.get("event") == "WOULD_BUY"]
@@ -815,81 +813,66 @@ async def create_app(state):
             except Exception:
                 return None
 
-        # Compute ISO week boundaries (Mon 00:00 UTC – Sun 23:59:59 UTC)
-        def _week_bounds(offset: int) -> tuple[_dt, _dt]:
-            today = _dt.now(_tz.utc).date()
-            # Monday of the current ISO week
-            mon = today - _td(days=today.weekday())
-            mon -= _td(weeks=offset)
-            start = _dt(mon.year, mon.month, mon.day, 0, 0, 0, tzinfo=_tz.utc)
-            end   = start + _td(weeks=1)
-            return start, end
+        # Current period: most recent complete hour as the end, 72h back as start.
+        now = _dt.now(_tz.utc)
+        # Truncate to current hour so the window aligns cleanly
+        now_h = now.replace(minute=0, second=0, microsecond=0)
 
-        def _week_label(start: _dt) -> str:
-            end = start + _td(days=6)
-            if start.month == end.month:
-                return f"{start.strftime('%b %-d')}–{end.strftime('%-d, %Y')}"
-            return f"{start.strftime('%b %-d')} – {end.strftime('%b %-d, %Y')}"
+        # period_offset=0  → window ending at now_h (exclusive), starting 72h earlier
+        # period_offset=1  → window ending 72h before now_h, etc.
+        period_end   = now_h - _td(hours=72 * period_offset)
+        period_start = period_end - _td(hours=72)
 
-        # Find oldest available week
-        if buy_records:
-            oldest_ts = min((_parse(r.get("ts")) for r in buy_records), default=None)
-        else:
-            oldest_ts = None
-
+        # Find oldest available data to cap max_offset
+        oldest_ts = None
+        for r in buy_records:
+            ts = _parse(r.get("ts"))
+            if ts and (oldest_ts is None or ts < oldest_ts):
+                oldest_ts = ts
         if oldest_ts is not None:
-            today = _dt.now(_tz.utc).date()
-            mon_this = today - _td(days=today.weekday())
-            mon_oldest = oldest_ts.date() - _td(days=oldest_ts.weekday())
-            max_offset = max(0, (mon_this - mon_oldest).days // 7)
+            # How many full 3-day periods fit between oldest_ts and now_h?
+            hours_of_data = max(0, (now_h - oldest_ts).total_seconds() / 3600)
+            max_offset = max(0, int(hours_of_data // 72))
         else:
             max_offset = 0
 
-        week_offset = min(week_offset, max_offset)
+        period_offset = min(period_offset, max_offset)
+        # Recompute with clamped offset
+        period_end   = now_h - _td(hours=72 * period_offset)
+        period_start = period_end - _td(hours=72)
 
-        # Aggregate counts per week per hour-of-day (0–23)
-        # Build a dict: week_monday_iso → list[int] of length 24
-        from collections import defaultdict
-        weeks_data: dict[str, list[int]] = defaultdict(lambda: [0] * 24)
+        # Build 72 hourly buckets
+        buckets: list[int] = [0] * 72
+        bucket_labels: list[str] = []
+        for i in range(72):
+            bucket_ts = period_start + _td(hours=i)
+            bucket_labels.append(bucket_ts.strftime("%-d %b %H:%M"))
 
+        # Count WOULD_BUY entries per bucket
         for r in buy_records:
             ts = _parse(r.get("ts"))
             if ts is None:
                 continue
-            # ISO week Monday
-            mon = ts.date() - _td(days=ts.weekday())
-            key = mon.isoformat()
-            weeks_data[key][ts.hour] += 1
+            ts_h = ts.replace(minute=0, second=0, microsecond=0)
+            if period_start <= ts_h < period_end:
+                idx = int((ts_h - period_start).total_seconds() // 3600)
+                if 0 <= idx < 72:
+                    buckets[idx] += 1
 
-        # Selected week
-        sel_start, sel_end = _week_bounds(week_offset)
-        sel_key = sel_start.date().isoformat()
-        hourly = list(weeks_data.get(sel_key, [0] * 24))
-        total_entries = sum(hourly)
+        hours_out = [{"label": bucket_labels[i], "count": buckets[i]} for i in range(72)]
+        total_entries = sum(buckets)
 
-        # Average across ALL available weeks
-        all_week_lists = list(weeks_data.values())
-        if all_week_lists:
-            n_weeks = len(all_week_lists)
-            avg_hourly = [
-                round(sum(w[h] for w in all_week_lists) / n_weeks, 2)
-                for h in range(24)
-            ]
-        else:
-            avg_hourly = [0.0] * 24
-
-        try:
-            label = _week_label(sel_start)
-        except Exception:
-            label = sel_start.strftime("%b %-d") + " – " + (sel_start + _td(days=6)).strftime("%b %-d, %Y")
+        # Period label
+        start_lbl = period_start.strftime("%-d %b")
+        end_lbl   = (period_end - _td(hours=1)).strftime("%-d %b")
+        period_label = start_lbl if start_lbl == end_lbl else f"{start_lbl} – {end_lbl}"
 
         return web.json_response({
-            "week_label":     label,
-            "week_start_iso": sel_start.date().isoformat(),
-            "hourly":         hourly,
-            "avg_hourly":     avg_hourly,
-            "total_entries":  total_entries,
-            "max_offset":     max_offset,
+            "period_label":  period_label,
+            "period_start":  period_start.isoformat(),
+            "hours":         hours_out,
+            "total_entries": total_entries,
+            "max_offset":    max_offset,
         })
 
     @_auth_required
