@@ -48,11 +48,11 @@ def _append_record(record: dict) -> None:
 
 def _load_seen_market_ids() -> set[str]:
     """
-    Return set of market_ids that still have an open (unresolved/unsold) paper position.
+    Return set of market_ids that are blocked from re-entry on startup.
 
-    A market_id is blocked from re-entry only while its most recent WOULD_BUY record
-    has outcome=None (position still live). Once outcome is set ('SOLD', 'YES', 'NO'),
-    the market is eligible for a fresh entry if conditions are met again.
+    Blocked: outcome=None (position still live), outcome='YES'/'NO' (market resolved —
+    Polymarket may not have fully closed it yet, so the scanner still returns it).
+    Eligible for re-entry: outcome='SOLD' only (early exit while market is still active).
     """
     if not PAPER_LOG.exists():
         return set()
@@ -73,8 +73,8 @@ def _load_seen_market_ids() -> set[str]:
                     latest_outcome[mid] = rec.get("outcome")  # None = open
     except Exception:
         pass
-    # Only block markets whose most recent position is still open.
-    return {mid for mid, outcome in latest_outcome.items() if outcome is None}
+    # Block open positions (None) and resolved markets (YES/NO) — only SOLD allows re-entry.
+    return {mid for mid, outcome in latest_outcome.items() if outcome != "SOLD"}
 
 
 @dataclass
