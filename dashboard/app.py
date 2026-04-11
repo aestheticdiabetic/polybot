@@ -879,14 +879,24 @@ async def create_app(state):
 
     @_auth_required
     async def api_bond_pnl_history(request):
-        """P&L realised per hour across a 3-day rolling window (WOULD_SELL exit timestamps).
+        """Cumulative P&L equity curve sampled every 2 hours over a 3-day window.
+
+        Uses the same canonical record set as api_bond_paper_stats:
+          - WOULD_BUY records are authoritative; WOULD_SELL is supplementary.
+          - Exit time for SOLD positions comes from the WOULD_SELL ts.
+          - Exit time for YES/NO positions comes from WOULD_BUY resolution_time.
+          - Only positions with pnl set and a determinable exit_ts contribute.
+
+        The curve shows: at each 2-hour tick T, what is the running total P&L
+        from all positions that exited before T?  This is an equity-curve view
+        of how total P&L has progressed over the period.
 
         Query params:
-          period_offset=0  (0 = most recent 3 days, 1 = previous block, …)
+          period_offset=0  (0 = most recent 3 days ending now, 1 = previous, …)
 
         Returns:
-          period_label, period_start, hours (list of 72 {label, pnl}),
-          total_pnl, avg_pnl, max_offset
+          period_label, period_start, ticks (list of 37 {label, cumulative_pnl}),
+          total_pnl, max_offset
         """
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
 
@@ -895,8 +905,7 @@ async def create_app(state):
         except (ValueError, TypeError):
             period_offset = 0
 
-        all_records  = _load_paper_trades()
-        sell_records = [r for r in all_records if r.get("event") == "WOULD_SELL"]
+        all_records = _load_paper_trades()
 
         def _parse(s: str | None) -> _dt | None:
             if not s:
@@ -906,51 +915,73 @@ async def create_app(state):
             except Exception:
                 return None
 
-        now    = _dt.now(_tz.utc)
-        now_h  = now.replace(minute=0, second=0, microsecond=0)
+        # Build sell_map for exit timestamps of early-sold positions
+        sell_map: dict = {}
+        for r in all_records:
+            if r.get("event") == "WOULD_SELL" and r.get("market_id"):
+                sell_map[r["market_id"]] = r
 
-        period_end   = now_h - _td(hours=72 * period_offset)
+        # Canonical records: WOULD_BUY only, with sell_map fallback applied
+        resolved_exits: list[tuple[_dt, float]] = []
+        for r in all_records:
+            if r.get("event") != "WOULD_BUY":
+                continue
+            mid = r.get("market_id")
+            rec = r
+            if mid and mid in sell_map and rec.get("outcome") != "SOLD":
+                sell = sell_map[mid]
+                if sell.get("ts", "") > rec.get("ts", ""):
+                    rec = {**rec, "outcome": "SOLD", "exit_price": sell.get("exit_price"),
+                           "pnl": sell.get("pnl")}
+            pnl = rec.get("pnl")
+            if pnl is None:
+                continue
+            outcome = rec.get("outcome")
+            if outcome == "SOLD":
+                # Exit time is the WOULD_SELL ts
+                sell = sell_map.get(mid)
+                exit_ts = _parse(sell.get("ts") if sell else None)
+            else:
+                # Market resolution: use resolution_time
+                exit_ts = _parse(rec.get("resolution_time"))
+            if exit_ts is None:
+                continue
+            resolved_exits.append((exit_ts, float(pnl)))
+
+        now   = _dt.now(_tz.utc)
+        now_2h = now.replace(minute=0, second=0, microsecond=0)
+        # Snap to nearest 2-hour boundary
+        now_2h = now_2h.replace(hour=(now_2h.hour // 2) * 2)
+
+        period_end   = now_2h - _td(hours=72 * period_offset)
         period_start = period_end - _td(hours=72)
 
-        # Cap max_offset based on oldest sell record
-        oldest_ts = None
-        for r in sell_records:
-            ts = _parse(r.get("ts"))
-            if ts and (oldest_ts is None or ts < oldest_ts):
-                oldest_ts = ts
-        if oldest_ts is not None:
-            hours_of_data = max(0, (now_h - oldest_ts).total_seconds() / 3600)
+        # Cap max_offset from oldest exit
+        if resolved_exits:
+            oldest_exit = min(ts for ts, _ in resolved_exits)
+            hours_of_data = max(0, (now_2h - oldest_exit).total_seconds() / 3600)
             max_offset = max(0, int(hours_of_data // 72))
         else:
             max_offset = 0
 
         period_offset = min(period_offset, max_offset)
-        period_end    = now_h - _td(hours=72 * period_offset)
+        period_end    = now_2h - _td(hours=72 * period_offset)
         period_start  = period_end - _td(hours=72)
 
-        # Build 72 hourly P&L buckets
-        buckets:       list[float] = [0.0] * 72
-        bucket_labels: list[str]   = []
-        for i in range(72):
-            bucket_ts = period_start + _td(hours=i)
-            bucket_labels.append(bucket_ts.strftime("%-d %b %H:%M"))
+        # P&L accrued before the window start (carry-in baseline)
+        carry_in = sum(pnl for ts, pnl in resolved_exits if ts < period_start)
 
-        for r in sell_records:
-            ts = _parse(r.get("ts"))
-            if ts is None:
-                continue
-            ts_h = ts.replace(minute=0, second=0, microsecond=0)
-            if period_start <= ts_h < period_end:
-                idx = int((ts_h - period_start).total_seconds() // 3600)
-                if 0 <= idx < 72:
-                    buckets[idx] += r.get("pnl", 0) or 0
+        # 37 ticks: period_start, +2h, +4h … period_end (inclusive)
+        NUM_TICKS = 37  # 0..72 in steps of 2 → 37 points
+        ticks_out: list[dict] = []
+        for i in range(NUM_TICKS):
+            tick = period_start + _td(hours=2 * i)
+            cum  = carry_in + sum(pnl for ts, pnl in resolved_exits
+                                  if period_start <= ts <= tick)
+            label = tick.strftime("%-d %b %H:%M")
+            ticks_out.append({"label": label, "cumulative_pnl": round(cum, 4)})
 
-        buckets_r     = [round(v, 4) for v in buckets]
-        hours_out     = [{"label": bucket_labels[i], "pnl": buckets_r[i]} for i in range(72)]
-        total_pnl     = round(sum(buckets_r), 4)
-        non_zero      = [v for v in buckets_r if v != 0]
-        avg_pnl       = round(sum(non_zero) / len(non_zero), 4) if non_zero else 0.0
-
+        total_pnl    = ticks_out[-1]["cumulative_pnl"] if ticks_out else 0.0
         start_lbl    = period_start.strftime("%-d %b")
         end_lbl      = (period_end - _td(hours=1)).strftime("%-d %b")
         period_label = start_lbl if start_lbl == end_lbl else f"{start_lbl} – {end_lbl}"
@@ -958,9 +989,8 @@ async def create_app(state):
         return web.json_response({
             "period_label": period_label,
             "period_start": period_start.isoformat(),
-            "hours":        hours_out,
+            "ticks":        ticks_out,
             "total_pnl":    total_pnl,
-            "avg_pnl":      avg_pnl,
             "max_offset":   max_offset,
         })
 

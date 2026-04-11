@@ -678,7 +678,7 @@
       <div style="display:flex;align-items:center;gap:10px;">
         <div class="section-title" style="margin-bottom:0;">P&amp;L — 3-Day View</div>
         <span style="font-size:12px;color:var(--muted);">total: <span id="pnl-total-label" style="font-weight:600;">—</span></span>
-        <span style="font-size:12px;color:var(--muted);">avg/trade: <span id="pnl-avg-label" style="font-weight:600;">—</span></span>
+        <span id="pnl-avg-label" style="display:none;"></span>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <button id="pnl-prev-btn" onclick="shiftPnlPeriod(1)" style="font-size:11px;padding:3px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--fg);cursor:pointer;">&#8592; prev</button>
@@ -1735,66 +1735,53 @@ function renderPnlHistory(data) {
   pnlHistoryOffset    = Math.min(pnlHistoryOffset, pnlHistoryMaxOffset);
 
   const totalPnl = data.total_pnl ?? 0;
-  const avgPnl   = data.avg_pnl   ?? 0;
   const totalEl  = document.getElementById('pnl-total-label');
-  const avgEl    = document.getElementById('pnl-avg-label');
   if (totalEl) {
     totalEl.textContent = (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2);
     totalEl.style.color = totalPnl >= 0 ? 'var(--green)' : 'var(--red)';
   }
-  if (avgEl) {
-    avgEl.textContent = (avgPnl >= 0 ? '+' : '') + '$' + avgPnl.toFixed(2);
-    avgEl.style.color = avgPnl >= 0 ? 'var(--green)' : 'var(--red)';
-  }
+  // Clear avg label — not applicable for cumulative view
+  const avgEl = document.getElementById('pnl-avg-label');
+  if (avgEl) avgEl.textContent = '';
 
   document.getElementById('pnl-week-label').textContent = data.period_label || '—';
   document.getElementById('pnl-prev-btn').disabled = (pnlHistoryOffset >= pnlHistoryMaxOffset);
   document.getElementById('pnl-next-btn').disabled = (pnlHistoryOffset <= 0);
 
-  const hours   = data.hours || [];
-  const labels  = hours.map(h => h.label);
-  const values  = hours.map(h => h.pnl);
-  const avgLine = values.map(() => avgPnl);
-  const barColors = values.map(v => v >= 0 ? 'rgba(52,211,153,0.6)' : 'rgba(239,68,68,0.6)');
-  const barBorders = values.map(v => v >= 0 ? 'rgba(52,211,153,0.9)' : 'rgba(239,68,68,0.9)');
+  const ticks  = data.ticks || [];
+  const labels = ticks.map(t => t.label);
+  const values = ticks.map(t => t.cumulative_pnl);
+
+  // Colour the line green if ending positive, red if negative
+  const lineColor   = totalPnl >= 0 ? 'rgba(52,211,153,0.9)'  : 'rgba(239,68,68,0.9)';
+  const fillColor   = totalPnl >= 0 ? 'rgba(52,211,153,0.08)' : 'rgba(239,68,68,0.08)';
 
   const canvas = document.getElementById('chart-pnl-history');
   if (!canvas) return;
 
   if (pnlHistoryChart) {
-    pnlHistoryChart.data.labels                      = labels;
-    pnlHistoryChart.data.datasets[0].data            = values;
-    pnlHistoryChart.data.datasets[0].backgroundColor = barColors;
-    pnlHistoryChart.data.datasets[0].borderColor     = barBorders;
-    pnlHistoryChart.data.datasets[1].data            = avgLine;
+    pnlHistoryChart.data.labels                       = labels;
+    pnlHistoryChart.data.datasets[0].data             = values;
+    pnlHistoryChart.data.datasets[0].borderColor      = lineColor;
+    pnlHistoryChart.data.datasets[0].backgroundColor  = fillColor;
     pnlHistoryChart.update('none');
     return;
   }
 
   pnlHistoryChart = new Chart(canvas, {
-    type: 'bar',
+    type: 'line',
     data: {
       labels,
       datasets: [
         {
-          label: 'P&L',
+          label: 'Cumulative P&L',
           data: values,
-          backgroundColor: barColors,
-          borderColor: barBorders,
-          borderWidth: 1,
-          order: 2,
-        },
-        {
-          label: 'Avg P&L',
-          data: avgLine,
-          type: 'line',
-          borderColor: avgPnl >= 0 ? 'rgba(52,211,153,0.45)' : 'rgba(239,68,68,0.45)',
-          borderWidth: 1,
-          borderDash: [5, 4],
+          borderColor: lineColor,
+          backgroundColor: fillColor,
+          borderWidth: 1.5,
           pointRadius: 0,
-          fill: false,
-          tension: 0,
-          order: 1,
+          fill: true,
+          tension: 0.2,
         }
       ]
     },
@@ -1809,10 +1796,7 @@ function renderPnlHistory(data) {
             title: ctx => ctx[0]?.label || '',
             label: ctx => {
               const v = ctx.parsed.y;
-              const prefix = v >= 0 ? '+' : '';
-              return ctx.datasetIndex === 1
-                ? 'avg: ' + prefix + '$' + v.toFixed(2)
-                : 'pnl: ' + prefix + '$' + v.toFixed(2);
+              return 'P&L: ' + (v >= 0 ? '+' : '') + '$' + v.toFixed(2);
             },
           }
         },
@@ -1823,7 +1807,8 @@ function renderPnlHistory(data) {
             color: '#64748b',
             font: { size: 10 },
             maxRotation: 0,
-            callback: (val, idx) => (idx % 6 === 0) ? labels[idx] : '',
+            // 37 ticks at 2h each; show label every 3rd = every 6 hours
+            callback: (val, idx) => (idx % 3 === 0) ? labels[idx] : '',
           },
           grid: { color: 'rgba(255,255,255,0.04)' },
         },
@@ -1831,7 +1816,7 @@ function renderPnlHistory(data) {
           ticks: {
             color: '#64748b',
             font: { size: 10 },
-            callback: v => (v >= 0 ? '+' : '') + '$' + v.toFixed(2),
+            callback: v => (v >= 0 ? '+' : '') + '$' + v.toFixed(0),
           },
           grid: { color: 'rgba(255,255,255,0.04)' },
         }
