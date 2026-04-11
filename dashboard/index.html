@@ -653,6 +653,24 @@
     </div>
   </div>
 
+  <!-- Hourly entries chart -->
+  <div class="section" id="hourly-entries-section">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div class="section-title" style="margin-bottom:0;">Positions Entered — Hourly</div>
+        <span style="font-size:12px;color:var(--muted);">total: <span id="hourly-total-label" style="color:var(--green);font-weight:600;">—</span></span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <button id="hourly-prev-btn" onclick="shiftHourlyWeek(1)" style="font-size:11px;padding:3px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--fg);cursor:pointer;">&#8592; prev</button>
+        <span id="hourly-week-label" style="font-size:12px;color:var(--muted);min-width:140px;text-align:center;">—</span>
+        <button id="hourly-next-btn" onclick="shiftHourlyWeek(-1)" style="font-size:11px;padding:3px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--fg);cursor:pointer;">next &#8594;</button>
+      </div>
+    </div>
+    <div style="position:relative;height:160px;">
+      <canvas id="chart-hourly-entries"></canvas>
+    </div>
+  </div>
+
   <!-- Tier breakdown -->
   <div class="section">
     <div class="section-title">Tier Analysis</div>
@@ -756,7 +774,9 @@ const POLL_MS = 5000;
 let mode = 'sim';
 let marketsData = [];
 let pnlData = [], pnlLabels = [];
-let pnlChart, volChart, spreadChart, latencyChart, capitalHistoryChart;
+let pnlChart, volChart, spreadChart, latencyChart, capitalHistoryChart, hourlyEntriesChart;
+let hourlyWeekOffset = 0;
+let hourlyMaxOffset  = 0;
 let initialBalance = null;
 let currentTab = 'arbi';
 // Bond state
@@ -1574,9 +1594,108 @@ function renderCapitalHistory(data) {
   });
 }
 
+async function loadHourlyEntries(offset) {
+  try {
+    const data = await apiFetch(`/api/bond/hourly-entries?week_offset=${offset}`);
+    renderHourlyEntries(data);
+  } catch(e) { console.error('Hourly entries load failed:', e); }
+}
+
+function renderHourlyEntries(data) {
+  if (!data) return;
+  hourlyMaxOffset = data.max_offset || 0;
+  hourlyWeekOffset = Math.min(hourlyWeekOffset, hourlyMaxOffset);
+
+  document.getElementById('hourly-week-label').textContent = data.week_label || '—';
+  document.getElementById('hourly-total-label').textContent = data.total_entries ?? '—';
+
+  // Update nav button states
+  document.getElementById('hourly-prev-btn').disabled = (hourlyWeekOffset >= hourlyMaxOffset);
+  document.getElementById('hourly-next-btn').disabled = (hourlyWeekOffset <= 0);
+
+  const labels = Array.from({length:24}, (_,i) => String(i).padStart(2,'0') + ':00');
+  const counts = data.hourly   || Array(24).fill(0);
+  const avgs   = data.avg_hourly || Array(24).fill(0);
+
+  const canvas = document.getElementById('chart-hourly-entries');
+  if (!canvas) return;
+
+  if (hourlyEntriesChart) {
+    hourlyEntriesChart.data.labels = labels;
+    hourlyEntriesChart.data.datasets[0].data = counts;
+    hourlyEntriesChart.data.datasets[1].data = avgs;
+    hourlyEntriesChart.update('none');
+    return;
+  }
+
+  hourlyEntriesChart = new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'This week',
+          data: counts,
+          backgroundColor: 'rgba(52,211,153,0.55)',
+          borderColor: 'rgba(52,211,153,0.9)',
+          borderWidth: 1,
+          order: 2,
+        },
+        {
+          label: 'Avg all weeks',
+          data: avgs,
+          type: 'line',
+          borderColor: 'rgba(245,158,11,0.75)',
+          backgroundColor: 'transparent',
+          borderWidth: 1.5,
+          borderDash: [5, 4],
+          pointRadius: 0,
+          fill: false,
+          tension: 0.3,
+          order: 1,
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              if (ctx.datasetIndex === 1) return 'avg ' + ctx.parsed.y.toFixed(1);
+              return 'entries: ' + ctx.parsed.y;
+            },
+          }
+        },
+      },
+      scales: {
+        x: {
+          ticks: { color: '#64748b', font: { size: 10 }, maxRotation: 0 },
+          grid: { color: 'rgba(255,255,255,0.04)' },
+        },
+        y: {
+          ticks: { color: '#64748b', font: { size: 10 }, stepSize: 1 },
+          grid: { color: 'rgba(255,255,255,0.04)' },
+          beginAtZero: true,
+        }
+      }
+    }
+  });
+}
+
+async function shiftHourlyWeek(delta) {
+  const next = hourlyWeekOffset + delta;
+  if (next < 0 || next > hourlyMaxOffset) return;
+  hourlyWeekOffset = next;
+  await loadHourlyEntries(hourlyWeekOffset);
+}
+
 async function refreshPaperSim() {
   const b = parseFloat(document.getElementById('paper-balance').value) || 1000;
-  await Promise.all([loadPaperStats(b), loadPaperTrades(), loadCapitalHistory()]);
+  await Promise.all([loadPaperStats(b), loadPaperTrades(), loadCapitalHistory(), loadHourlyEntries(hourlyWeekOffset)]);
 }
 
 async function checkPaperResolutions() {

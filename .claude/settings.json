@@ -8,7 +8,11 @@
       "Bash(git push:*)",
       "Read(//c/Users/Angus/.vscode/predictionbot/venv/Lib/site-packages/py_clob_client/order_builder/**)",
       "Read(//c/Users/Angus/.vscode/predictionbot/venv/Lib/site-packages/py_clob_client/**)",
-      "Bash(python -c \"import ast; ast.parse\\(open\\('bot/trader.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\('bot/trader.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(ssh -i /c/Users/Angus/.ssh/claude_vps angus@204.168.169.190 \"cd /home/angus/polybot/bot && python calibrate_forecasts.py --trades /home/angus/polybot/logs/paper_trades.jsonl --out /tmp/calibration_corrections.json 2>&1 && echo '---JSON---' && cat /tmp/calibration_corrections.json\")",
+      "Bash(ssh -i /c/Users/Angus/.ssh/claude_vps angus@204.168.169.190 \"cd /home/angus/polybot/bot && python3 calibrate_forecasts.py --trades /home/angus/polybot/logs/paper_trades.jsonl --out /tmp/calibration_corrections.json 2>&1 && echo '---JSON---' && cat /tmp/calibration_corrections.json\")",
+      "Bash(ssh -i /c/Users/Angus/.ssh/claude_vps angus@204.168.169.190 \"cd /home/angus/polybot && source venv/bin/activate && python3 bot/calibrate_forecasts.py --trades /home/angus/polybot/logs/paper_trades.jsonl --out /tmp/calibration_corrections.json 2>&1 && echo '---JSON---' && cat /tmp/calibration_corrections.json\")",
+      "Bash(ssh -i /c/Users/Angus/.ssh/claude_vps angus@204.168.169.190 \"find /home/angus/polybot -name 'activate' 2>/dev/null | head -5\")"
     ]
   }
 }

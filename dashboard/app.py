@@ -782,6 +782,117 @@ async def create_app(state):
         return web.json_response({"history": history, "avg_capital": avg})
 
     @_auth_required
+    async def api_bond_hourly_entries(request):
+        """Hourly positions-entered breakdown for a given ISO week.
+
+        Query params:
+          week_offset=0  (0 = current week Mon–Sun, 1 = prev week, …)
+
+        Returns:
+          week_label     : "Apr 7 – Apr 13, 2026"
+          week_start_iso : "2026-04-07"
+          hourly         : list[int] length 24  — entries per hour-of-day for the selected week
+          avg_hourly     : list[float] length 24 — average entries per hour across ALL weeks
+          total_entries  : int   total WOULD_BUY in this week
+          max_offset     : int   highest valid week_offset (oldest week available)
+        """
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        import math
+
+        try:
+            week_offset = max(0, int(request.rel_url.query.get("week_offset", 0)))
+        except (ValueError, TypeError):
+            week_offset = 0
+
+        all_records = _load_paper_trades()
+        buy_records = [r for r in all_records if r.get("event") == "WOULD_BUY"]
+
+        def _parse(s: str | None) -> _dt | None:
+            if not s:
+                return None
+            try:
+                return _dt.fromisoformat(s.replace("Z", "+00:00"))
+            except Exception:
+                return None
+
+        # Compute ISO week boundaries (Mon 00:00 UTC – Sun 23:59:59 UTC)
+        def _week_bounds(offset: int) -> tuple[_dt, _dt]:
+            today = _dt.now(_tz.utc).date()
+            # Monday of the current ISO week
+            mon = today - _td(days=today.weekday())
+            mon -= _td(weeks=offset)
+            start = _dt(mon.year, mon.month, mon.day, 0, 0, 0, tzinfo=_tz.utc)
+            end   = start + _td(weeks=1)
+            return start, end
+
+        def _week_label(start: _dt) -> str:
+            end = start + _td(days=6)
+            if start.month == end.month:
+                return f"{start.strftime('%b %-d')}–{end.strftime('%-d, %Y')}"
+            return f"{start.strftime('%b %-d')} – {end.strftime('%b %-d, %Y')}"
+
+        # Find oldest available week
+        if buy_records:
+            oldest_ts = min((_parse(r.get("ts")) for r in buy_records), default=None)
+        else:
+            oldest_ts = None
+
+        if oldest_ts is not None:
+            today = _dt.now(_tz.utc).date()
+            mon_this = today - _td(days=today.weekday())
+            mon_oldest = oldest_ts.date() - _td(days=oldest_ts.weekday())
+            max_offset = max(0, (mon_this - mon_oldest).days // 7)
+        else:
+            max_offset = 0
+
+        week_offset = min(week_offset, max_offset)
+
+        # Aggregate counts per week per hour-of-day (0–23)
+        # Build a dict: week_monday_iso → list[int] of length 24
+        from collections import defaultdict
+        weeks_data: dict[str, list[int]] = defaultdict(lambda: [0] * 24)
+
+        for r in buy_records:
+            ts = _parse(r.get("ts"))
+            if ts is None:
+                continue
+            # ISO week Monday
+            mon = ts.date() - _td(days=ts.weekday())
+            key = mon.isoformat()
+            weeks_data[key][ts.hour] += 1
+
+        # Selected week
+        sel_start, sel_end = _week_bounds(week_offset)
+        sel_key = sel_start.date().isoformat()
+        hourly = list(weeks_data.get(sel_key, [0] * 24))
+        total_entries = sum(hourly)
+
+        # Average across ALL available weeks
+        all_week_lists = list(weeks_data.values())
+        if all_week_lists:
+            n_weeks = len(all_week_lists)
+            avg_hourly = [
+                round(sum(w[h] for w in all_week_lists) / n_weeks, 2)
+                for h in range(24)
+            ]
+        else:
+            avg_hourly = [0.0] * 24
+
+        try:
+            label = _week_label(sel_start)
+        except Exception:
+            label = sel_start.strftime("%b %-d") + " – " + (sel_start + _td(days=6)).strftime("%b %-d, %Y")
+
+        return web.json_response({
+            "week_label":     label,
+            "week_start_iso": sel_start.date().isoformat(),
+            "hourly":         hourly,
+            "avg_hourly":     avg_hourly,
+            "total_entries":  total_entries,
+            "max_offset":     max_offset,
+        })
+
+    @_auth_required
     async def api_bond_real_stats(request):
         """Aggregated REAL bond stats (tier analysis + entry time stats) from the ledger."""
         from datetime import datetime as _dt, timezone as _tz
@@ -1163,6 +1274,7 @@ async def create_app(state):
     app.router.add_get("/api/bond/paper-trades",      api_bond_paper_trades)
     app.router.add_get("/api/bond/paper-stats",       api_bond_paper_stats)
     app.router.add_get("/api/bond/capital-history",   api_bond_capital_history)
+    app.router.add_get("/api/bond/hourly-entries",    api_bond_hourly_entries)
     app.router.add_post("/api/bond/paper-check",      api_bond_paper_check_resolutions)
     app.router.add_post("/api/bond/paper-revert",     api_bond_paper_revert_resolutions)
     app.router.add_get("/api/bond/real-stats",        api_bond_real_stats)
