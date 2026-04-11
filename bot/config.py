@@ -157,7 +157,7 @@ BOND_MIN_GTC_ORDER_USDC      = 1.00  # minimum capital for a GTC limit order (CL
 
 # Exit thresholds
 BOND_EARLY_EXIT_PRICE      = 0.97  # sell when price hits near-certainty (both tiers)
-BOND_CHEAP_EXIT_MULTIPLIER = 5.0   # sell CHEAP if price >= cost × this
+BOND_CHEAP_EXIT_MULTIPLIER = 8.0   # sell CHEAP if price >= cost × this
 BOND_CHEAP_MIN_ABS_GAIN    = 1.00  # AND absolute gain >= this value (USD)
 BOND_GAS_FLOOR_HOURS       = 4     # don't exit within N hours of resolution
 
