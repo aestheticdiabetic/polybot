@@ -861,6 +861,7 @@ async def create_app(state):
 
         hours_out = [{"label": bucket_labels[i], "count": buckets[i]} for i in range(72)]
         total_entries = sum(buckets)
+        avg_per_hour  = round(total_entries / 72, 2)
 
         # Period label
         start_lbl = period_start.strftime("%-d %b")
@@ -872,7 +873,95 @@ async def create_app(state):
             "period_start":  period_start.isoformat(),
             "hours":         hours_out,
             "total_entries": total_entries,
+            "avg_per_hour":  avg_per_hour,
             "max_offset":    max_offset,
+        })
+
+    @_auth_required
+    async def api_bond_pnl_history(request):
+        """P&L realised per hour across a 3-day rolling window (WOULD_SELL exit timestamps).
+
+        Query params:
+          period_offset=0  (0 = most recent 3 days, 1 = previous block, …)
+
+        Returns:
+          period_label, period_start, hours (list of 72 {label, pnl}),
+          total_pnl, avg_pnl, max_offset
+        """
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+        try:
+            period_offset = max(0, int(request.rel_url.query.get("period_offset", 0)))
+        except (ValueError, TypeError):
+            period_offset = 0
+
+        all_records  = _load_paper_trades()
+        sell_records = [r for r in all_records if r.get("event") == "WOULD_SELL"]
+
+        def _parse(s: str | None) -> _dt | None:
+            if not s:
+                return None
+            try:
+                return _dt.fromisoformat(s.replace("Z", "+00:00"))
+            except Exception:
+                return None
+
+        now    = _dt.now(_tz.utc)
+        now_h  = now.replace(minute=0, second=0, microsecond=0)
+
+        period_end   = now_h - _td(hours=72 * period_offset)
+        period_start = period_end - _td(hours=72)
+
+        # Cap max_offset based on oldest sell record
+        oldest_ts = None
+        for r in sell_records:
+            ts = _parse(r.get("ts"))
+            if ts and (oldest_ts is None or ts < oldest_ts):
+                oldest_ts = ts
+        if oldest_ts is not None:
+            hours_of_data = max(0, (now_h - oldest_ts).total_seconds() / 3600)
+            max_offset = max(0, int(hours_of_data // 72))
+        else:
+            max_offset = 0
+
+        period_offset = min(period_offset, max_offset)
+        period_end    = now_h - _td(hours=72 * period_offset)
+        period_start  = period_end - _td(hours=72)
+
+        # Build 72 hourly P&L buckets
+        buckets:       list[float] = [0.0] * 72
+        bucket_labels: list[str]   = []
+        for i in range(72):
+            bucket_ts = period_start + _td(hours=i)
+            bucket_labels.append(bucket_ts.strftime("%-d %b %H:%M"))
+
+        for r in sell_records:
+            ts = _parse(r.get("ts"))
+            if ts is None:
+                continue
+            ts_h = ts.replace(minute=0, second=0, microsecond=0)
+            if period_start <= ts_h < period_end:
+                idx = int((ts_h - period_start).total_seconds() // 3600)
+                if 0 <= idx < 72:
+                    buckets[idx] += r.get("pnl", 0) or 0
+
+        buckets_r     = [round(v, 4) for v in buckets]
+        hours_out     = [{"label": bucket_labels[i], "pnl": buckets_r[i]} for i in range(72)]
+        total_pnl     = round(sum(buckets_r), 4)
+        non_zero      = [v for v in buckets_r if v != 0]
+        avg_pnl       = round(sum(non_zero) / len(non_zero), 4) if non_zero else 0.0
+
+        start_lbl    = period_start.strftime("%-d %b")
+        end_lbl      = (period_end - _td(hours=1)).strftime("%-d %b")
+        period_label = start_lbl if start_lbl == end_lbl else f"{start_lbl} – {end_lbl}"
+
+        return web.json_response({
+            "period_label": period_label,
+            "period_start": period_start.isoformat(),
+            "hours":        hours_out,
+            "total_pnl":    total_pnl,
+            "avg_pnl":      avg_pnl,
+            "max_offset":   max_offset,
         })
 
     @_auth_required
@@ -1258,6 +1347,7 @@ async def create_app(state):
     app.router.add_get("/api/bond/paper-stats",       api_bond_paper_stats)
     app.router.add_get("/api/bond/capital-history",   api_bond_capital_history)
     app.router.add_get("/api/bond/hourly-entries",    api_bond_hourly_entries)
+    app.router.add_get("/api/bond/pnl-history",       api_bond_pnl_history)
     app.router.add_post("/api/bond/paper-check",      api_bond_paper_check_resolutions)
     app.router.add_post("/api/bond/paper-revert",     api_bond_paper_revert_resolutions)
     app.router.add_get("/api/bond/real-stats",        api_bond_real_stats)

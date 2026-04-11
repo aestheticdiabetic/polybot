@@ -659,6 +659,7 @@
       <div style="display:flex;align-items:center;gap:10px;">
         <div class="section-title" style="margin-bottom:0;">Positions Entered — 3-Day View</div>
         <span style="font-size:12px;color:var(--muted);">total: <span id="hourly-total-label" style="color:var(--green);font-weight:600;">—</span></span>
+        <span style="font-size:12px;color:var(--muted);">avg/hr: <span id="hourly-avg-label" style="color:rgba(52,211,153,0.7);font-weight:600;">—</span></span>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <button id="hourly-prev-btn" onclick="shiftHourlyWeek(1)" style="font-size:11px;padding:3px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--fg);cursor:pointer;">&#8592; prev</button>
@@ -668,6 +669,25 @@
     </div>
     <div style="position:relative;height:160px;">
       <canvas id="chart-hourly-entries"></canvas>
+    </div>
+  </div>
+
+  <!-- P&L history chart -->
+  <div class="section" id="pnl-history-section">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div class="section-title" style="margin-bottom:0;">P&amp;L — 3-Day View</div>
+        <span style="font-size:12px;color:var(--muted);">total: <span id="pnl-total-label" style="font-weight:600;">—</span></span>
+        <span style="font-size:12px;color:var(--muted);">avg/trade: <span id="pnl-avg-label" style="font-weight:600;">—</span></span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <button id="pnl-prev-btn" onclick="shiftPnlPeriod(1)" style="font-size:11px;padding:3px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--fg);cursor:pointer;">&#8592; prev</button>
+        <span id="pnl-week-label" style="font-size:12px;color:var(--muted);min-width:140px;text-align:center;">—</span>
+        <button id="pnl-next-btn" onclick="shiftPnlPeriod(-1)" style="font-size:11px;padding:3px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--fg);cursor:pointer;">next &#8594;</button>
+      </div>
+    </div>
+    <div style="position:relative;height:160px;">
+      <canvas id="chart-pnl-history"></canvas>
     </div>
   </div>
 
@@ -777,6 +797,9 @@ let pnlData = [], pnlLabels = [];
 let pnlChart, volChart, spreadChart, latencyChart, capitalHistoryChart, hourlyEntriesChart;
 let hourlyWeekOffset = 0;
 let hourlyMaxOffset  = 0;
+let pnlHistoryChart;
+let pnlHistoryOffset = 0;
+let pnlHistoryMaxOffset = 0;
 let initialBalance = null;
 let currentTab = 'arbi';
 // Bond state
@@ -1608,13 +1631,16 @@ function renderHourlyEntries(data) {
 
   document.getElementById('hourly-week-label').textContent  = data.period_label || '—';
   document.getElementById('hourly-total-label').textContent = data.total_entries ?? '—';
+  document.getElementById('hourly-avg-label').textContent   = data.avg_per_hour != null ? data.avg_per_hour.toFixed(2) : '—';
 
   document.getElementById('hourly-prev-btn').disabled = (hourlyWeekOffset >= hourlyMaxOffset);
   document.getElementById('hourly-next-btn').disabled = (hourlyWeekOffset <= 0);
 
-  const hours  = data.hours || [];
-  const labels = hours.map(h => h.label);
-  const counts = hours.map(h => h.count);
+  const hours   = data.hours || [];
+  const labels  = hours.map(h => h.label);
+  const counts  = hours.map(h => h.count);
+  const avg     = data.avg_per_hour || 0;
+  const avgLine = counts.map(() => avg);
 
   const canvas = document.getElementById('chart-hourly-entries');
   if (!canvas) return;
@@ -1622,6 +1648,7 @@ function renderHourlyEntries(data) {
   if (hourlyEntriesChart) {
     hourlyEntriesChart.data.labels              = labels;
     hourlyEntriesChart.data.datasets[0].data    = counts;
+    hourlyEntriesChart.data.datasets[1].data    = avgLine;
     hourlyEntriesChart.update('none');
     return;
   }
@@ -1637,6 +1664,19 @@ function renderHourlyEntries(data) {
           backgroundColor: 'rgba(52,211,153,0.55)',
           borderColor: 'rgba(52,211,153,0.9)',
           borderWidth: 1,
+          order: 2,
+        },
+        {
+          label: 'Average',
+          data: avgLine,
+          type: 'line',
+          borderColor: 'rgba(52,211,153,0.45)',
+          borderWidth: 1,
+          borderDash: [5, 4],
+          pointRadius: 0,
+          fill: false,
+          tension: 0,
+          order: 1,
         }
       ]
     },
@@ -1649,7 +1689,9 @@ function renderHourlyEntries(data) {
         tooltip: {
           callbacks: {
             title: ctx => ctx[0]?.label || '',
-            label: ctx => 'entries: ' + ctx.parsed.y,
+            label: ctx => ctx.datasetIndex === 1
+              ? 'avg: ' + ctx.parsed.y.toFixed(2)
+              : 'entries: ' + ctx.parsed.y,
           }
         },
       },
@@ -1659,7 +1701,6 @@ function renderHourlyEntries(data) {
             color: '#64748b',
             font: { size: 10 },
             maxRotation: 0,
-            // Show a tick every 6 hours to avoid crowding 72 labels
             callback: (val, idx) => (idx % 6 === 0) ? labels[idx] : '',
           },
           grid: { color: 'rgba(255,255,255,0.04)' },
@@ -1681,9 +1722,134 @@ async function shiftHourlyWeek(delta) {
   await loadHourlyEntries(hourlyWeekOffset);
 }
 
+async function loadPnlHistory(offset) {
+  try {
+    const data = await apiFetch(`/api/bond/pnl-history?period_offset=${offset}`);
+    renderPnlHistory(data);
+  } catch(e) { console.error('PnL history load failed:', e); }
+}
+
+function renderPnlHistory(data) {
+  if (!data) return;
+  pnlHistoryMaxOffset = data.max_offset || 0;
+  pnlHistoryOffset    = Math.min(pnlHistoryOffset, pnlHistoryMaxOffset);
+
+  const totalPnl = data.total_pnl ?? 0;
+  const avgPnl   = data.avg_pnl   ?? 0;
+  const totalEl  = document.getElementById('pnl-total-label');
+  const avgEl    = document.getElementById('pnl-avg-label');
+  if (totalEl) {
+    totalEl.textContent = (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2);
+    totalEl.style.color = totalPnl >= 0 ? 'var(--green)' : 'var(--red)';
+  }
+  if (avgEl) {
+    avgEl.textContent = (avgPnl >= 0 ? '+' : '') + '$' + avgPnl.toFixed(2);
+    avgEl.style.color = avgPnl >= 0 ? 'var(--green)' : 'var(--red)';
+  }
+
+  document.getElementById('pnl-week-label').textContent = data.period_label || '—';
+  document.getElementById('pnl-prev-btn').disabled = (pnlHistoryOffset >= pnlHistoryMaxOffset);
+  document.getElementById('pnl-next-btn').disabled = (pnlHistoryOffset <= 0);
+
+  const hours   = data.hours || [];
+  const labels  = hours.map(h => h.label);
+  const values  = hours.map(h => h.pnl);
+  const avgLine = values.map(() => avgPnl);
+  const barColors = values.map(v => v >= 0 ? 'rgba(52,211,153,0.6)' : 'rgba(239,68,68,0.6)');
+  const barBorders = values.map(v => v >= 0 ? 'rgba(52,211,153,0.9)' : 'rgba(239,68,68,0.9)');
+
+  const canvas = document.getElementById('chart-pnl-history');
+  if (!canvas) return;
+
+  if (pnlHistoryChart) {
+    pnlHistoryChart.data.labels                      = labels;
+    pnlHistoryChart.data.datasets[0].data            = values;
+    pnlHistoryChart.data.datasets[0].backgroundColor = barColors;
+    pnlHistoryChart.data.datasets[0].borderColor     = barBorders;
+    pnlHistoryChart.data.datasets[1].data            = avgLine;
+    pnlHistoryChart.update('none');
+    return;
+  }
+
+  pnlHistoryChart = new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'P&L',
+          data: values,
+          backgroundColor: barColors,
+          borderColor: barBorders,
+          borderWidth: 1,
+          order: 2,
+        },
+        {
+          label: 'Avg P&L',
+          data: avgLine,
+          type: 'line',
+          borderColor: avgPnl >= 0 ? 'rgba(52,211,153,0.45)' : 'rgba(239,68,68,0.45)',
+          borderWidth: 1,
+          borderDash: [5, 4],
+          pointRadius: 0,
+          fill: false,
+          tension: 0,
+          order: 1,
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: ctx => ctx[0]?.label || '',
+            label: ctx => {
+              const v = ctx.parsed.y;
+              const prefix = v >= 0 ? '+' : '';
+              return ctx.datasetIndex === 1
+                ? 'avg: ' + prefix + '$' + v.toFixed(2)
+                : 'pnl: ' + prefix + '$' + v.toFixed(2);
+            },
+          }
+        },
+      },
+      scales: {
+        x: {
+          ticks: {
+            color: '#64748b',
+            font: { size: 10 },
+            maxRotation: 0,
+            callback: (val, idx) => (idx % 6 === 0) ? labels[idx] : '',
+          },
+          grid: { color: 'rgba(255,255,255,0.04)' },
+        },
+        y: {
+          ticks: {
+            color: '#64748b',
+            font: { size: 10 },
+            callback: v => (v >= 0 ? '+' : '') + '$' + v.toFixed(2),
+          },
+          grid: { color: 'rgba(255,255,255,0.04)' },
+        }
+      }
+    }
+  });
+}
+
+async function shiftPnlPeriod(delta) {
+  const next = pnlHistoryOffset + delta;
+  if (next < 0 || next > pnlHistoryMaxOffset) return;
+  pnlHistoryOffset = next;
+  await loadPnlHistory(pnlHistoryOffset);
+}
+
 async function refreshPaperSim() {
   const b = parseFloat(document.getElementById('paper-balance').value) || 1000;
-  await Promise.all([loadPaperStats(b), loadPaperTrades(), loadCapitalHistory(), loadHourlyEntries(hourlyWeekOffset)]);
+  await Promise.all([loadPaperStats(b), loadPaperTrades(), loadCapitalHistory(), loadHourlyEntries(hourlyWeekOffset), loadPnlHistory(pnlHistoryOffset)]);
 }
 
 async function checkPaperResolutions() {
