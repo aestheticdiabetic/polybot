@@ -500,7 +500,11 @@ async def create_app(state):
             mid = r.get("market_id")
             if mid and mid in sell_map and r.get("outcome") != "SOLD":
                 sell = sell_map[mid]
-                r = {**r, "outcome": "SOLD", "exit_price": sell.get("exit_price"), "pnl": sell.get("pnl")}
+                # Only apply fallback if the WOULD_SELL is newer than this WOULD_BUY.
+                # A stale WOULD_SELL from a prior position on the same market must not
+                # override a later WOULD_BUY that resolved normally (YES/NO).
+                if sell.get("ts", "") > r.get("ts", ""):
+                    r = {**r, "outcome": "SOLD", "exit_price": sell.get("exit_price"), "pnl": sell.get("pnl")}
             records.append(r)
         records.sort(key=lambda r: r.get("ts", ""), reverse=True)
         # Override resolution_time with accurate end-of-day UTC for display.
@@ -537,9 +541,13 @@ async def create_app(state):
         records = []
         for r in raw_records:
             mid = r.get("market_id")
-            if mid and mid in sell_map:
+            if mid and mid in sell_map and r.get("outcome") != "SOLD":
                 sell = sell_map[mid]
-                r = {**r, "outcome": "SOLD", "exit_price": sell.get("exit_price"), "pnl": sell.get("pnl")}
+                # Only apply fallback if the WOULD_SELL is newer than this WOULD_BUY.
+                # A stale WOULD_SELL from a prior position on the same market must not
+                # override a later WOULD_BUY that resolved normally.
+                if sell.get("ts", "") > r.get("ts", ""):
+                    r = {**r, "outcome": "SOLD", "exit_price": sell.get("exit_price"), "pnl": sell.get("pnl")}
             records.append(r)
 
         if not records:
@@ -957,7 +965,7 @@ async def create_app(state):
         updated_paper = []
         for r in paper_records:
             mid = r.get("market_id", "")
-            if mid in outcome_map and r.get("outcome") is None:
+            if mid in outcome_map and r.get("outcome") is None and r.get("event") == "WOULD_BUY":
                 r = dict(r)
                 r["outcome"] = outcome_map[mid]
                 shares     = r.get("shares", 0)
