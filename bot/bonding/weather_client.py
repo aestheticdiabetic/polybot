@@ -54,9 +54,11 @@ DISK_CACHE_PATH          = os.environ.get("WEATHER_CACHE_PATH",  "/app/data/ense
 NEARTERM_DISK_CACHE_PATH = os.environ.get("NEARTERM_CACHE_PATH", "/app/data/nearterm_cache.json")
 
 # Near-term forecast uncertainty: std dev of synthetic ensemble members (°C).
-# Calibrated to typical Open-Meteo short-range RMSE for daily max temperature.
-NEARTERM_SIGMA_SAME_DAY = 1.0   # same-day (observed hours give hard running-max floor)
-NEARTERM_SIGMA_NEXT_DAY = 1.5   # next-day (full day still ahead)
+# Calibrated to real-world NWP RMSE for daily max temperature forecasts.
+# Published RMSE for 24-48h daily max is typically 2-3°C; same-day is lower
+# because the running-max floor from observed hours constrains upside error.
+NEARTERM_SIGMA_SAME_DAY = 1.5   # same-day (running-max floor limits upside error)
+NEARTERM_SIGMA_NEXT_DAY = 2.5   # next-day (full day still ahead; 2-3°C is published RMSE)
 NEARTERM_MEMBERS        = 100   # synthetic member count (finer resolution than 30)
 
 # Post-peak decay: anchor hour is now dynamic per city/month (see get_gate_hour()).

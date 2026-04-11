@@ -150,7 +150,7 @@ def _record_call() -> None:
 
 def _make_forecast_result(city: str, target_date: date, temp_max_c: float) -> ForecastResult:
     """Convert point forecast to ForecastResult with 100 synthetic Gaussian members."""
-    sigma = 1.5  # °C — comparable to Open-Meteo next-day RMSE
+    sigma = 2.5  # °C — calibrated to real-world 24-48h daily max RMSE (~2-3°C)
     rng = random.Random(f"{city}-{target_date.isoformat()}-{temp_max_c:.2f}")
     members = [rng.gauss(temp_max_c, sigma) for _ in range(100)]
     return ForecastResult(

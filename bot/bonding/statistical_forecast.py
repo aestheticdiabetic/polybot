@@ -301,14 +301,15 @@ def _arima_pred(city: str, sorted_temps: list[tuple[date, float]]) -> Optional[f
 def get_statistical_forecast(
     city: str,
     target_date: date,
-    sigma_c: float = 2.5,
+    sigma_c: float = 3.0,
     n_members: int = 100,
 ) -> Optional["ForecastResult"]:
     """
     Build a ForecastResult from the blended Naïve + ARIMA prediction.
 
-    sigma_c:   std dev (°C) of synthetic ensemble members. Calibrated to
-               typical AR model RMSE for daily max temperature (~2–3°C).
+    sigma_c:   std dev (°C) of synthetic ensemble members. ARIMA/Naïve models
+               are less reliable than NWP ensembles; 3°C reflects higher
+               uncertainty vs the ~2-3°C RMSE of meteorological sources.
     n_members: synthetic member count for probability resolution.
 
     Returns None if insufficient history exists for this city.
