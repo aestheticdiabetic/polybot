@@ -10,11 +10,12 @@ SourceConsensus dict produced by get_consensus_forecasts().
 """
 import logging
 import statistics
+from datetime import datetime, timezone
 from typing import Optional
 
 import config as _config
 from bonding.market_scanner import MarketCandidate
-from bonding.opportunity_scorer import ScoredOpportunity, passes_time_gate
+from bonding.opportunity_scorer import ScoredOpportunity, passes_time_gate, _entry_bucket_label
 from bonding.weather_client import SourceConsensus, prob_in_range, fahrenheit_to_celsius
 
 log = logging.getLogger("bond.certain")
@@ -85,6 +86,19 @@ def _score_one(
     # Gate 4: time gate (same logic as standard scorer)
     if not _passes_time_gate(market, consensus.gfs.forecast_peak_hour):
         return None
+
+    # Gate 5: entry-time bucket toggle
+    disabled_buckets = _config.BOND_DISABLED_ENTRY_BUCKETS
+    if disabled_buckets:
+        now_utc = datetime.now(timezone.utc)
+        hours_to_res = (market.resolution_time - now_utc).total_seconds() / 3600
+        bucket = _entry_bucket_label(max(hours_to_res, 0))
+        if bucket and bucket in disabled_buckets:
+            log.debug(
+                f"certain: {market.city} {market.target_date} — entry bucket "
+                f"'{bucket}' disabled, skipping"
+            )
+            return None
 
     temp_min, temp_max = _convert_temps(market)
     if temp_min is None or temp_max is None:
@@ -175,6 +189,14 @@ def score_certain(
     Score all markets for CERTAIN tier opportunities.
     Returns list sorted by edge descending, with per-cluster capital cap applied.
     """
+    # Respect live toggle filters
+    if "CERTAIN" in _config.BOND_DISABLED_TIERS:
+        log.debug("certain: CERTAIN tier disabled via toggle — skipping all")
+        return []
+    if "YES" in _config.BOND_DISABLED_SIDES:
+        log.debug("certain: YES side disabled via toggle — skipping all (CERTAIN bets YES only)")
+        return []
+
     results: list[ScoredOpportunity] = []
 
     for market in markets:

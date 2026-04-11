@@ -28,6 +28,24 @@ _scan_suppressions: dict[tuple, float] = {}
 TIER_CHEAP = "CHEAP"
 TIER_CORE  = "CORE"
 
+# Entry-time bucket labels (must match dashboard UI and BOND_DISABLED_ENTRY_BUCKETS values)
+_ENTRY_BUCKETS = [
+    ("0-10h",  0,   10),
+    ("10-20h", 10,  20),
+    ("20-30h", 20,  30),
+    ("30-48h", 30,  48),
+    ("48h+",   48,  float("inf")),
+]
+
+
+def _entry_bucket_label(hours_to_resolution: float) -> Optional[str]:
+    """Return the entry-time bucket label for a given hours-to-resolution value."""
+    for label, lo, hi in _ENTRY_BUCKETS:
+        if lo <= hours_to_resolution < hi:
+            return label
+    return None
+
+
 # Ask price ranges that define each tier
 _CHEAP_ASK_MIN = 0.02   # 2¢ — minimum for $1 order with reasonable share count
 _CHEAP_ASK_MAX = 0.08   # 8¢
@@ -164,6 +182,19 @@ def score_market(
     if not passes_time_gate(market, forecast.gfs.forecast_peak_hour):
         return None
 
+    # ── Entry-time bucket toggle ──────────────────────────────────────────────
+    disabled_buckets = _config.BOND_DISABLED_ENTRY_BUCKETS
+    if disabled_buckets:
+        now_utc = datetime.now(timezone.utc)
+        hours_to_res = (market.resolution_time - now_utc).total_seconds() / 3600
+        bucket = _entry_bucket_label(max(hours_to_res, 0))
+        if bucket and bucket in disabled_buckets:
+            log.debug(
+                f"scorer: {market.city} {market.target_date} — entry bucket "
+                f"'{bucket}' disabled, skipping"
+            )
+            return None
+
     temp_min, temp_max = _convert_temps(market)
     if temp_min is None or temp_max is None:
         return None
@@ -171,13 +202,16 @@ def score_market(
     prob_yes = forecast.consensus_prob(temp_min, temp_max)
     prob_no  = 1.0 - prob_yes
 
-    yes_opp = _score_side(
-        market=market, forecast=forecast,
-        prob=prob_yes, ask=market.best_ask, ask_book=market.ask_book,
-        token_id=market.token_id, outcome="YES",
-    )
+    disabled_sides = _config.BOND_DISABLED_SIDES
+    yes_opp: Optional[ScoredOpportunity] = None
+    if "YES" not in disabled_sides:
+        yes_opp = _score_side(
+            market=market, forecast=forecast,
+            prob=prob_yes, ask=market.best_ask, ask_book=market.ask_book,
+            token_id=market.token_id, outcome="YES",
+        )
     no_opp: Optional[ScoredOpportunity] = None
-    if market.no_token_id and market.no_best_ask is not None:
+    if market.no_token_id and market.no_best_ask is not None and "NO" not in disabled_sides:
         no_opp = _score_side(
             market=market, forecast=forecast,
             prob=prob_no, ask=market.no_best_ask, ask_book=market.no_ask_book,
@@ -241,6 +275,13 @@ def _score_side(
 
     tier = assign_tier(ask, edge)
     if tier is None:
+        return None
+
+    if tier in _config.BOND_DISABLED_TIERS:
+        log.debug(
+            f"scorer: {market.city} {market.target_date} {outcome} "
+            f"tier '{tier}' disabled — skip"
+        )
         return None
 
     min_edge = (

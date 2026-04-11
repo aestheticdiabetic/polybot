@@ -68,6 +68,22 @@ def load_overrides() -> None:
                 setattr(_config, key, val)
                 applied[key] = val
 
+        # ── BOND set overrides (stored as JSON arrays) ─────────────
+        _bond_set = {
+            "BOND_DISABLED_TIERS",
+            "BOND_DISABLED_SIDES",
+            "BOND_DISABLED_ENTRY_BUCKETS",
+        }
+        for key in _bond_set:
+            json_key = key + "_JSON"
+            if json_key in overrides:
+                try:
+                    val = set(json.loads(overrides[json_key]))
+                    setattr(_config, key, val)
+                    applied[key] = val
+                except (json.JSONDecodeError, TypeError) as e:
+                    log.warning(f"Failed to load {json_key}: {e}")
+
         # ── BOND city / alias overrides (stored as JSON) ───────────
         if "BOND_CITIES_JSON" in overrides:
             try:
@@ -114,6 +130,8 @@ def save_overrides(overrides: dict) -> bool:
             from dotenv import dotenv_values
             existing = dict(dotenv_values(OVERRIDE_FILE))
 
+        _set_keys = {"BOND_DISABLED_TIERS", "BOND_DISABLED_SIDES", "BOND_DISABLED_ENTRY_BUCKETS"}
+
         # Merge new overrides
         for k, v in overrides.items():
             if k == "BOND_CITIES":
@@ -125,6 +143,8 @@ def save_overrides(overrides: dict) -> bool:
                 existing["BOND_CITY_ALIASES_JSON"] = json.dumps(v)
             elif k == "BOND_CITY_BIAS_CORRECTIONS":
                 existing["BOND_CITY_BIAS_CORRECTIONS_JSON"] = json.dumps(v, sort_keys=True)
+            elif k in _set_keys:
+                existing[k + "_JSON"] = json.dumps(sorted(v))
             else:
                 existing[k] = str(v)
 

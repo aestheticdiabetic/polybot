@@ -453,6 +453,63 @@
   <!-- Bond config editor -->
   <div class="section">
     <div class="section-title">Bond Config (live edit)</div>
+
+    <!-- Toggle filters -->
+    <div style="margin-bottom:18px;">
+      <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-bottom:10px;">BET FILTERS — uncheck to disable</div>
+      <div style="display:flex;gap:32px;flex-wrap:wrap;">
+
+        <div>
+          <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-bottom:6px;">TIERS</div>
+          <div style="display:flex;gap:12px;">
+            <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;">
+              <input type="checkbox" id="btog-tier-CHEAP" checked> <span class="pill pill-cheap">CHEAP</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;">
+              <input type="checkbox" id="btog-tier-CORE" checked> <span class="pill pill-core">CORE</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;">
+              <input type="checkbox" id="btog-tier-CERTAIN" checked> <span class="pill pill-certain">CERTAIN</span>
+            </label>
+          </div>
+        </div>
+
+        <div>
+          <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-bottom:6px;">SIDES</div>
+          <div style="display:flex;gap:12px;">
+            <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;">
+              <input type="checkbox" id="btog-side-YES" checked> <span style="color:var(--green);">YES</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;">
+              <input type="checkbox" id="btog-side-NO" checked> <span style="color:var(--red);">NO</span>
+            </label>
+          </div>
+        </div>
+
+        <div>
+          <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-bottom:6px;">ENTRY TIME (hours to resolution)</div>
+          <div style="display:flex;gap:12px;flex-wrap:wrap;">
+            <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;">
+              <input type="checkbox" id="btog-entry-0-10h" checked> 0–10h
+            </label>
+            <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;">
+              <input type="checkbox" id="btog-entry-10-20h" checked> 10–20h
+            </label>
+            <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;">
+              <input type="checkbox" id="btog-entry-20-30h" checked> 20–30h
+            </label>
+            <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;">
+              <input type="checkbox" id="btog-entry-30-48h" checked> 30–48h
+            </label>
+            <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;">
+              <input type="checkbox" id="btog-entry-48h+" checked> 48h+
+            </label>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
     <div class="config-grid" id="bond-config-grid"></div>
     <button class="btn btn-save" onclick="saveBondConfig()" style="margin-top:14px;">SAVE CONFIG</button>
     <span id="bond-cfg-status" style="font-size:11px;color:var(--muted);margin-left:12px;"></span>
@@ -1174,6 +1231,41 @@ const BOND_CFG_META = {
   BOND_MAX_MARKETS_PER_RUN:    { label:'Max Orders/Run',         step:10,    desc:'Max orders placed per scan cycle' },
 };
 
+const _BOND_TIER_IDS    = ['CHEAP', 'CORE', 'CERTAIN'];
+const _BOND_SIDE_IDS    = ['YES', 'NO'];
+const _BOND_ENTRY_IDS   = ['0-10h', '10-20h', '20-30h', '30-48h', '48h+'];
+
+function _setToggleStates(disabledTiers, disabledSides, disabledBuckets) {
+  _BOND_TIER_IDS.forEach(t => {
+    const el = document.getElementById('btog-tier-' + t);
+    if (el) el.checked = !disabledTiers.includes(t);
+  });
+  _BOND_SIDE_IDS.forEach(s => {
+    const el = document.getElementById('btog-side-' + s);
+    if (el) el.checked = !disabledSides.includes(s);
+  });
+  _BOND_ENTRY_IDS.forEach(b => {
+    const el = document.getElementById('btog-entry-' + b);
+    if (el) el.checked = !disabledBuckets.includes(b);
+  });
+}
+
+function _readToggleStates() {
+  const disabledTiers = _BOND_TIER_IDS.filter(t => {
+    const el = document.getElementById('btog-tier-' + t);
+    return el && !el.checked;
+  });
+  const disabledSides = _BOND_SIDE_IDS.filter(s => {
+    const el = document.getElementById('btog-side-' + s);
+    return el && !el.checked;
+  });
+  const disabledBuckets = _BOND_ENTRY_IDS.filter(b => {
+    const el = document.getElementById('btog-entry-' + b);
+    return el && !el.checked;
+  });
+  return { disabledTiers, disabledSides, disabledBuckets };
+}
+
 async function loadBondConfig() {
   try {
     const cfg = await apiFetch('/api/bond/config');
@@ -1186,6 +1278,11 @@ async function loadBondConfig() {
         <span class="config-desc">${meta.desc}</span>`;
       grid.appendChild(div);
     });
+    _setToggleStates(
+      cfg.BOND_DISABLED_TIERS          || [],
+      cfg.BOND_DISABLED_SIDES          || [],
+      cfg.BOND_DISABLED_ENTRY_BUCKETS  || [],
+    );
   } catch(e) { console.error('Bond config load failed:',e); }
 }
 
@@ -1195,6 +1292,10 @@ async function saveBondConfig() {
     const el = document.getElementById('bcfg-'+k);
     if (el && el.value !== '') upd[k] = parseFloat(el.value);
   });
+  const { disabledTiers, disabledSides, disabledBuckets } = _readToggleStates();
+  upd.BOND_DISABLED_TIERS         = disabledTiers;
+  upd.BOND_DISABLED_SIDES         = disabledSides;
+  upd.BOND_DISABLED_ENTRY_BUCKETS = disabledBuckets;
   const statusEl = document.getElementById('bond-cfg-status');
   try {
     const r = await apiFetch('/api/bond/config', {method:'POST', body:JSON.stringify(upd)});

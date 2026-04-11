@@ -360,11 +360,14 @@ async def create_app(state):
             "BOND_GAS_FLOOR_HOURS":         _config.BOND_GAS_FLOOR_HOURS,
             "BOND_POLL_INTERVAL_SECS":      _config.BOND_POLL_INTERVAL_SECS,
             "BOND_MAX_MARKETS_PER_RUN":     _config.BOND_MAX_MARKETS_PER_RUN,
+            "BOND_DISABLED_TIERS":          sorted(_config.BOND_DISABLED_TIERS),
+            "BOND_DISABLED_SIDES":          sorted(_config.BOND_DISABLED_SIDES),
+            "BOND_DISABLED_ENTRY_BUCKETS":  sorted(_config.BOND_DISABLED_ENTRY_BUCKETS),
         })
 
     @_auth_required
     async def api_bond_config_set(request):
-        """Live-update BOND_* numeric parameters."""
+        """Live-update BOND_* numeric and toggle parameters."""
         data = await request.json()
         _float_keys = {
             "BOND_MIN_EDGE_CHEAP", "BOND_MIN_EDGE_CORE",
@@ -374,6 +377,9 @@ async def create_app(state):
         _int_keys = {
             "BOND_GAS_FLOOR_HOURS", "BOND_SHARES_CORE", "BOND_SHARES_CHEAP_MAX",
             "BOND_POLL_INTERVAL_SECS", "BOND_MAX_MARKETS_PER_RUN",
+        }
+        _set_keys = {
+            "BOND_DISABLED_TIERS", "BOND_DISABLED_SIDES", "BOND_DISABLED_ENTRY_BUCKETS",
         }
         updated = {}
         for k, v in data.items():
@@ -385,12 +391,16 @@ async def create_app(state):
                 val = int(v)
                 setattr(_config, k, val)
                 updated[k] = val
+            elif k in _set_keys:
+                val = set(v) if isinstance(v, list) else set()
+                setattr(_config, k, val)
+                updated[k] = val
         if updated:
             from config_override import save_overrides
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, lambda: save_overrides(updated))
         log.info(f"Bond config updated: {updated}")
-        return web.json_response({"ok": True, "updated": updated})
+        return web.json_response({"ok": True, "updated": {k: sorted(v) if isinstance(v, set) else v for k, v in updated.items()}})
 
     @_auth_required
     async def api_bond_cities_get(request):

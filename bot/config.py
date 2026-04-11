@@ -175,6 +175,15 @@ BOND_MIN_ENTRY_HOURS      = 10    # FALLBACK ONLY — superseded by dynamic peak
                                   # (peak_hour_stats.py + historical_peak_seeder.py).
                                   # Retained as documentation of the old threshold.
 
+# ── Live-toggle filters (empty set = all enabled) ─────────────────────────────
+# BOND_DISABLED_TIERS:          skip entry for tiers in this set (e.g. {"CHEAP"})
+# BOND_DISABLED_SIDES:          skip entry for sides in this set (e.g. {"NO"})
+# BOND_DISABLED_ENTRY_BUCKETS:  skip entry when hours-to-resolution falls in bucket
+#   valid bucket labels: "0-10h", "10-20h", "20-30h", "30-48h", "48h+"
+BOND_DISABLED_TIERS:          set = set()
+BOND_DISABLED_SIDES:          set = set()
+BOND_DISABLED_ENTRY_BUCKETS:  set = set()
+
 # Market-implied confidence cap
 # When our model probability exceeds (ask × this ratio), the model is disagreeing
 # with the market by more than N-fold. Cap model prob to ask × ratio before
