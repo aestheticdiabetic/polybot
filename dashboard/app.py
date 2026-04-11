@@ -710,6 +710,60 @@ async def create_app(state):
         })
 
     @_auth_required
+    async def api_bond_capital_history(request):
+        """Hourly capital-at-risk series for the past 48 hours."""
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+        all_records = _load_paper_trades()
+
+        # WOULD_SELL events: market_id → sell record (carries sell ts and pnl)
+        sell_map: dict = {}
+        for r in all_records:
+            if r.get("event") == "WOULD_SELL" and r.get("market_id"):
+                sell_map[r["market_id"]] = r
+
+        buy_records = [r for r in all_records if r.get("event") == "WOULD_BUY"]
+
+        def _parse(s: str | None) -> _dt | None:
+            if not s:
+                return None
+            try:
+                return _dt.fromisoformat(s.replace("Z", "+00:00"))
+            except Exception:
+                return None
+
+        now     = _dt.now(_tz.utc)
+        cutoff  = now - _td(hours=48)
+        ticks: list[_dt] = []
+        t = cutoff
+        while t <= now + _td(minutes=1):
+            ticks.append(t)
+            t += _td(hours=1)
+
+        history = []
+        for tick in ticks:
+            capital = 0.0
+            for r in buy_records:
+                entry_ts = _parse(r.get("ts"))
+                if entry_ts is None or entry_ts > tick:
+                    continue
+                mid = r.get("market_id")
+                # Determine when this position exited
+                if mid and mid in sell_map:
+                    exit_ts = _parse(sell_map[mid].get("ts"))
+                    if exit_ts and exit_ts <= tick:
+                        continue  # sold before this tick
+                elif r.get("outcome") is not None:
+                    res_ts = _parse(r.get("resolution_time"))
+                    if res_ts and res_ts <= tick:
+                        continue  # resolved before this tick
+                capital += r.get("capital", 0)
+            history.append({"ts": tick.isoformat(), "capital": round(capital, 4)})
+
+        avg = round(sum(p["capital"] for p in history) / len(history), 4) if history else 0.0
+        return web.json_response({"history": history, "avg_capital": avg})
+
+    @_auth_required
     async def api_bond_real_stats(request):
         """Aggregated REAL bond stats (tier analysis + entry time stats) from the ledger."""
         from datetime import datetime as _dt, timezone as _tz
@@ -1088,8 +1142,9 @@ async def create_app(state):
     app.router.add_post("/api/bond/cities",   api_bond_cities_set)
     app.router.add_get("/api/bond/logs",              api_bond_logs)
     app.router.add_get("/api/bond/discover-cities",  api_bond_discover_cities)
-    app.router.add_get("/api/bond/paper-trades",     api_bond_paper_trades)
-    app.router.add_get("/api/bond/paper-stats",      api_bond_paper_stats)
+    app.router.add_get("/api/bond/paper-trades",      api_bond_paper_trades)
+    app.router.add_get("/api/bond/paper-stats",       api_bond_paper_stats)
+    app.router.add_get("/api/bond/capital-history",   api_bond_capital_history)
     app.router.add_post("/api/bond/paper-check",      api_bond_paper_check_resolutions)
     app.router.add_post("/api/bond/paper-revert",     api_bond_paper_revert_resolutions)
     app.router.add_get("/api/bond/real-stats",        api_bond_real_stats)

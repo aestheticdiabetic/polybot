@@ -564,11 +564,6 @@
       <div class="metric-sub" id="pm-scale">all cycles combined</div>
     </div>
     <div class="metric">
-      <div class="metric-label">Capital at Risk</div>
-      <div class="metric-value amber" id="pm-active-capital">—</div>
-      <div class="metric-sub" id="pm-active-count">0 active bets</div>
-    </div>
-    <div class="metric">
       <div class="metric-label">CORE Opps</div>
       <div class="metric-value blue" id="pm-core-count">—</div>
       <div class="metric-sub" id="pm-core-ev">avg ev —</div>
@@ -587,6 +582,17 @@
       <div class="metric-label">Actual PnL</div>
       <div class="metric-value" id="pm-actual-pnl">—</div>
       <div class="metric-sub">from resolved bets</div>
+    </div>
+  </div>
+
+  <!-- Capital at Risk history chart -->
+  <div class="section" id="capital-history-section">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+      <div class="section-title" style="margin-bottom:0;">Capital at Risk — Last 48h</div>
+      <span style="font-size:12px;color:var(--muted);">avg: <span id="capital-avg-label" style="color:var(--amber);font-weight:600;">—</span></span>
+    </div>
+    <div style="position:relative;height:160px;">
+      <canvas id="chart-capital-history"></canvas>
     </div>
   </div>
 
@@ -693,7 +699,7 @@ const POLL_MS = 5000;
 let mode = 'sim';
 let marketsData = [];
 let pnlData = [], pnlLabels = [];
-let pnlChart, volChart, spreadChart, latencyChart;
+let pnlChart, volChart, spreadChart, latencyChart, capitalHistoryChart;
 let initialBalance = null;
 let currentTab = 'arbi';
 // Bond state
@@ -1369,9 +1375,107 @@ function recalcPaper() {
   loadPaperStats(b);
 }
 
+async function loadCapitalHistory() {
+  try {
+    const data = await apiFetch('/api/bond/capital-history');
+    renderCapitalHistory(data);
+  } catch(e) { console.error('Capital history load failed:', e); }
+}
+
+function renderCapitalHistory(data) {
+  if (!data || !data.history || !data.history.length) return;
+  const labels = data.history.map(p => {
+    const d = new Date(p.ts);
+    return d.toLocaleDateString('en-GB', {month:'2-digit',day:'2-digit'}) + ' ' +
+           d.toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit'});
+  });
+  const values = data.history.map(p => p.capital);
+  const avg    = data.avg_capital || 0;
+
+  document.getElementById('capital-avg-label').textContent = '$' + avg.toFixed(2);
+
+  const canvas = document.getElementById('chart-capital-history');
+  if (!canvas) return;
+
+  const avgLine = values.map(() => avg);
+
+  if (capitalHistoryChart) {
+    capitalHistoryChart.data.labels = labels;
+    capitalHistoryChart.data.datasets[0].data = values;
+    capitalHistoryChart.data.datasets[1].data = avgLine;
+    capitalHistoryChart.update('none');
+    return;
+  }
+
+  capitalHistoryChart = new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Capital at Risk',
+          data: values,
+          borderColor: C.amber,
+          backgroundColor: 'rgba(245,158,11,0.08)',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          fill: true,
+          tension: 0.3,
+        },
+        {
+          label: 'Average',
+          data: avgLine,
+          borderColor: 'rgba(245,158,11,0.45)',
+          borderWidth: 1,
+          borderDash: [5, 4],
+          pointRadius: 0,
+          fill: false,
+          tension: 0,
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              if (ctx.datasetIndex === 1) return 'avg $' + ctx.parsed.y.toFixed(2);
+              return '$' + ctx.parsed.y.toFixed(2);
+            },
+          }
+        },
+      },
+      scales: {
+        x: {
+          ticks: {
+            color: '#64748b',
+            font: { size: 10 },
+            maxTicksLimit: 12,
+            maxRotation: 0,
+          },
+          grid: { color: 'rgba(255,255,255,0.04)' },
+        },
+        y: {
+          ticks: {
+            color: '#64748b',
+            font: { size: 10 },
+            callback: v => '$' + v.toFixed(0),
+          },
+          grid: { color: 'rgba(255,255,255,0.04)' },
+          beginAtZero: true,
+        }
+      }
+    }
+  });
+}
+
 async function refreshPaperSim() {
   const b = parseFloat(document.getElementById('paper-balance').value) || 1000;
-  await Promise.all([loadPaperStats(b), loadPaperTrades()]);
+  await Promise.all([loadPaperStats(b), loadPaperTrades(), loadCapitalHistory()]);
 }
 
 async function checkPaperResolutions() {
@@ -1412,8 +1516,7 @@ function updatePaperStats(s) {
   document.getElementById('pm-resolved-count').textContent = `${s.resolved_count || 0} resolved`;
   document.getElementById('pm-capital').textContent      = '$' + parseFloat(s.total_capital || 0).toFixed(2);
 
-  document.getElementById('pm-active-capital').textContent = '$' + parseFloat(s.active_capital || 0).toFixed(2);
-  document.getElementById('pm-active-count').textContent   = `${s.active_count || 0} active bets`;
+
 
   const scalePct = s.scale_factor < 1
     ? ` (${(s.scale_factor*100).toFixed(0)}% of opps — limited by balance)`
