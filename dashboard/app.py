@@ -508,13 +508,18 @@ async def create_app(state):
             if r.get("event") == "WOULD_SELL":
                 continue
             mid = r.get("market_id")
-            if mid and mid in sell_map and r.get("outcome") != "SOLD":
+            if mid and mid in sell_map:
                 sell = sell_map[mid]
-                # Only apply fallback if the WOULD_SELL is newer than this WOULD_BUY.
-                # A stale WOULD_SELL from a prior position on the same market must not
-                # override a later WOULD_BUY that resolved normally (YES/NO).
-                if sell.get("ts", "") > r.get("ts", ""):
-                    r = {**r, "outcome": "SOLD", "exit_price": sell.get("exit_price"), "pnl": sell.get("pnl")}
+                if r.get("outcome") != "SOLD":
+                    # Only apply fallback if the WOULD_SELL is newer than this WOULD_BUY.
+                    # A stale WOULD_SELL from a prior position on the same market must not
+                    # override a later WOULD_BUY that resolved normally (YES/NO).
+                    if sell.get("ts", "") > r.get("ts", ""):
+                        r = {**r, "outcome": "SOLD", "exit_price": sell.get("exit_price"),
+                             "pnl": sell.get("pnl"), "activity_ts": sell.get("ts")}
+                else:
+                    # Already patched with outcome='SOLD' — grab the sell timestamp for activity sorting.
+                    r = {**r, "activity_ts": sell.get("ts")}
             records.append(r)
         records.sort(key=lambda r: r.get("ts", ""), reverse=True)
         # Override resolution_time with accurate end-of-day UTC for display.
@@ -524,6 +529,10 @@ async def create_app(state):
             corrected = _end_of_day_utc(rec.get("city", ""), rec.get("date", ""))
             if corrected:
                 rec = {**rec, "resolution_time": corrected}
+            # For YES/NO resolved records, use resolution_time as activity_ts.
+            # For pending records, fall back to entry ts.
+            if not rec.get("activity_ts"):
+                rec = {**rec, "activity_ts": rec.get("resolution_time") or rec.get("ts")}
             result.append(rec)
         return web.json_response(result)
 
@@ -814,7 +823,8 @@ async def create_app(state):
                 return None
 
         # Current period: most recent complete hour as the end, 72h back as start.
-        now = _dt.now(_tz.utc)
+        # Use AEST/AEDT so labels and window boundaries align to Australian Eastern time.
+        now = _dt.now(ZoneInfo("Australia/Sydney"))
         # Truncate to current hour so the window aligns cleanly
         now_h = now.replace(minute=0, second=0, microsecond=0)
 
@@ -948,7 +958,8 @@ async def create_app(state):
                 continue
             resolved_exits.append((exit_ts, float(pnl)))
 
-        now   = _dt.now(_tz.utc)
+        # Use AEST/AEDT so labels and window boundaries align to Australian Eastern time.
+        now   = _dt.now(ZoneInfo("Australia/Sydney"))
         now_2h = now.replace(minute=0, second=0, microsecond=0)
         # Snap to nearest 2-hour boundary
         now_2h = now_2h.replace(hour=(now_2h.hour // 2) * 2)

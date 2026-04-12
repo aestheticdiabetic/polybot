@@ -770,6 +770,10 @@
         <option value="won">won</option>
         <option value="lost">lost</option>
       </select>
+      <select id="paper-sort-mode" onchange="paperPage=1;renderPaperTrades()" style="font-size:11px;padding:4px 8px;">
+        <option value="entry">sort: entry time</option>
+        <option value="activity">sort: recent activity</option>
+      </select>
     </div>
     <div class="scroll-table">
       <table>
@@ -1966,16 +1970,24 @@ function updatePaperStats(s) {
 function renderPaperTrades() {
   const tierFilt    = document.getElementById('paper-tier-filter').value;
   const outcomeFilt = document.getElementById('paper-outcome-filter').value;
+  const sortMode    = document.getElementById('paper-sort-mode').value;
   const _isEffectiveWin  = r => r.outcome != null && (r.pnl || 0) > 0;
   const _isEffectiveLoss = r => r.outcome != null && (r.pnl == null || (r.pnl || 0) <= 0);
   const _isPending       = r => r.outcome == null;
 
-  // Filter across ALL records first, then paginate
+  // Filter across ALL records first, then sort, then paginate
   let filtered = [...paperRecords];
   if (tierFilt) filtered = filtered.filter(r => r.tier === tierFilt);
   if (outcomeFilt === 'pending') filtered = filtered.filter(_isPending);
   else if (outcomeFilt === 'won')  filtered = filtered.filter(_isEffectiveWin);
   else if (outcomeFilt === 'lost') filtered = filtered.filter(_isEffectiveLoss);
+
+  // Sort by most recent activity (sell/resolution time) or entry time
+  if (sortMode === 'activity') {
+    filtered.sort((a, b) => (b.activity_ts || b.ts || '').localeCompare(a.activity_ts || a.ts || ''));
+  } else {
+    filtered.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
+  }
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAPER_PAGE_SIZE));
   if (paperPage > totalPages) paperPage = totalPages;
