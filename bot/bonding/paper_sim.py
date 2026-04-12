@@ -55,6 +55,7 @@ def _load_seen_market_ids() -> set[str]:
     Eligible for re-entry: outcome='SOLD' only (early exit while market is still active).
     """
     if not PAPER_LOG.exists():
+        log.info("_load_seen_market_ids: JSONL not found, starting fresh")
         return set()
     # Track the latest WOULD_BUY outcome per market_id (later lines overwrite earlier).
     latest_outcome: dict[str, str | None] = {}
@@ -71,10 +72,17 @@ def _load_seen_market_ids() -> set[str]:
                 mid = rec.get("market_id")
                 if mid:
                     latest_outcome[mid] = rec.get("outcome")  # None = open
-    except Exception:
-        pass
+    except Exception as exc:
+        log.error(f"_load_seen_market_ids: failed to read JSONL ({exc}), starting fresh")
+        return set()
     # Block open positions (None) and resolved markets (YES/NO) — only SOLD allows re-entry.
-    return {mid for mid, outcome in latest_outcome.items() if outcome != "SOLD"}
+    blocked = {mid for mid, outcome in latest_outcome.items() if outcome != "SOLD"}
+    sold = len(latest_outcome) - len(blocked)
+    log.info(
+        f"_load_seen_market_ids: {len(latest_outcome)} WOULD_BUY records → "
+        f"{len(blocked)} blocked (open/resolved), {sold} SOLD (eligible for re-entry)"
+    )
+    return blocked
 
 
 @dataclass
@@ -122,6 +130,16 @@ class PaperExitManager:
                 pos = PaperPosition(**d)
                 self._positions[pos.token_id] = pos
             open_count = sum(1 for p in self._positions.values() if p.status == "OPEN")
+            # Belt-and-suspenders: sync open market IDs into seen_ids so that even if
+            # the JSONL log is out of sync (e.g. partial write, encoding error), open
+            # positions from the ledger still block re-entry on restart.
+            if self._seen_ids is not None:
+                open_market_ids = {p.market_id for p in self._positions.values() if p.status == "OPEN"}
+                before = len(self._seen_ids)
+                self._seen_ids.update(open_market_ids)
+                synced = len(self._seen_ids) - before
+                if synced:
+                    log.info(f"paper_exit: synced {synced} open market IDs from ledger into seen_ids")
             log.info(f"paper_exit: loaded {open_count} open / {len(self._positions)} total positions")
         except Exception as exc:
             log.error(f"paper_exit: failed to load ledger: {exc}")

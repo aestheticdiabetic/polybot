@@ -961,6 +961,10 @@ async def create_app(state):
                 exit_ts = _parse(rec.get("resolution_time"))
                 if exit_ts is None:
                     exit_ts = _parse(_end_of_day_utc(rec.get("city", ""), rec.get("date", "")))
+            # Last resort: use entry time so old records without any
+            # exit metadata are still counted rather than silently dropped.
+            if exit_ts is None:
+                exit_ts = _parse(rec.get("ts"))
             if exit_ts is None:
                 continue
             resolved_exits.append((exit_ts, float(pnl)))
@@ -999,7 +1003,10 @@ async def create_app(state):
             label = tick.strftime("%-d %b %H:%M")
             ticks_out.append({"label": label, "cumulative_pnl": round(cum, 4)})
 
-        total_pnl    = ticks_out[-1]["cumulative_pnl"] if ticks_out else 0.0
+        # Compute total_pnl as the direct sum of all resolved exits — this
+        # matches the widget's actual_pnl calculation and avoids the 0–2h lag
+        # that the last tick (capped at now_2h) would otherwise introduce.
+        total_pnl    = round(sum(pnl for _, pnl in resolved_exits), 4)
         start_lbl    = period_start.strftime("%-d %b")
         end_lbl      = (period_end - _td(hours=1)).strftime("%-d %b")
         period_label = start_lbl if start_lbl == end_lbl else f"{start_lbl} – {end_lbl}"
