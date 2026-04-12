@@ -46,17 +46,20 @@ def _append_record(record: dict) -> None:
         f.write(json.dumps(record) + "\n")
 
 
-def _load_seen_market_ids() -> set[str]:
+def _load_seen_market_ids() -> tuple[set[str], set[str]]:
     """
-    Return set of market_ids that are blocked from re-entry on startup.
+    Return (blocked_ids, sold_ids) based on WOULD_BUY records in the JSONL.
 
-    Blocked: outcome=None (position still live), outcome='YES'/'NO' (market resolved —
-    Polymarket may not have fully closed it yet, so the scanner still returns it).
-    Eligible for re-entry: outcome='SOLD' only (early exit while market is still active).
+    blocked_ids: market_ids that must NOT be re-entered — outcome=None (still live)
+                 or outcome='YES'/'NO' (market resolved, scanner may still see it).
+    sold_ids:    market_ids the bot exited early (outcome='SOLD') — eligible for re-entry.
+
+    The JSONL is the authoritative source of truth for sell events, because
+    _patch_would_buy updates it synchronously on every WOULD_SELL.
     """
     if not PAPER_LOG.exists():
         log.info("_load_seen_market_ids: JSONL not found, starting fresh")
-        return set()
+        return set(), set()
     # Track the latest WOULD_BUY outcome per market_id (later lines overwrite earlier).
     latest_outcome: dict[str, str | None] = {}
     try:
@@ -74,15 +77,14 @@ def _load_seen_market_ids() -> set[str]:
                     latest_outcome[mid] = rec.get("outcome")  # None = open
     except Exception as exc:
         log.error(f"_load_seen_market_ids: failed to read JSONL ({exc}), starting fresh")
-        return set()
-    # Block open positions (None) and resolved markets (YES/NO) — only SOLD allows re-entry.
+        return set(), set()
     blocked = {mid for mid, outcome in latest_outcome.items() if outcome != "SOLD"}
-    sold = len(latest_outcome) - len(blocked)
+    sold = {mid for mid, outcome in latest_outcome.items() if outcome == "SOLD"}
     log.info(
         f"_load_seen_market_ids: {len(latest_outcome)} WOULD_BUY records → "
-        f"{len(blocked)} blocked (open/resolved), {sold} SOLD (eligible for re-entry)"
+        f"{len(blocked)} blocked (open/resolved), {len(sold)} SOLD (eligible for re-entry)"
     )
-    return blocked
+    return blocked, sold
 
 
 @dataclass
@@ -114,11 +116,17 @@ class PaperExitManager:
     they survive restarts.
     """
 
-    def __init__(self, paper_log: Path, seen_ids: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        paper_log: Path,
+        seen_ids: set[str] | None = None,
+        sold_market_ids: set[str] | None = None,
+    ) -> None:
         self._paper_log = paper_log
         self._ledger = paper_log.parent / "paper_positions.json"
         self._positions: dict[str, PaperPosition] = {}  # token_id → position (all statuses)
         self._seen_ids = seen_ids  # shared reference; cleared on sell to allow re-entry
+        self._sold_market_ids = sold_market_ids or set()
         self._load()
 
     def _load(self) -> None:
@@ -129,29 +137,52 @@ class PaperExitManager:
             for d in data.get("positions", []):
                 pos = PaperPosition(**d)
                 self._positions[pos.token_id] = pos
+
+            # Reconcile: the JSONL is authoritative for sell events because _patch_would_buy
+            # updates it synchronously on every WOULD_SELL. If the JSONL says a market was
+            # SOLD but the ledger still shows OPEN (e.g. _save() failed mid-flight), trust
+            # the JSONL and mark the ledger position as SOLD so re-entry remains allowed.
+            reconciled = 0
+            for pos in self._positions.values():
+                if pos.status == "OPEN" and pos.market_id in self._sold_market_ids:
+                    pos.status = "SOLD"
+                    reconciled += 1
+            if reconciled:
+                log.info(
+                    f"paper_exit: reconciled {reconciled} positions — "
+                    f"JSONL says SOLD but ledger was stale; re-saving ledger"
+                )
+                self._save()
+
             open_count = sum(1 for p in self._positions.values() if p.status == "OPEN")
-            # Belt-and-suspenders: sync open market IDs into seen_ids so that even if
-            # the JSONL log is out of sync (e.g. partial write, encoding error), open
-            # positions from the ledger still block re-entry on restart.
+
+            # Belt-and-suspenders: sync any open positions the JSONL doesn't know about
+            # (e.g. JSONL write failed but ledger write succeeded) into seen_ids so they
+            # stay blocked. Markets the JSONL already marks as SOLD are excluded — we
+            # never re-block them, preserving their eligible-for-re-entry status.
             if self._seen_ids is not None:
                 open_market_ids = {p.market_id for p in self._positions.values() if p.status == "OPEN"}
-                before = len(self._seen_ids)
-                self._seen_ids.update(open_market_ids)
-                synced = len(self._seen_ids) - before
-                if synced:
-                    log.info(f"paper_exit: synced {synced} open market IDs from ledger into seen_ids")
+                # Only add markets the JSONL doesn't already track (truly missing entries).
+                # Excludes both blocked (already in seen_ids) and SOLD (in sold_market_ids).
+                truly_missing = open_market_ids - self._seen_ids - self._sold_market_ids
+                if truly_missing:
+                    self._seen_ids.update(truly_missing)
+                    log.info(f"paper_exit: synced {len(truly_missing)} open market IDs from ledger into seen_ids (JSONL gaps)")
             log.info(f"paper_exit: loaded {open_count} open / {len(self._positions)} total positions")
         except Exception as exc:
             log.error(f"paper_exit: failed to load ledger: {exc}")
 
     def _save(self) -> None:
-        self._ledger.parent.mkdir(parents=True, exist_ok=True)
-        tmp = Path(str(self._ledger) + ".tmp")
-        payload = json.dumps(
-            {"positions": [asdict(p) for p in self._positions.values()]}, indent=2
-        )
-        tmp.write_text(payload, encoding="utf-8")
-        tmp.replace(self._ledger)
+        try:
+            self._ledger.parent.mkdir(parents=True, exist_ok=True)
+            tmp = Path(str(self._ledger) + ".tmp")
+            payload = json.dumps(
+                {"positions": [asdict(p) for p in self._positions.values()]}, indent=2
+            )
+            tmp.write_text(payload, encoding="utf-8")
+            tmp.replace(self._ledger)
+        except Exception as exc:
+            log.error(f"paper_exit: failed to save ledger: {exc}")
 
     def has_open_position(self, token_id: str) -> bool:
         """Return True if there is an OPEN paper position for this token."""
@@ -400,7 +431,7 @@ async def run_cycle() -> int:
 
     opps = score_all(markets, forecasts)[:_config.BOND_MAX_MARKETS_PER_RUN]
 
-    seen_ids = _load_seen_market_ids()
+    seen_ids, _ = _load_seen_market_ids()
     logged = sum(1 for opp in opps if log_opportunity(opp, seen_ids))
     skipped = len(opps) - logged
     if skipped:

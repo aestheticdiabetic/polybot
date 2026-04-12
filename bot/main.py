@@ -314,11 +314,12 @@ async def run_paper_loop(state: StateManager) -> None:
     from bonding.paper_sim import log_opportunity, _load_seen_market_ids, PaperExitManager, PAPER_LOG
     from config import BOND_POLL_INTERVAL_SECS, BOND_MAX_MARKETS_PER_RUN
 
-    # Load already-logged market IDs so we never double-log across restarts
-    seen_ids: set[str] = _load_seen_market_ids()
+    # Load already-logged market IDs so we never double-log across restarts.
+    # sold_ids tracks markets the bot exited early — eligible for re-entry.
+    seen_ids, sold_ids = _load_seen_market_ids()
     log.info(f"PAPER mode: loaded {len(seen_ids)} previously logged market IDs")
 
-    exit_mgr = PaperExitManager(PAPER_LOG, seen_ids=seen_ids)
+    exit_mgr = PaperExitManager(PAPER_LOG, seen_ids=seen_ids, sold_market_ids=sold_ids)
 
     async def _on_ws_opportunity(opp):
         if not exit_mgr.has_open_position(opp.token_id):
