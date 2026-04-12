@@ -529,10 +529,13 @@ async def create_app(state):
             corrected = _end_of_day_utc(rec.get("city", ""), rec.get("date", ""))
             if corrected:
                 rec = {**rec, "resolution_time": corrected}
-            # For YES/NO resolved records, use resolution_time as activity_ts.
-            # For pending records, fall back to entry ts.
+            # For YES/NO resolved records, use resolution_time as activity_ts (past date).
+            # For pending records, use entry ts — resolution_time is future so must not be used.
             if not rec.get("activity_ts"):
-                rec = {**rec, "activity_ts": rec.get("resolution_time") or rec.get("ts")}
+                if rec.get("outcome"):
+                    rec = {**rec, "activity_ts": rec.get("resolution_time") or rec.get("ts")}
+                else:
+                    rec = {**rec, "activity_ts": rec.get("ts")}
             result.append(rec)
         return web.json_response(result)
 
@@ -952,8 +955,12 @@ async def create_app(state):
                 sell = sell_map.get(mid)
                 exit_ts = _parse(sell.get("ts") if sell else None)
             else:
-                # Market resolution: use resolution_time
+                # Market resolution: use resolution_time, falling back to
+                # city/date derived end-of-day (same correction used in recent
+                # trades display — Gamma stores midnight UTC, not 18:00 local).
                 exit_ts = _parse(rec.get("resolution_time"))
+                if exit_ts is None:
+                    exit_ts = _parse(_end_of_day_utc(rec.get("city", ""), rec.get("date", "")))
             if exit_ts is None:
                 continue
             resolved_exits.append((exit_ts, float(pnl)))
