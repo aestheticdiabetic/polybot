@@ -225,10 +225,11 @@ class PaperExitManager:
         pos = self._positions.get(token_id)
         if pos is None or pos.status != "OPEN":
             return
-        # Stop loss: exit early to recover remaining capital regardless of gas floor.
+        # Stop loss: only within BOND_STOP_LOSS_HOURS of market closure (gate hour).
         if 0 < price <= pos.entry_price * _config.BOND_STOP_LOSS_RATIO:
-            self._record_sell(pos, price, reason="STOP_LOSS")
-            return
+            if self._hours_until_closure(pos) <= _config.BOND_STOP_LOSS_HOURS:
+                self._record_sell(pos, price, reason="STOP_LOSS")
+                return
         hours = self._hours_left(pos)
         if self._should_exit(pos, price, hours):
             self._record_sell(pos, price)
@@ -244,6 +245,30 @@ class PaperExitManager:
             return max(0.0, (end_of_day - datetime.now(timezone.utc)).total_seconds() / 3600)
         except Exception:
             return 999.0
+
+    def _hours_until_closure(self, pos: PaperPosition) -> float:
+        """
+        Hours until market closure = gate_hour (P75 hottest hour + 1) in city local time.
+        Returns 0.0 if gate has already passed today, 999.0 if city/timezone unknown.
+        """
+        import bonding.weather_client as _wc
+        from bonding.peak_hour_stats import get_gate_hour
+
+        tz_name = _config.BOND_CITY_TIMEZONES.get(pos.city)
+        if not tz_name:
+            return 999.0
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            return 999.0
+
+        now_local = datetime.now(tz)
+        stats = getattr(_wc, "_peak_hour_stats", {}) or {}
+        gate_hour = get_gate_hour(pos.city, None, now_local.month, stats)
+
+        # Fractional hours until gate_hour (whole-hour boundary) in local time
+        hours_until = gate_hour - now_local.hour - now_local.minute / 60
+        return max(0.0, hours_until)
 
     def _should_exit(self, pos: PaperPosition, price: float, hours: float) -> bool:
         if price <= 0.0:

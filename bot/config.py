@@ -161,6 +161,7 @@ BOND_CHEAP_EXIT_MULTIPLIER = 8.0   # sell CHEAP if price >= cost × this
 BOND_CHEAP_MIN_ABS_GAIN    = 1.00  # AND absolute gain >= this value (USD)
 BOND_GAS_FLOOR_HOURS       = 4     # don't exit within N hours of resolution
 BOND_STOP_LOSS_RATIO       = 0.5   # exit if price falls to this fraction of entry (e.g. 0.5 = 50%)
+BOND_STOP_LOSS_HOURS       = 6     # only trigger stop loss within this many hours of market closure
 
 # Confidence-based early exit thresholds (same-day current-obs monitoring)
 BOND_CONF_CERTAIN_DROP:        float = 0.20  # CERTAIN: exit if prob drops ≥ this from entry

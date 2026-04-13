@@ -121,9 +121,10 @@ class ExitManager:
                 continue
 
             current_price = await self._get_current_price(pos.token_id)
-            # Stop loss check runs before gas floor — recovering capital outweighs gas cost.
+            # Stop loss: only within BOND_STOP_LOSS_HOURS of market closure (gate hour).
             if 0 < current_price <= pos.entry_price * _config.BOND_STOP_LOSS_RATIO:
-                await self._execute_sell(pos, current_price, reason="STOP_LOSS")
+                if self._hours_until_closure(pos) <= _config.BOND_STOP_LOSS_HOURS:
+                    await self._execute_sell(pos, current_price, reason="STOP_LOSS")
             elif self._should_exit(pos, current_price, hours_left):
                 await self._execute_sell(pos, current_price)
             elif await self._check_confidence_exits(pos, market_data, current_price, hours_left):
@@ -403,6 +404,44 @@ class ExitManager:
         except Exception as exc:
             log.debug(f"exit_mgr: market data fetch failed for {market_id[:8]}: {exc}")
         return {}
+
+    def _hours_until_closure(self, pos: BondPosition) -> float:
+        """
+        Hours until market closure = gate_hour (hottest hour + 1) in city local time.
+        Uses forecast peak hour from price feed when available; falls back to P75 only.
+        Returns 0.0 if gate has already passed today, 999.0 if city/timezone unknown.
+        """
+        import zoneinfo
+        import bonding.weather_client as _wc
+        from bonding.peak_hour_stats import get_gate_hour
+
+        tz_name = _config.BOND_CITY_TIMEZONES.get(pos.city)
+        if not tz_name:
+            return 999.0
+        try:
+            tz = zoneinfo.ZoneInfo(tz_name)
+        except Exception:
+            return 999.0
+
+        now_local = datetime.now(tz)
+        stats = getattr(_wc, "_peak_hour_stats", {}) or {}
+
+        # Use forecast peak hour from feed if available (same as confidence exits)
+        forecast_peak_hour = None
+        if self._feed is not None:
+            try:
+                target_date = date.fromisoformat(pos.resolution_time[:10])
+                consensus = self._feed._forecasts.get((pos.city, target_date))
+                if consensus is not None and consensus.gfs is not None:
+                    forecast_peak_hour = consensus.gfs.forecast_peak_hour
+            except Exception:
+                pass
+
+        gate_hour = get_gate_hour(pos.city, forecast_peak_hour, now_local.month, stats)
+
+        # Fractional hours until gate_hour (whole-hour boundary) in local time
+        hours_until = gate_hour - now_local.hour - now_local.minute / 60
+        return max(0.0, hours_until)
 
     def _hours_to_resolution(self, market_data: dict) -> float:
         """Hours until end of the target calendar day (UTC midnight of day+1).
