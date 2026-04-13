@@ -1253,7 +1253,8 @@ async def create_app(state):
                         and p.get("resolution_time")
                         and _resolution_deadline(p.get("city", ""), p["resolution_time"]) < now
                     ):
-                        exit_price = 1.0 if outcome_map[mid] == "YES" else 0.0
+                        won = outcome_map[mid] == p.get("side", "YES")
+                        exit_price = 1.0 if won else 0.0
                         p["status"]     = "RESOLVED"
                         p["exit_price"] = exit_price
                         p["exit_time"]  = now.isoformat()
