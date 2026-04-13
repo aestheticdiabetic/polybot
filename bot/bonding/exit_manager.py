@@ -121,10 +121,13 @@ class ExitManager:
                 continue
 
             current_price = await self._get_current_price(pos.token_id)
-            if self._should_exit(pos, current_price, hours_left):
+            # Stop loss check runs before gas floor — recovering capital outweighs gas cost.
+            if 0 < current_price <= pos.entry_price * _config.BOND_STOP_LOSS_RATIO:
+                await self._execute_sell(pos, current_price, reason="STOP_LOSS")
+            elif self._should_exit(pos, current_price, hours_left):
                 await self._execute_sell(pos, current_price)
             elif await self._check_confidence_exits(pos, market_data, current_price, hours_left):
-                await self._execute_sell(pos, current_price)
+                await self._execute_sell(pos, current_price, reason="CONF_EXIT")
             else:
                 log.debug(
                     f"BOND_EXIT_SKIPPED market={pos.market_id[:8]} tier={pos.tier} "
@@ -300,7 +303,7 @@ class ExitManager:
 
     # ── Order placement ───────────────────────────────────────────
 
-    async def _execute_sell(self, pos: BondPosition, current_price: float) -> None:
+    async def _execute_sell(self, pos: BondPosition, current_price: float, reason: str = "PROFIT_EXIT") -> None:
         """Place a limit GTC sell order one tick below current price to ensure fill."""
         limit_price = max(round(current_price - 0.01, 2), 0.01)
         order_args  = OrderArgs(
@@ -318,7 +321,7 @@ class ExitManager:
             )
             pnl = (current_price - pos.entry_price) * pos.shares
             log.info(
-                f"BOND_EXIT_TRIGGERED market={pos.market_id[:8]} tier={pos.tier} "
+                f"BOND_EXIT_TRIGGERED [{reason}] market={pos.market_id[:8]} tier={pos.tier} "
                 f"current_price={current_price:.4f} limit={limit_price:.4f} "
                 f"pnl={pnl:+.2f}"
             )

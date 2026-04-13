@@ -225,6 +225,10 @@ class PaperExitManager:
         pos = self._positions.get(token_id)
         if pos is None or pos.status != "OPEN":
             return
+        # Stop loss: exit early to recover remaining capital regardless of gas floor.
+        if 0 < price <= pos.entry_price * _config.BOND_STOP_LOSS_RATIO:
+            self._record_sell(pos, price, reason="STOP_LOSS")
+            return
         hours = self._hours_left(pos)
         if self._should_exit(pos, price, hours):
             self._record_sell(pos, price)
@@ -287,7 +291,7 @@ class PaperExitManager:
             )
         return removed
 
-    def _record_sell(self, pos: PaperPosition, exit_price: float) -> None:
+    def _record_sell(self, pos: PaperPosition, exit_price: float, reason: str = "PROFIT_EXIT") -> None:
         pnl = (exit_price - pos.entry_price) * pos.shares
         pos.status = "SOLD"
         pos.exit_price = round(exit_price, 4)
@@ -308,6 +312,7 @@ class PaperExitManager:
             "entry_price": pos.entry_price,
             "exit_price":  pos.exit_price,
             "pnl":         pos.pnl,
+            "reason":      reason,
         }
         _append_record(record)
         self._save()
@@ -315,7 +320,7 @@ class PaperExitManager:
         if self._seen_ids is not None:
             self._seen_ids.discard(pos.market_id)
         log.info(
-            f"WOULD_SELL city={pos.city} side={pos.side} tier={pos.tier} "
+            f"WOULD_SELL [{reason}] city={pos.city} side={pos.side} tier={pos.tier} "
             f"entry={pos.entry_price:.4f} exit={exit_price:.4f} pnl={pnl:+.2f}"
         )
 

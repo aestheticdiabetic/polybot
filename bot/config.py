@@ -160,6 +160,7 @@ BOND_EARLY_EXIT_PRICE      = 0.97  # sell when price hits near-certainty (both t
 BOND_CHEAP_EXIT_MULTIPLIER = 8.0   # sell CHEAP if price >= cost × this
 BOND_CHEAP_MIN_ABS_GAIN    = 1.00  # AND absolute gain >= this value (USD)
 BOND_GAS_FLOOR_HOURS       = 4     # don't exit within N hours of resolution
+BOND_STOP_LOSS_RATIO       = 0.5   # exit if price falls to this fraction of entry (e.g. 0.5 = 50%)
 
 # Confidence-based early exit thresholds (same-day current-obs monitoring)
 BOND_CONF_CERTAIN_DROP:        float = 0.20  # CERTAIN: exit if prob drops ≥ this from entry
