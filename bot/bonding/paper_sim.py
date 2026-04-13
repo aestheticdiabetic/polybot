@@ -40,10 +40,16 @@ log = logging.getLogger("bond.paper")
 PAPER_LOG = Path(os.getenv("PAPER_LOG", "/app/logs/paper_trades.jsonl"))
 
 
-def _append_record(record: dict) -> None:
-    PAPER_LOG.parent.mkdir(parents=True, exist_ok=True)
-    with PAPER_LOG.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record) + "\n")
+def _append_record(record: dict) -> bool:
+    """Append a record to the JSONL log. Returns True on success, False on failure."""
+    try:
+        PAPER_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with PAPER_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+        return True
+    except Exception as exc:
+        log.error(f"paper_sim: failed to append record to JSONL ({exc}); record={record.get('event')} market={record.get('market_id', '')[:8]}")
+        return False
 
 
 def _load_seen_market_ids() -> tuple[set[str], set[str]]:
@@ -256,6 +262,30 @@ class PaperExitManager:
             ):
                 return True
         return False
+
+    def refresh_seen_ids(self) -> int:
+        """
+        Rebuild seen_ids to only contain market_ids of currently OPEN positions.
+
+        Stale entries — resolved markets, already-sold positions, or markets
+        that have simply left Polymarket — are cleared so the next scan cycle
+        can re-evaluate them. OPEN positions remain blocked (no double-entry).
+
+        Returns the number of market_ids removed.
+        """
+        if self._seen_ids is None:
+            return 0
+        open_market_ids = {p.market_id for p in self._positions.values() if p.status == "OPEN"}
+        before = len(self._seen_ids)
+        self._seen_ids.clear()
+        self._seen_ids.update(open_market_ids)
+        removed = before - len(self._seen_ids)
+        if removed:
+            log.info(
+                f"paper_exit: seen_ids refreshed — {removed} stale entries removed, "
+                f"{len(open_market_ids)} open position(s) retained"
+            )
+        return removed
 
     def _record_sell(self, pos: PaperPosition, exit_price: float) -> None:
         pnl = (exit_price - pos.entry_price) * pos.shares

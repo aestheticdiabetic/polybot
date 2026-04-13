@@ -365,6 +365,12 @@ async def run_paper_loop(state: StateManager) -> None:
                 forecasts = await get_consensus_forecasts(city_date_pairs)
                 feed.update_markets(markets, forecasts)
 
+            # Periodically prune seen_ids so non-open markets can be re-evaluated.
+            # Keeps OPEN positions blocked; clears resolved/sold/expired entries.
+            _SEEN_IDS_REFRESH_CYCLES = 60  # ~1 hour at 60s poll interval
+            if cycle % _SEEN_IDS_REFRESH_CYCLES == 0:
+                exit_mgr.refresh_seen_ids()
+
             # Fallback REST scoring pass: catches markets with no recent WS events
             from bonding.sure_thing_scorer import score_certain
             opps = (score_all(markets, forecasts) + score_certain(markets, forecasts))[:BOND_MAX_MARKETS_PER_RUN]
