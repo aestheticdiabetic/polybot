@@ -284,6 +284,22 @@ def _score_side(
         )
         return None
 
+    # Targeted NO bet restrictions (data-driven, 2026-04-14).
+    # CHEAP NO bets: 6.1% WR historically. CORE NO <15¢: 0% WR.
+    if outcome == "NO":
+        if tier == TIER_CHEAP and not _config.BOND_CHEAP_NO_ENABLED:
+            log.debug(
+                f"scorer: {market.city} {market.target_date} NO ask={ask:.3f} "
+                f"CHEAP NO bets disabled — skip"
+            )
+            return None
+        if tier == TIER_CORE and ask < _config.BOND_CORE_NO_MIN_ASK:
+            log.debug(
+                f"scorer: {market.city} {market.target_date} NO ask={ask:.3f} "
+                f"< BOND_CORE_NO_MIN_ASK={_config.BOND_CORE_NO_MIN_ASK:.2f} — skip"
+            )
+            return None
+
     min_edge = (
         _config.BOND_MIN_EDGE_CHEAP if tier == TIER_CHEAP else _config.BOND_MIN_EDGE_CORE
     )

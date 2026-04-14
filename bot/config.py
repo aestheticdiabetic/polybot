@@ -186,6 +186,13 @@ BOND_DISABLED_TIERS:          set = set()
 BOND_DISABLED_SIDES:          set = set()
 BOND_DISABLED_ENTRY_BUCKETS:  set = set()
 
+# ── Targeted NO bet restrictions ───────────────────────────────────────────────
+# Data analysis (2026-04-14) showed CHEAP NO bets have 6.1% WR (-$16.03 total).
+# CORE NO bets below 15¢ have 0% WR (-$22.63 total). CORE NO at 15-20¢ however
+# have 46.7% WR (+$41.94) and are worth keeping.
+BOND_CHEAP_NO_ENABLED:   bool  = False   # disable all CHEAP tier NO bets
+BOND_CORE_NO_MIN_ASK:    float = 0.15    # skip CORE NO bets priced below this ask
+
 # Market-implied confidence cap
 # When our model probability exceeds (ask × this ratio), the model is disagreeing
 # with the market by more than N-fold. Cap model prob to ask × ratio before
