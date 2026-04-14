@@ -563,13 +563,23 @@ async def create_app(state):
         records = []
         for r in raw_records:
             mid = r.get("market_id")
-            if mid and mid in sell_map and r.get("outcome") != "SOLD":
+            if mid and mid in sell_map:
                 sell = sell_map[mid]
-                # Only apply fallback if the WOULD_SELL is newer than this WOULD_BUY.
-                # A stale WOULD_SELL from a prior position on the same market must not
-                # override a later WOULD_BUY that resolved normally.
+                # Always prefer the WOULD_SELL record when it is newer than this WOULD_BUY.
+                # This covers two failure modes:
+                #   1. _patch_would_buy never ran (outcome still None) — classic fallback.
+                #   2. _patch_would_buy wrote incorrect pnl (e.g. shares mismatch after
+                #      re-entry, or check_resolutions overwrote the SOLD patch) — the
+                #      WOULD_SELL is always the authoritative record for early exits.
+                # Compute pnl from entry/exit prices directly rather than trusting the
+                # stored pnl field, which may contain the full redemption value on old
+                # records or a mismatched-shares calculation.
                 if sell.get("ts", "") > r.get("ts", ""):
-                    r = {**r, "outcome": "SOLD", "exit_price": sell.get("exit_price"), "pnl": sell.get("pnl")}
+                    ep = sell.get("entry_price", r.get("ask", 0))
+                    xp = sell.get("exit_price", 0)
+                    sh = sell.get("shares", r.get("shares", 0))
+                    computed_pnl = round((xp - ep) * sh, 4)
+                    r = {**r, "outcome": "SOLD", "exit_price": xp, "pnl": computed_pnl}
             records.append(r)
 
         if not records:
