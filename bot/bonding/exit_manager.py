@@ -19,8 +19,61 @@ from py_clob_client.clob_types import OrderArgs, OrderType
 
 log = logging.getLogger("bond.exit")
 
-GAMMA_API = "https://gamma-api.polymarket.com"
-CLOB_API  = "https://clob.polymarket.com"
+GAMMA_API      = "https://gamma-api.polymarket.com"
+CLOB_API       = "https://clob.polymarket.com"
+BOND_EVENT_LOG = Path(_config.BOND_EVENT_LOG_FILE)
+
+
+def _append_bond_record(record: dict) -> bool:
+    """Append a record to the live bond event JSONL log. Returns True on success."""
+    try:
+        BOND_EVENT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with BOND_EVENT_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+        return True
+    except Exception as exc:
+        log.error(
+            f"exit_mgr: failed to append event record ({exc}); "
+            f"event={record.get('event')} market={record.get('market_id', '')[:8]}"
+        )
+        return False
+
+
+def _patch_bond_buy(market_id: str, exit_price: float, pnl: float) -> None:
+    """
+    Rewrite the event JSONL so the original BOND_BUY entry for this market shows
+    the resolved outcome, exit_price, and pnl — keeping the log self-contained.
+    Only patches the most recent BOND_BUY with outcome=None (allows re-entry).
+    """
+    if not BOND_EVENT_LOG.exists():
+        return
+    try:
+        lines = BOND_EVENT_LOG.read_text(encoding="utf-8").splitlines()
+        patched = []
+        found = False
+        for line in reversed(lines):
+            if not found and line.strip():
+                try:
+                    rec = json.loads(line)
+                    if (
+                        rec.get("event") == "BOND_BUY"
+                        and rec.get("market_id") == market_id
+                        and rec.get("outcome") is None
+                    ):
+                        rec["outcome"]    = "SOLD"
+                        rec["exit_price"] = round(exit_price, 4)
+                        rec["pnl"]        = round(pnl, 4)
+                        line = json.dumps(rec)
+                        found = True
+                except Exception:
+                    pass
+            patched.append(line)
+        patched.reverse()
+        tmp = BOND_EVENT_LOG.with_suffix(".tmp")
+        tmp.write_text("\n".join(patched) + "\n", encoding="utf-8")
+        tmp.replace(BOND_EVENT_LOG)
+    except Exception as exc:
+        log.error(f"exit_mgr: failed to patch BOND_BUY record for {market_id[:8]}: {exc}")
 
 STATUS_OPEN     = "OPEN"
 STATUS_SOLD     = "SOLD"
@@ -81,9 +134,10 @@ class ExitManager:
     async def add_position(self, pos: BondPosition) -> None:
         """Called by main loop after a confirmed buy fill."""
         positions = self._load_positions()
-        # Avoid duplicates on restart
-        if any(p.market_id == pos.market_id for p in positions):
-            log.debug(f"exit_mgr: position {pos.market_id[:8]} already in ledger, skipping add")
+        # Only block re-entry if an OPEN position already exists for this market.
+        # SOLD/RESOLVED positions allow re-entry when a new profitable opportunity appears.
+        if any(p.market_id == pos.market_id for p in positions if p.status == STATUS_OPEN):
+            log.debug(f"exit_mgr: open position {pos.market_id[:8]} already in ledger, skipping add")
             return
         positions.append(pos)
         self._save_positions(positions)
@@ -92,6 +146,23 @@ class ExitManager:
             f"shares={pos.shares} entry={pos.entry_price:.4f} "
             f"market={pos.market_id[:8]}"
         )
+        _append_bond_record({
+            "ts":             pos.entry_time,
+            "event":          "BOND_BUY",
+            "market_id":      pos.market_id,
+            "question":       pos.question,
+            "city":           pos.city,
+            "date":           pos.resolution_time[:10],
+            "resolution_time": pos.resolution_time,
+            "tier":           pos.tier,
+            "shares":         pos.shares,
+            "side":           pos.outcome,
+            "ask":            pos.entry_price,
+            "prob":           round(pos.prob, 4),
+            "capital":        round(pos.shares * pos.entry_price, 4),
+            "outcome":        None,
+            "pnl":            None,
+        })
 
     # ── Core exit check ───────────────────────────────────────────
 
@@ -117,6 +188,23 @@ class ExitManager:
                     f"tier={pos.tier} entry={pos.entry_price:.4f} "
                     f"exit={exit_price:.4f} pnl={pnl:+.2f}"
                 )
+                now_ts = datetime.now(timezone.utc).isoformat()
+                _append_bond_record({
+                    "ts":          now_ts,
+                    "event":       "BOND_RESOLVED",
+                    "market_id":   pos.market_id,
+                    "question":    pos.question,
+                    "city":        pos.city,
+                    "date":        pos.resolution_time[:10],
+                    "tier":        pos.tier,
+                    "shares":      pos.shares,
+                    "side":        pos.outcome,
+                    "entry_price": pos.entry_price,
+                    "exit_price":  round(exit_price, 4),
+                    "pnl":         round(pnl, 4),
+                    "reason":      "RESOLVED",
+                })
+                _patch_bond_buy(pos.market_id, exit_price, pnl)
                 self._mark_resolved(pos.market_id, exit_price)
                 continue
 
@@ -326,6 +414,23 @@ class ExitManager:
                 f"current_price={current_price:.4f} limit={limit_price:.4f} "
                 f"pnl={pnl:+.2f}"
             )
+            now_ts = datetime.now(timezone.utc).isoformat()
+            _append_bond_record({
+                "ts":          now_ts,
+                "event":       "BOND_SELL",
+                "market_id":   pos.market_id,
+                "question":    pos.question,
+                "city":        pos.city,
+                "date":        pos.resolution_time[:10],
+                "tier":        pos.tier,
+                "shares":      pos.shares,
+                "side":        pos.outcome,
+                "entry_price": pos.entry_price,
+                "exit_price":  round(limit_price, 4),
+                "pnl":         round(pnl, 4),
+                "reason":      reason,
+            })
+            _patch_bond_buy(pos.market_id, limit_price, pnl)
             self._mark_sold(pos.market_id, limit_price)
         except Exception as exc:
             log.error(

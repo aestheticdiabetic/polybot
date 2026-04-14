@@ -140,8 +140,9 @@ SIM = SimConfig()
 # ─── Bonding mode ─────────────────────────────────────────────────
 BOT_MODE = os.getenv("BOT_MODE", "ARBI")   # "ARBI" | "BOND"
 
-BOND_LOG_FILE    = os.getenv("BOND_LOG_FILE",    "/app/logs/polybot_bond.log")
-BOND_LEDGER_FILE = os.getenv("BOND_LEDGER_FILE", "/app/logs/bonding_positions.json")
+BOND_LOG_FILE       = os.getenv("BOND_LOG_FILE",       "/app/logs/polybot_bond.log")
+BOND_LEDGER_FILE    = os.getenv("BOND_LEDGER_FILE",    "/app/logs/bonding_positions.json")
+BOND_EVENT_LOG_FILE = os.getenv("BOND_EVENT_LOG_FILE", "/app/logs/bond_events.jsonl")
 
 # Entry thresholds
 BOND_MIN_EDGE_CHEAP    = 0.03   # min edge (prob - ask) for CHEAP tier (2-8¢ tokens)

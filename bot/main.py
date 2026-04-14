@@ -345,6 +345,7 @@ async def run_paper_loop(state: StateManager) -> None:
 
     feed = BondPriceFeed(on_opportunity=_on_ws_opportunity, on_price_tick=_on_price_tick)
     feed.update_markets(markets, forecasts)  # pre-populate; WS not connected yet so no resubscribe
+    exit_mgr.set_price_feed(feed)            # wire feed so confidence exits can read live forecasts
     feed_task = asyncio.get_running_loop().create_task(feed.run())  # now connects subscribed
 
     state.set_running(True)
