@@ -17,16 +17,15 @@ import json
 import logging
 import os
 import sys
-import time
 from dataclasses import dataclass, asdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 from bonding.market_scanner import scan_weather_markets
 from bonding.opportunity_scorer import score_all, ScoredOpportunity, TIER_CHEAP, TIER_CORE
-from bonding.weather_client import get_consensus_forecasts, fahrenheit_to_celsius
+from bonding.weather_client import get_consensus_forecasts
 import config as _config
 from config import LOG_LEVEL
 
@@ -112,8 +111,6 @@ class PaperPosition:
     exit_ts: Optional[str] = None
     pnl: Optional[float] = None
     prob: float = 0.0                    # P(this token resolves $1) at entry time
-    temp_min_c: Optional[float] = None  # lower bound of temperature bucket (°C)
-    temp_max_c: Optional[float] = None  # upper bound of temperature bucket (°C)
 
 
 class PaperExitManager:
@@ -137,13 +134,7 @@ class PaperExitManager:
         self._positions: dict[str, PaperPosition] = {}  # token_id → position (all statuses)
         self._seen_ids = seen_ids  # shared reference; cleared on sell to allow re-entry
         self._sold_market_ids = sold_market_ids or set()
-        self._feed = None  # set via set_price_feed() after feed construction
-        self._last_conf_check: dict[str, float] = {}  # token_id → monotonic time of last check
         self._load()
-
-    def set_price_feed(self, feed) -> None:
-        """Wire the price feed so confidence exits can read live forecasts."""
-        self._feed = feed
 
     def _load(self) -> None:
         if not self._ledger.exists():
@@ -210,14 +201,6 @@ class PaperExitManager:
         existing = self._positions.get(opp.token_id)
         if existing is not None and existing.status == "OPEN":
             return  # already tracking an open position for this token
-        # Convert temperature bounds to Celsius for confidence exit checks.
-        temp_min_c = opp.market.temp_min
-        temp_max_c = opp.market.temp_max
-        if opp.market.unit == "F":
-            if temp_min_c is not None:
-                temp_min_c = fahrenheit_to_celsius(temp_min_c)
-            if temp_max_c is not None:
-                temp_max_c = fahrenheit_to_celsius(temp_max_c)
         pos = PaperPosition(
             market_id=opp.market.market_id,
             token_id=opp.token_id,
@@ -231,8 +214,6 @@ class PaperExitManager:
             entry_price=opp.side_ask,
             entry_ts=datetime.now(timezone.utc).isoformat(),
             prob=round(opp.prob, 4),
-            temp_min_c=temp_min_c,
-            temp_max_c=temp_max_c,
         )
         self._positions[pos.token_id] = pos
         self._save()
@@ -241,28 +222,14 @@ class PaperExitManager:
             f"entry={pos.entry_price:.4f} shares={pos.shares}"
         )
 
-    _CONF_CHECK_INTERVAL = 60  # seconds between confidence checks per position
-
     async def on_price_tick(self, token_id: str, price: float) -> None:
         """Called by BondPriceFeed on every WS price event for a tracked token."""
         pos = self._positions.get(token_id)
         if pos is None or pos.status != "OPEN":
             return
-        # Stop loss: only within BOND_STOP_LOSS_HOURS of market closure (gate hour).
-        if 0 < price <= pos.entry_price * _config.BOND_STOP_LOSS_RATIO:
-            if self._hours_until_closure(pos) <= _config.BOND_STOP_LOSS_HOURS:
-                self._record_sell(pos, price, reason="STOP_LOSS")
-                return
         hours = self._hours_left(pos)
         if self._should_exit(pos, price, hours):
             self._record_sell(pos, price)
-            return
-        # Confidence exits: throttled to once per 60s per position (avoids HTTP call spam).
-        now = time.monotonic()
-        if now - self._last_conf_check.get(token_id, 0.0) >= self._CONF_CHECK_INTERVAL:
-            self._last_conf_check[token_id] = now
-            if await self._check_confidence_exits(pos, price, hours):
-                self._record_sell(pos, price, reason="CONF_EXIT")
 
     def _hours_left(self, pos: PaperPosition) -> float:
         # resolution_time stores Gamma's end_date_iso — midnight start-of-day UTC, not
@@ -276,37 +243,13 @@ class PaperExitManager:
         except Exception:
             return 999.0
 
-    def _hours_until_closure(self, pos: PaperPosition) -> float:
-        """
-        Hours until market closure = gate_hour (P75 hottest hour + 1) in city local time.
-        Returns 0.0 if gate has already passed today, 999.0 if city/timezone unknown.
-        """
-        import bonding.weather_client as _wc
-        from bonding.peak_hour_stats import get_gate_hour
-
-        tz_name = _config.BOND_CITY_TIMEZONES.get(pos.city)
-        if not tz_name:
-            return 999.0
-        try:
-            tz = ZoneInfo(tz_name)
-        except Exception:
-            return 999.0
-
-        now_local = datetime.now(tz)
-        stats = getattr(_wc, "_peak_hour_stats", {}) or {}
-        gate_hour = get_gate_hour(pos.city, None, now_local.month, stats)
-
-        # Fractional hours until gate_hour (whole-hour boundary) in local time
-        hours_until = gate_hour - now_local.hour - now_local.minute / 60
-        return max(0.0, hours_until)
-
     def _should_exit(self, pos: PaperPosition, price: float, hours: float) -> bool:
         if price <= 0.0:
             return False
         # Rule 1: too close to resolution — gas not worth it (same discipline as live)
         if hours < _config.BOND_GAS_FLOOR_HOURS:
             return False
-        # Rule 2: CORE near-certainty exit
+        # Rule 2: CORE near-certainty exit (CERTAIN held to resolution)
         if pos.tier == TIER_CORE and price >= _config.BOND_EARLY_EXIT_PRICE:
             return True
         # Rule 3: 10× on any tier
@@ -320,117 +263,6 @@ class PaperExitManager:
                 and gain >= _config.BOND_CHEAP_MIN_ABS_GAIN
             ):
                 return True
-        return False
-
-    async def _check_confidence_exits(
-        self, pos: PaperPosition, current_price: float, hours: float
-    ) -> bool:
-        """
-        Mirror of ExitManager._check_confidence_exits for paper trade parity.
-        Uses real-time Open-Meteo observations — same gates as live mode.
-        Only fires for same-day markets within the monitoring window (10:00–gate_hour local).
-        """
-        import bonding.weather_client as _wc
-        from bonding.peak_hour_stats import get_gate_hour
-
-        # Gate 0: prerequisites
-        if self._feed is None:
-            return False
-        if pos.temp_min_c is None or pos.temp_max_c is None:
-            return False
-
-        # Gate 1: gas floor
-        if hours < _config.BOND_GAS_FLOOR_HOURS:
-            return False
-
-        # Gate 2: same-day only
-        tz_name = _config.BOND_CITY_TIMEZONES.get(pos.city)
-        if not tz_name:
-            return False
-        try:
-            tz = ZoneInfo(tz_name)
-        except Exception:
-            return False
-
-        now_local   = datetime.now(tz)
-        target_date = date.fromisoformat(pos.resolution_time[:10])
-        if target_date != now_local.date():
-            return False
-
-        # Gate 3: monitoring window [BOND_CONF_MONITORING_START_HOUR, gate_hour)
-        local_hour = now_local.hour
-        if local_hour < _config.BOND_CONF_MONITORING_START_HOUR:
-            return False
-
-        consensus = self._feed._forecasts.get((pos.city, target_date))
-        if consensus is None:
-            return False
-
-        gate_hour = get_gate_hour(
-            pos.city,
-            consensus.gfs.forecast_peak_hour,
-            now_local.month,
-            _wc._peak_hour_stats,
-        )
-        if local_hour >= gate_hour:
-            return False
-
-        # Gate 4: minimum proceeds
-        if current_price * pos.shares < _config.BOND_CONF_EXIT_MIN_PROCEEDS:
-            return False
-
-        # Fetch real-time observation
-        coords = _config.BOND_CITIES.get(pos.city)
-        if not coords:
-            return False
-        lat, lon = coords
-
-        current_temp = await _wc.get_current_observation(pos.city, lat, lon)
-        if current_temp is None:
-            return False
-
-        current_prob = _wc.prob_with_current_obs(
-            consensus.gfs, current_temp, pos.temp_min_c, pos.temp_max_c
-        )
-        prob_drop = pos.prob - current_prob
-
-        log.debug(
-            f"PAPER_CONF_CHECK market={pos.market_id[:8]} city={pos.city} "
-            f"tier={pos.tier} entry_prob={pos.prob:.3f} current_prob={current_prob:.3f} "
-            f"drop={prob_drop:.3f} obs_temp={current_temp:.1f}°C"
-        )
-
-        # Gate 5a: profit-lock (any tier)
-        if (
-            current_price >= pos.entry_price * _config.BOND_CONF_PROFIT_MULT
-            and prob_drop >= _config.BOND_CONF_PROFIT_DROP
-        ):
-            log.info(
-                f"PAPER_CONF_PROFITLOCK market={pos.market_id[:8]} city={pos.city} "
-                f"tier={pos.tier} entry={pos.entry_price:.4f} current={current_price:.4f} "
-                f"prob_drop={prob_drop:.3f} obs_temp={current_temp:.1f}°C"
-            )
-            return True
-
-        # Gate 5b: confidence drop (CERTAIN/CORE only — CHEAP held without confidence exit)
-        if pos.tier == "CERTAIN":
-            threshold = _config.BOND_CONF_CERTAIN_DROP
-            abs_floor  = _config.BOND_CONF_CERTAIN_ABS
-        elif pos.tier == TIER_CORE:
-            threshold = _config.BOND_CONF_CORE_DROP
-            abs_floor  = _config.BOND_CONF_CORE_ABS
-        else:
-            return False
-
-        if prob_drop >= threshold and current_prob < abs_floor:
-            log.info(
-                f"PAPER_CONF_EXIT market={pos.market_id[:8]} city={pos.city} "
-                f"tier={pos.tier} entry_prob={pos.prob:.3f} current_prob={current_prob:.3f} "
-                f"drop={prob_drop:.3f} threshold={threshold:.2f} "
-                f"abs_floor={abs_floor:.2f} obs_temp={current_temp:.1f}°C"
-            )
-            return True
-
         return False
 
     def refresh_seen_ids(self) -> int:
