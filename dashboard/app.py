@@ -529,11 +529,13 @@ async def create_app(state):
             corrected = _end_of_day_utc(rec.get("city", ""), rec.get("date", ""))
             if corrected:
                 rec = {**rec, "resolution_time": corrected}
-            # For YES/NO resolved records, use resolution_time as activity_ts (past date).
+            # For YES/NO resolved records, prefer resolved_ts (when check_resolutions detected
+            # the outcome) so freshly-resolved bets sort to the top on "recent activity".
+            # Fall back to resolution_time for older records that predate this field.
             # For pending records, use entry ts — resolution_time is future so must not be used.
             if not rec.get("activity_ts"):
                 if rec.get("outcome"):
-                    rec = {**rec, "activity_ts": rec.get("resolution_time") or rec.get("ts")}
+                    rec = {**rec, "activity_ts": rec.get("resolved_ts") or rec.get("resolution_time") or rec.get("ts")}
                 else:
                     rec = {**rec, "activity_ts": rec.get("ts")}
             result.append(rec)
@@ -1226,6 +1228,7 @@ async def create_app(state):
             if mid in outcome_map and r.get("outcome") is None and r.get("event") == "WOULD_BUY":
                 r = dict(r)
                 r["outcome"] = outcome_map[mid]
+                r["resolved_ts"] = now.isoformat()  # when this resolution was detected
                 shares     = r.get("shares", 0)
                 ask        = r.get("ask", 0)
                 side       = r.get("side") or "YES"  # pre-NO-bet records had no side field
