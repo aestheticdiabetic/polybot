@@ -246,7 +246,14 @@ class PaperExitManager:
             await asyncio.sleep(60)
 
     async def _poll_exits(self, clob_api: str) -> None:
-        """Fetch current ask prices for all open positions and apply exit rules."""
+        """Fetch current bid prices for all open positions and apply exit rules.
+
+        Uses bids[0]["price"] (best bid = highest price a buyer will pay) as the
+        reference price, which is what you'd actually receive selling immediately.
+        This prevents false exits from thin-liquidity asks: on an unresolved market
+        where cheap asks were exhausted, asks[0] can show 0.99 while bids remain
+        low, correctly blocking a premature profit exit.
+        """
         import aiohttp
         open_positions = [p for p in self._positions.values() if p.status == "OPEN"]
         if not open_positions:
@@ -260,10 +267,17 @@ class PaperExitManager:
                     ) as resp:
                         resp.raise_for_status()
                         data = await resp.json()
+                        bids = data.get("bids", [])
                         asks = data.get("asks", [])
-                        if asks:
+                        # Prefer best bid; fall back to best ask only when no bids exist
+                        # (e.g. fully-resolved market where all buyers have been filled).
+                        if bids:
+                            price = float(bids[0]["price"])
+                        elif asks:
                             price = float(asks[0]["price"])
-                            await self.on_price_tick(pos.token_id, price)
+                        else:
+                            continue
+                        await self.on_price_tick(pos.token_id, price)
             except Exception as exc:
                 log.debug(f"paper_exit: price poll failed for {pos.token_id[:12]}: {exc}")
 
@@ -275,6 +289,13 @@ class PaperExitManager:
         hours = self._hours_left(pos)
         if self._should_exit(pos, price, hours):
             self._record_sell(pos, price)
+
+    def _has_resolved(self, pos: PaperPosition) -> bool:
+        """Return True if the market's resolution_time has passed."""
+        try:
+            return datetime.now(timezone.utc) >= datetime.fromisoformat(pos.resolution_time)
+        except Exception:
+            return False
 
     def _hours_left(self, pos: PaperPosition) -> float:
         # resolution_time stores Gamma's end_date_iso — midnight start-of-day UTC, not
@@ -294,9 +315,12 @@ class PaperExitManager:
         # Rule 1: too close to resolution — gas not worth it (same discipline as live)
         if hours < _config.BOND_GAS_FLOOR_HOURS:
             return False
-        # Rule 2: CORE near-certainty exit (CERTAIN held to resolution)
+        # Rule 2: CORE near-certainty exit — requires resolution to have passed.
+        # Guards against false positives: when cheap asks are exhausted by bulk
+        # buying, asks[0] can show 0.99 on an unresolved market. We now use
+        # bids[0] as the price source, but this check is a second line of defence.
         if pos.tier == TIER_CORE and price >= _config.BOND_EARLY_EXIT_PRICE:
-            return True
+            return self._has_resolved(pos)
         # Rule 3: 10× on any tier
         if price >= pos.entry_price * 10:
             return True
