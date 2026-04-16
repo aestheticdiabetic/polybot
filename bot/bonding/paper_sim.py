@@ -222,6 +222,51 @@ class PaperExitManager:
             f"entry={pos.entry_price:.4f} shares={pos.shares}"
         )
 
+    @property
+    def seen_ids(self) -> set[str] | None:
+        """Shared reference to the seen market IDs set (mutated in-place by callers)."""
+        return self._seen_ids
+
+    async def run(self) -> None:
+        """Persistent polling task — checks exits every 60s via HTTP price fetches.
+
+        Runs independently of the WS price feed so exit criteria are evaluated
+        even when the main scan loop is stopped.
+        """
+        CLOB_API = "https://clob.polymarket.com"
+        log.info("PaperExitManager polling started")
+        while True:
+            try:
+                await self._poll_exits(CLOB_API)
+            except asyncio.CancelledError:
+                log.info("PaperExitManager polling stopped")
+                return
+            except Exception as exc:
+                log.error(f"paper_exit: polling error: {exc}", exc_info=True)
+            await asyncio.sleep(60)
+
+    async def _poll_exits(self, clob_api: str) -> None:
+        """Fetch current ask prices for all open positions and apply exit rules."""
+        import aiohttp
+        open_positions = [p for p in self._positions.values() if p.status == "OPEN"]
+        if not open_positions:
+            return
+        timeout = aiohttp.ClientTimeout(total=5)
+        for pos in open_positions:
+            try:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(
+                        f"{clob_api}/book", params={"token_id": pos.token_id}
+                    ) as resp:
+                        resp.raise_for_status()
+                        data = await resp.json()
+                        asks = data.get("asks", [])
+                        if asks:
+                            price = float(asks[0]["price"])
+                            await self.on_price_tick(pos.token_id, price)
+            except Exception as exc:
+                log.debug(f"paper_exit: price poll failed for {pos.token_id[:12]}: {exc}")
+
     async def on_price_tick(self, token_id: str, price: float) -> None:
         """Called by BondPriceFeed on every WS price event for a tracked token."""
         pos = self._positions.get(token_id)

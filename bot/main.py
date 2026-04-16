@@ -38,7 +38,7 @@ logging.basicConfig(
 log = logging.getLogger("main")
 
 
-async def run_bonding_loop(state: StateManager) -> None:
+async def run_bonding_loop(state: StateManager, exit_mgr, order_tracker, bond_client) -> None:
     """BOND mode main loop — weather market bonding strategy.
 
     Architecture:
@@ -48,41 +48,17 @@ async def run_bonding_loop(state: StateManager) -> None:
       market token IDs and scores opportunities on every price tick — no polling delay.
     - REST scan also does a scoring pass as a fallback for markets with no recent WS events.
     - Per-token cooldown (5 min) prevents duplicate orders from both paths firing at once.
+    - exit_mgr and order_tracker are owned by main() and run continuously — they keep
+      checking open positions even when this scan loop is stopped.
     """
-    from py_clob_client.client import ClobClient
-    from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
+    from py_clob_client.clob_types import OrderArgs, OrderType
     from bonding.weather_client import get_consensus_forecasts
     from bonding.market_scanner import scan_weather_markets
     from bonding.opportunity_scorer import score_all
-    from bonding.exit_manager import ExitManager, BondPosition
     from bonding.price_feed import BondPriceFeed
     from config import (
-        CLOB_HOST, CHAIN_ID, PRIVATE_KEY, FUNDER_ADDRESS,
-        API_KEY, API_SECRET, API_PASSPHRASE,
         BOND_POLL_INTERVAL_SECS, BOND_MAX_MARKETS_PER_RUN,
     )
-
-    # Dedicated CLOB client for bonding mode (same credentials, isolated instance)
-    creds = ApiCreds(
-        api_key=API_KEY,
-        api_secret=API_SECRET,
-        api_passphrase=API_PASSPHRASE,
-    )
-    bond_client = ClobClient(
-        host=CLOB_HOST,
-        chain_id=CHAIN_ID,
-        key=PRIVATE_KEY,
-        creds=creds,
-        signature_type=2,
-        funder=FUNDER_ADDRESS,
-    )
-
-    from bonding.order_tracker import PendingOrderTracker
-
-    exit_mgr      = ExitManager(bond_client)
-    order_tracker = PendingOrderTracker(bond_client, exit_mgr)
-    asyncio.get_running_loop().create_task(exit_mgr.run())
-    asyncio.get_running_loop().create_task(order_tracker.run())
 
     # WS price feed — fires on_opportunity whenever a price tick creates an edge
     async def _on_ws_opportunity(opp):
@@ -294,7 +270,7 @@ async def _place_bond_order(client, exit_mgr, order_tracker, opp, OrderArgs, Ord
             )
 
 
-async def run_paper_loop(state: StateManager) -> None:
+async def run_paper_loop(state: StateManager, exit_mgr) -> None:
     """PAPER mode — mirrors live bonding loop with WS prices, but logs instead of placing orders.
 
     Architecture matches run_bonding_loop exactly:
@@ -305,20 +281,19 @@ async def run_paper_loop(state: StateManager) -> None:
     - Per-market deduplication via seen_ids (loaded from JSONL at startup) prevents
       logging the same market opportunity more than once across restarts.
     - REST fallback pass catches markets with no recent WS events.
+    - exit_mgr is owned by main() and runs a persistent polling loop — it keeps
+      checking open positions via HTTP even when this scan loop is stopped.
     """
     from bonding.weather_client import get_consensus_forecasts
     from bonding.market_scanner import scan_weather_markets
     from bonding.opportunity_scorer import score_all
     from bonding.price_feed import BondPriceFeed
-    from bonding.paper_sim import log_opportunity, _load_seen_market_ids, PaperExitManager, PAPER_LOG
+    from bonding.paper_sim import log_opportunity
     from config import BOND_POLL_INTERVAL_SECS, BOND_MAX_MARKETS_PER_RUN
 
-    # Load already-logged market IDs so we never double-log across restarts.
-    # sold_ids tracks markets the bot exited early — eligible for re-entry.
-    seen_ids, sold_ids = _load_seen_market_ids()
-    log.info(f"PAPER mode: loaded {len(seen_ids)} previously logged market IDs")
-
-    exit_mgr = PaperExitManager(PAPER_LOG, seen_ids=seen_ids, sold_market_ids=sold_ids)
+    # seen_ids is the shared set owned by exit_mgr — mutations here are reflected there.
+    seen_ids = exit_mgr.seen_ids
+    log.info(f"PAPER mode: {len(seen_ids) if seen_ids is not None else 0} previously logged market IDs")
 
     async def _on_ws_opportunity(opp):
         if not exit_mgr.has_open_position(opp.token_id):
@@ -353,6 +328,7 @@ async def run_paper_loop(state: StateManager) -> None:
     )
 
     cycle = 0
+    _seen_ids_last_refresh_date: str | None = None
     while state.is_running():
         cycle += 1
         cycle_start = time.time()
@@ -364,11 +340,12 @@ async def run_paper_loop(state: StateManager) -> None:
                 forecasts = await get_consensus_forecasts(city_date_pairs)
                 feed.update_markets(markets, forecasts)
 
-            # Periodically prune seen_ids so non-open markets can be re-evaluated.
+            # Prune seen_ids once per UTC day so non-open markets can be re-evaluated.
             # Keeps OPEN positions blocked; clears resolved/sold/expired entries.
-            _SEEN_IDS_REFRESH_CYCLES = 60  # ~1 hour at 60s poll interval
-            if cycle % _SEEN_IDS_REFRESH_CYCLES == 0:
+            _today = time.strftime("%Y-%m-%d", time.gmtime())
+            if _today != _seen_ids_last_refresh_date:
                 exit_mgr.refresh_seen_ids()
+                _seen_ids_last_refresh_date = _today
 
             # Fallback REST scoring pass: catches markets with no recent WS events
             from bonding.sure_thing_scorer import score_certain
@@ -473,15 +450,53 @@ async def main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, handle_stop)
 
-    # Select loop based on BOT_MODE
-    if BOT_MODE == "BOND":
-        _bot_runner = run_bonding_loop
-    elif BOT_MODE == "PAPER":
-        _bot_runner = run_paper_loop
-    else:
-        _bot_runner = run_bot
+    # Select loop based on BOT_MODE and set up persistent exit infrastructure.
+    # Exit managers run as long-lived tasks independent of the scan loop so that
+    # open positions continue to be monitored even when scanning is stopped.
     _mode_name = {"BOND": "bonding", "PAPER": "paper sim"}.get(BOT_MODE, "arbitrage")
     log.info(f"BOT_MODE={BOT_MODE} — using {_mode_name} loop")
+
+    if BOT_MODE == "BOND":
+        from py_clob_client.client import ClobClient
+        from py_clob_client.clob_types import ApiCreds
+        from bonding.exit_manager import ExitManager
+        from bonding.order_tracker import PendingOrderTracker
+        from config import (
+            CLOB_HOST, CHAIN_ID, PRIVATE_KEY, FUNDER_ADDRESS,
+            API_KEY, API_SECRET, API_PASSPHRASE,
+        )
+        _bond_creds = ApiCreds(
+            api_key=API_KEY,
+            api_secret=API_SECRET,
+            api_passphrase=API_PASSPHRASE,
+        )
+        _bond_client = ClobClient(
+            host=CLOB_HOST,
+            chain_id=CHAIN_ID,
+            key=PRIVATE_KEY,
+            creds=_bond_creds,
+            signature_type=2,
+            funder=FUNDER_ADDRESS,
+        )
+        _exit_mgr     = ExitManager(_bond_client)
+        _order_tracker = PendingOrderTracker(_bond_client, _exit_mgr)
+        loop.create_task(_exit_mgr.run())
+        loop.create_task(_order_tracker.run())
+        log.info("BOND: exit manager and order tracker started (persistent — survive scan stop/start)")
+
+        _bot_runner = lambda s: run_bonding_loop(s, _exit_mgr, _order_tracker, _bond_client)
+
+    elif BOT_MODE == "PAPER":
+        from bonding.paper_sim import PaperExitManager, _load_seen_market_ids, PAPER_LOG
+        _seen_ids, _sold_ids = _load_seen_market_ids()
+        _exit_mgr = PaperExitManager(PAPER_LOG, seen_ids=_seen_ids, sold_market_ids=_sold_ids)
+        loop.create_task(_exit_mgr.run())
+        log.info("PAPER: exit manager polling started (persistent — survives scan stop/start)")
+
+        _bot_runner = lambda s: run_paper_loop(s, _exit_mgr)
+
+    else:
+        _bot_runner = run_bot
 
     # Start bot if AUTO_START env var is set
     if os.getenv("AUTO_START", "false").lower() == "true":
