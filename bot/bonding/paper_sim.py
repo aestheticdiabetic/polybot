@@ -315,13 +315,13 @@ class PaperExitManager:
         # Rule 1: too close to resolution — gas not worth it (same discipline as live)
         if hours < _config.BOND_GAS_FLOOR_HOURS:
             return False
-        # Rule 2: CORE near-certainty exit — requires resolution to have passed.
-        # Guards against false positives: when cheap asks are exhausted by bulk
-        # buying, asks[0] can show 0.99 on an unresolved market. We now use
-        # bids[0] as the price source, but this check is a second line of defence.
-        if pos.tier == TIER_CORE and price >= _config.BOND_EARLY_EXIT_PRICE:
+        # Universal near-certainty guard (all tiers): if the price is at or above
+        # the exit threshold, only exit once the market has actually resolved.
+        # This blocks Rules 2, 3, and 4 from triggering on inflated bid prices
+        # caused by liquidity exhaustion — the root cause of all fake profit exits.
+        if price >= _config.BOND_EARLY_EXIT_PRICE:
             return self._has_resolved(pos)
-        # Rule 3: 10× on any tier
+        # Rule 3: 10× on any tier (price < BOND_EARLY_EXIT_PRICE here)
         if price >= pos.entry_price * 10:
             return True
         # Rule 4: CHEAP multiplier + absolute gain threshold
