@@ -239,6 +239,45 @@ def _convert_temps(market: MarketCandidate) -> tuple[Optional[float], Optional[f
     return temp_min, temp_max
 
 
+def _passes_source_quality(
+    forecast: SourceConsensus,
+    tier: str,
+    city: str,
+    target_date,
+) -> bool:
+    """
+    Reject bets where forecast sources disagree too much or too few sources are present.
+    CHEAP requires ≥2 met sources and ≤4°C spread; CORE requires ≥2 and ≤3°C spread.
+    """
+    if tier == TIER_CHEAP:
+        min_sources = _config.BOND_CHEAP_MIN_SOURCES
+        max_spread  = _config.BOND_CHEAP_MAX_SOURCE_SPREAD_C
+    elif tier == TIER_CORE:
+        min_sources = _config.BOND_CORE_MIN_SOURCES
+        max_spread  = _config.BOND_CORE_MAX_SOURCE_SPREAD_C
+    else:
+        return True  # CERTAIN tier has its own gates
+
+    if forecast.available_sources() < min_sources:
+        log.debug(
+            f"scorer: {city} {target_date} {tier} only "
+            f"{forecast.available_sources()} source(s) < {min_sources} required — skip"
+        )
+        return False
+
+    points = forecast.point_forecasts()
+    if len(points) >= 2:
+        spread = max(points) - min(points)
+        if spread > max_spread:
+            log.debug(
+                f"scorer: {city} {target_date} {tier} source spread "
+                f"{spread:.1f}°C > {max_spread}°C max — skip"
+            )
+            return False
+
+    return True
+
+
 def _score_side(
     market: MarketCandidate,
     forecast: SourceConsensus,
@@ -275,6 +314,9 @@ def _score_side(
 
     tier = assign_tier(ask, edge)
     if tier is None:
+        return None
+
+    if not _passes_source_quality(forecast, tier, market.city, market.target_date):
         return None
 
     if tier in _config.BOND_DISABLED_TIERS:

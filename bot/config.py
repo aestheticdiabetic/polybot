@@ -145,8 +145,15 @@ BOND_LEDGER_FILE    = os.getenv("BOND_LEDGER_FILE",    "/app/logs/bonding_positi
 BOND_EVENT_LOG_FILE = os.getenv("BOND_EVENT_LOG_FILE", "/app/logs/bond_events.jsonl")
 
 # Entry thresholds
-BOND_MIN_EDGE_CHEAP    = 0.03   # min edge (prob - ask) for CHEAP tier (2-8¢ tokens)
-BOND_MIN_EDGE_CORE     = 0.10   # min edge (prob - ask) for CORE tier (8-30¢ tokens)
+BOND_MIN_EDGE_CHEAP    = 0.07   # min edge (prob - ask) for CHEAP tier (2-8¢ tokens)
+BOND_MIN_EDGE_CORE     = 0.15   # min edge (prob - ask) for CORE tier (8-30¢ tokens)
+
+# Source quality gates — require multi-source agreement before entry.
+# Filters out bets where forecasts are uncertain or sources disagree.
+BOND_CHEAP_MIN_SOURCES:      int   = 2    # met sources needed (GFS, ECMWF, TIO)
+BOND_CHEAP_MAX_SOURCE_SPREAD_C: float = 4.0  # max °C between source point forecasts
+BOND_CORE_MIN_SOURCES:       int   = 2    # met sources needed for CORE tier
+BOND_CORE_MAX_SOURCE_SPREAD_C:  float = 3.0  # tighter spread for higher-stake CORE bets
 
 # Position sizing
 # CHEAP: adaptive shares = ceil(1.00 / ask), capped at BOND_SHARES_CHEAP_MAX
