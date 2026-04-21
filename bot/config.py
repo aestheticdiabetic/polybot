@@ -208,7 +208,7 @@ BOND_CORE_NO_MIN_ASK:    float = 0.15    # skip CORE NO bets priced below this a
 # with the market by more than N-fold. Cap model prob to ask × ratio before
 # computing EV. Markets pricing a side at 0.001 are near-certain; a 5x cap
 # means we will never claim more than 0.5% probability for that side.
-BOND_MARKET_DISAGREEMENT_RATIO = 1.5
+BOND_MARKET_DISAGREEMENT_RATIO = 2.5
 
 # ─── Cross-source weather ─────────────────────────────────────────────────────
 TOMORROW_IO_API_KEY           = os.getenv("TOMORROW_IO_API_KEY", "")
