@@ -305,10 +305,12 @@ class ExitManager:
                     bids = data.get("bids", [])
                     if not bids:
                         return 0.0, 0.0
-                    best_bid = float(bids[0]["price"])
+                    # Sort descending so bids[0] is always highest (best) bid.
+                    bids_sorted = sorted(bids, key=lambda b: float(b["price"]), reverse=True)
+                    best_bid = float(bids_sorted[0]["price"])
                     fillable = sum(
                         float(b.get("size", 0))
-                        for b in bids
+                        for b in bids_sorted
                         if float(b["price"]) >= stop_price
                     )
                     return best_bid, fillable

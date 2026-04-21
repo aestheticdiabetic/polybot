@@ -383,10 +383,12 @@ class PaperExitManager:
         if not bids:
             self._stop_loss_strikes.pop(pos.token_id, None)
             return False
-        best_bid = float(bids[0]["price"])
+        # Sort descending so bids[0] is always the highest (best) bid regardless of API order.
+        bids_sorted = sorted(bids, key=lambda b: float(b["price"]), reverse=True)
+        best_bid = float(bids_sorted[0]["price"])
         fillable = sum(
             float(b.get("size", 0))
-            for b in bids
+            for b in bids_sorted
             if float(b["price"]) >= stop_price
         )
         min_fill = pos.shares * _config.BOND_STOP_LOSS_MIN_FILL_FRACTION
@@ -431,8 +433,10 @@ class PaperExitManager:
         }
         _append_record(record)
         self._save()
-        # Allow re-entry into this market if conditions become profitable again.
-        if self._seen_ids is not None:
+        # Allow re-entry only after a PROFIT_EXIT. After STOP_LOSS, keep the market
+        # blocked in seen_ids until refresh_seen_ids() runs (every 24h) — prevents
+        # immediately re-entering a position that was just stopped out.
+        if reason != "STOP_LOSS" and self._seen_ids is not None:
             self._seen_ids.discard(pos.market_id)
         log.info(
             f"WOULD_SELL [{reason}] city={pos.city} side={pos.side} tier={pos.tier} "
