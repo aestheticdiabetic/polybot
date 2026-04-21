@@ -134,6 +134,7 @@ class PaperExitManager:
         self._positions: dict[str, PaperPosition] = {}  # token_id → position (all statuses)
         self._seen_ids = seen_ids  # shared reference; cleared on sell to allow re-entry
         self._sold_market_ids = sold_market_ids or set()
+        self._stop_loss_strikes: dict[str, int] = {}  # token_id → consecutive hit count
         self._load()
 
     def _load(self) -> None:
@@ -277,6 +278,10 @@ class PaperExitManager:
                             price = float(asks[0]["price"])
                         else:
                             continue
+                        # Stop-loss check uses full bid book for depth validation.
+                        hours = self._hours_left(pos)
+                        if self._check_stop_loss(pos, bids, hours):
+                            continue
                         await self.on_price_tick(pos.token_id, price)
             except Exception as exc:
                 log.debug(f"paper_exit: price poll failed for {pos.token_id[:12]}: {exc}")
@@ -361,6 +366,45 @@ class PaperExitManager:
                 f"{len(open_market_ids)} open position(s) retained"
             )
         return removed
+
+    def _check_stop_loss(self, pos: PaperPosition, bids: list, hours: float) -> bool:
+        """
+        Check stop-loss using bid-side order book depth. Returns True if triggered.
+
+        Guards against false triggers from thin/manipulative bids:
+        - Requires fillable depth at or above stop_price >= BOND_STOP_LOSS_MIN_FILL_FRACTION of shares
+        - Requires condition true in BOND_STOP_LOSS_CONFIRM_POLLS consecutive polls
+        - Only fires when >BOND_STOP_LOSS_HOURS remain (position can still be saved)
+        """
+        if _config.BOND_STOP_LOSS_RATIO <= 0 or hours <= _config.BOND_STOP_LOSS_HOURS:
+            self._stop_loss_strikes.pop(pos.token_id, None)
+            return False
+        stop_price = pos.entry_price * _config.BOND_STOP_LOSS_RATIO
+        if not bids:
+            self._stop_loss_strikes.pop(pos.token_id, None)
+            return False
+        best_bid = float(bids[0]["price"])
+        fillable = sum(
+            float(b.get("size", 0))
+            for b in bids
+            if float(b["price"]) >= stop_price
+        )
+        min_fill = pos.shares * _config.BOND_STOP_LOSS_MIN_FILL_FRACTION
+        if best_bid > 0 and best_bid <= stop_price and fillable >= min_fill:
+            strikes = self._stop_loss_strikes.get(pos.token_id, 0) + 1
+            self._stop_loss_strikes[pos.token_id] = strikes
+            if strikes >= _config.BOND_STOP_LOSS_CONFIRM_POLLS:
+                self._stop_loss_strikes.pop(pos.token_id, None)
+                self._record_sell(pos, best_bid, reason="STOP_LOSS")
+                return True
+            log.debug(
+                f"paper_exit: stop-loss strike [{strikes}/{_config.BOND_STOP_LOSS_CONFIRM_POLLS}] "
+                f"{pos.city} bid={best_bid:.4f} stop={stop_price:.4f} "
+                f"fillable={fillable:.0f}/{pos.shares}"
+            )
+        else:
+            self._stop_loss_strikes.pop(pos.token_id, None)
+        return False
 
     def _record_sell(self, pos: PaperPosition, exit_price: float, reason: str = "PROFIT_EXIT") -> None:
         pnl = (exit_price - pos.entry_price) * pos.shares

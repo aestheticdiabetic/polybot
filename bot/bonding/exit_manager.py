@@ -108,8 +108,9 @@ class ExitManager:
     """
 
     def __init__(self, client: ClobClient):
-        self._client      = client
-        self._ledger_path = Path(_config.BOND_LEDGER_FILE)
+        self._client             = client
+        self._ledger_path        = Path(_config.BOND_LEDGER_FILE)
+        self._stop_loss_strikes: dict[str, int] = {}  # market_id → consecutive hit count
 
     async def run(self) -> None:
         log.info("ExitManager started")
@@ -200,6 +201,11 @@ class ExitManager:
                 self._mark_resolved(pos.market_id, exit_price)
                 continue
 
+            # Stop-loss: uses bid price (what we'd actually receive selling now).
+            # Runs before profit-exit check; has its own hours gate separate from gas floor.
+            if await self._check_stop_loss(pos, hours_left):
+                continue
+
             current_price = await self._get_current_price(pos.token_id)
             if self._should_exit(pos, current_price, hours_left):
                 await self._execute_sell(pos, current_price)
@@ -249,6 +255,66 @@ class ExitManager:
                 return True
 
         return False
+
+    # ── Stop-loss ─────────────────────────────────────────────────
+
+    async def _check_stop_loss(self, pos: BondPosition, hours: float) -> bool:
+        """
+        Check stop-loss condition using bid-side order book depth.
+        Returns True (and fires sell) if the stop is confirmed.
+
+        Guards against false triggers from thin/manipulative bids:
+        - Requires fillable bid depth >= BOND_STOP_LOSS_MIN_FILL_FRACTION of our shares
+        - Requires condition true in BOND_STOP_LOSS_CONFIRM_POLLS consecutive polls
+        - Only fires when >BOND_STOP_LOSS_HOURS remain (position can still be saved)
+        """
+        if _config.BOND_STOP_LOSS_RATIO <= 0 or hours <= _config.BOND_STOP_LOSS_HOURS:
+            return False
+        stop_price = pos.entry_price * _config.BOND_STOP_LOSS_RATIO
+        bid, fillable = await self._get_bid_depth(pos.token_id, stop_price)
+        min_fill = pos.shares * _config.BOND_STOP_LOSS_MIN_FILL_FRACTION
+        if bid > 0 and bid <= stop_price and fillable >= min_fill:
+            strikes = self._stop_loss_strikes.get(pos.market_id, 0) + 1
+            self._stop_loss_strikes[pos.market_id] = strikes
+            if strikes >= _config.BOND_STOP_LOSS_CONFIRM_POLLS:
+                self._stop_loss_strikes.pop(pos.market_id, None)
+                await self._execute_sell(pos, bid, reason="STOP_LOSS")
+                return True
+            log.debug(
+                f"BOND_STOP_LOSS_STRIKE [{strikes}/{_config.BOND_STOP_LOSS_CONFIRM_POLLS}] "
+                f"market={pos.market_id[:8]} bid={bid:.4f} stop={stop_price:.4f} "
+                f"fillable={fillable:.0f}/{pos.shares}"
+            )
+        else:
+            self._stop_loss_strikes.pop(pos.market_id, None)
+        return False
+
+    async def _get_bid_depth(self, token_id: str, stop_price: float) -> tuple[float, float]:
+        """
+        Fetch bid-side order book and return (best_bid, fillable_shares_at_or_above_stop_price).
+        Using bids prevents false signals from ask-side illusions (exhausted asks showing 0.99).
+        """
+        timeout = aiohttp.ClientTimeout(total=5)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(
+                    f"{CLOB_API}/book", params={"token_id": token_id}
+                ) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+                    bids = data.get("bids", [])
+                    if not bids:
+                        return 0.0, 0.0
+                    best_bid = float(bids[0]["price"])
+                    fillable = sum(
+                        float(b.get("size", 0))
+                        for b in bids
+                        if float(b["price"]) >= stop_price
+                    )
+                    return best_bid, fillable
+        except Exception as exc:
+            log.debug(f"exit_mgr: bid depth fetch failed for {token_id[:12]}: {exc}")
+        return 0.0, 0.0
 
     # ── Order placement ───────────────────────────────────────────
 

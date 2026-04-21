@@ -168,8 +168,10 @@ BOND_EARLY_EXIT_PRICE      = 0.97  # sell when price hits near-certainty (both t
 BOND_CHEAP_EXIT_MULTIPLIER = 8.0   # sell CHEAP if price >= cost × this
 BOND_CHEAP_MIN_ABS_GAIN    = 1.00  # AND absolute gain >= this value (USD)
 BOND_GAS_FLOOR_HOURS       = 4     # don't exit within N hours of resolution
-BOND_STOP_LOSS_RATIO       = 0.0   # exit if price falls to this fraction of entry (0.0 = disabled)
-BOND_STOP_LOSS_HOURS       = 6     # only trigger stop loss within this many hours of market closure
+BOND_STOP_LOSS_RATIO              = 0.40  # exit if bid falls to this fraction of entry price
+BOND_STOP_LOSS_HOURS              = 12    # only trigger if >N hours remain until resolution
+BOND_STOP_LOSS_MIN_FILL_FRACTION  = 0.50  # require ≥50% of shares fillable at stop price (depth guard)
+BOND_STOP_LOSS_CONFIRM_POLLS      = 2     # require condition true in N consecutive 60s polls before firing
 
 # Confidence-based early exit thresholds (same-day current-obs monitoring)
 BOND_CONF_CERTAIN_DROP:        float = 0.20  # CERTAIN: exit if prob drops ≥ this from entry
@@ -206,7 +208,7 @@ BOND_CORE_NO_MIN_ASK:    float = 0.15    # skip CORE NO bets priced below this a
 # with the market by more than N-fold. Cap model prob to ask × ratio before
 # computing EV. Markets pricing a side at 0.001 are near-certain; a 5x cap
 # means we will never claim more than 0.5% probability for that side.
-BOND_MARKET_DISAGREEMENT_RATIO = 3.0
+BOND_MARKET_DISAGREEMENT_RATIO = 1.5
 
 # ─── Cross-source weather ─────────────────────────────────────────────────────
 TOMORROW_IO_API_KEY           = os.getenv("TOMORROW_IO_API_KEY", "")

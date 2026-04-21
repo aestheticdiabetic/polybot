@@ -49,7 +49,7 @@ def _entry_bucket_label(hours_to_resolution: float) -> Optional[str]:
 # Ask price ranges that define each tier
 _CHEAP_ASK_MIN = 0.02   # 2¢ — minimum for $1 order with reasonable share count
 _CHEAP_ASK_MAX = 0.08   # 8¢
-_CORE_ASK_MIN  = 0.08   # 8¢
+_CORE_ASK_MIN  = 0.20   # 20¢ — 0.08-0.20 showed 0% win rate in data analysis
 _CORE_ASK_MAX  = 0.30   # 30¢
 
 
