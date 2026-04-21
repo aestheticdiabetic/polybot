@@ -240,7 +240,6 @@ BOND_CITY_BIAS_CORRECTIONS: dict[str, float] = {
     "Buenos Aires": 0.5,
     "Busan":        1.5,
     "Chengdu":     -0.6,
-    "Chicago":      6.0,
     "Chongqing":   -1.0,
     "Hong Kong":   -0.9,
     "Istanbul":     0.8,

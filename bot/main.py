@@ -425,6 +425,31 @@ async def run_bot(state: StateManager):
         log.info("Bot stopped cleanly")
 
 
+async def _calibration_loop() -> None:
+    """Run forecast calibration at startup then sleep until each midnight UTC."""
+    from datetime import datetime, timedelta, timezone
+    import calibrate_forecasts
+
+    async def _run_once() -> None:
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None, calibrate_forecasts.run_with_apply
+            )
+            log.info("BOND: forecast calibration complete — bias corrections updated")
+        except Exception as exc:
+            log.warning(f"BOND: forecast calibration failed (non-fatal): {exc}")
+
+    await _run_once()
+
+    while True:
+        now = datetime.now(timezone.utc)
+        next_midnight = (now + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        await asyncio.sleep((next_midnight - now).total_seconds())
+        await _run_once()
+
+
 async def main():
     state = StateManager()
 
@@ -482,7 +507,8 @@ async def main():
         _order_tracker = PendingOrderTracker(_bond_client, _exit_mgr)
         loop.create_task(_exit_mgr.run())
         loop.create_task(_order_tracker.run())
-        log.info("BOND: exit manager and order tracker started (persistent — survive scan stop/start)")
+        loop.create_task(_calibration_loop())
+        log.info("BOND: exit manager, order tracker, and calibration loop started")
 
         _bot_runner = lambda s: run_bonding_loop(s, _exit_mgr, _order_tracker, _bond_client)
 
@@ -491,7 +517,8 @@ async def main():
         _seen_ids, _sold_ids = _load_seen_market_ids()
         _exit_mgr = PaperExitManager(PAPER_LOG, seen_ids=_seen_ids, sold_market_ids=_sold_ids)
         loop.create_task(_exit_mgr.run())
-        log.info("PAPER: exit manager polling started (persistent — survives scan stop/start)")
+        loop.create_task(_calibration_loop())
+        log.info("PAPER: exit manager and calibration loop started")
 
         _bot_runner = lambda s: run_paper_loop(s, _exit_mgr)
 

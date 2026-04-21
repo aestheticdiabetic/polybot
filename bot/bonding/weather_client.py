@@ -818,6 +818,31 @@ async def _fetch_nearterm_hourly(lat: float, lon: float, target_date: date) -> d
     return data
 
 
+def _nearterm_sigma(city: str, target_month: int) -> float:
+    """Return per-city/month σ (°C) derived from historical daily max archive.
+
+    Uses the last 60 same-month observations (up to ~5 years of Aprils, etc.)
+    so stable climates like Singapore produce a tighter spread than variable
+    ones like Warsaw. Falls back to the global NEARTERM_SIGMA_NEXT_DAY constant
+    if the city isn't seeded yet or has fewer than 10 same-month observations.
+    """
+    try:
+        from bonding.statistical_forecast import _history as _stat_history
+        city_hist = _stat_history.get(city, {})
+        same_month = [
+            v for k, v in city_hist.items()
+            if date.fromisoformat(k).month == target_month
+        ]
+        if len(same_month) >= 10:
+            recent = same_month[-60:]
+            mean = sum(recent) / len(recent)
+            variance = sum((x - mean) ** 2 for x in recent) / len(recent)
+            return max(variance ** 0.5, 0.5)
+    except Exception:
+        pass
+    return NEARTERM_SIGMA_NEXT_DAY
+
+
 def _parse_nearterm_forecast(city: str, target_date: date, raw: dict) -> ForecastResult:
     """
     Parse Open-Meteo hourly forecast for a near-term market (today or tomorrow).
@@ -932,7 +957,7 @@ def _parse_nearterm_forecast(city: str, target_date: date, raw: dict) -> Forecas
                     )
                     _observation_recorded.add(obs_key)
     else:
-        sigma = NEARTERM_SIGMA_NEXT_DAY
+        sigma = _nearterm_sigma(city, target_date.month)
         forecast_peak_hour = None
 
     # Per-city bias correction (°C) derived from ERA5 calibration.

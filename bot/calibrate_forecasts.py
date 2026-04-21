@@ -50,7 +50,7 @@ DEFAULT_TRADES = "/home/angus/polybot/logs/paper_trades.jsonl"
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
 
 # Minimum trades per city before we trust the bias estimate
-MIN_TRADES_FOR_BIAS = 3
+MIN_TRADES_FOR_BIAS = 10
 
 # ── Temperature range extraction (mirrors market_scanner._extract_temp_bucket) ─
 
@@ -477,6 +477,27 @@ async def main(args: argparse.Namespace) -> None:
         else:
             print()
             print("Override file already up to date — no changes written.")
+
+
+def run_with_apply(
+    trades_path: str = DEFAULT_TRADES,
+    override_path: str = DEFAULT_OVERRIDE_FILE,
+) -> None:
+    """Synchronous entry point for scheduled in-process calibration.
+    Safe to call from a thread executor — creates its own event loop.
+    Loads resolved trades, fetches ERA5 actuals, computes per-city bias
+    corrections, and writes them to the override env file.
+    """
+    _out = str(Path(__file__).parent / "calibration_corrections.json")
+    import argparse
+    args = argparse.Namespace(
+        trades=trades_path,
+        days=90,
+        out=_out,
+        apply=True,
+        override_file=override_path,
+    )
+    asyncio.run(main(args))
 
 
 if __name__ == "__main__":
