@@ -84,11 +84,14 @@ def _load_seen_market_ids() -> tuple[set[str], set[str]]:
     except Exception as exc:
         log.error(f"_load_seen_market_ids: failed to read JSONL ({exc}), starting fresh")
         return set(), set()
+    # Only "SOLD" (profit-exit) allows re-entry. "STOP_LOSS" stays blocked across restarts
+    # to prevent buy→stop→rebuy→stop loops when the market is clearly going the wrong way.
     blocked = {mid for mid, outcome in latest_outcome.items() if outcome != "SOLD"}
     sold = {mid for mid, outcome in latest_outcome.items() if outcome == "SOLD"}
+    stop_lossed = {mid for mid, outcome in latest_outcome.items() if outcome == "STOP_LOSS"}
     log.info(
         f"_load_seen_market_ids: {len(latest_outcome)} WOULD_BUY records → "
-        f"{len(blocked)} blocked (open/resolved), {len(sold)} SOLD (eligible for re-entry)"
+        f"{len(blocked)} blocked ({len(stop_lossed)} stop-lossed), {len(sold)} SOLD (eligible for re-entry)"
     )
     return blocked, sold
 
@@ -415,7 +418,7 @@ class PaperExitManager:
         pos.exit_ts = datetime.now(timezone.utc).isoformat()
         pos.pnl = round(pnl, 4)
         # Patch the original WOULD_BUY entry so the log is self-contained.
-        self._patch_would_buy(pos)
+        self._patch_would_buy(pos, reason)
         record = {
             "ts":          pos.exit_ts,
             "event":       "WOULD_SELL",
@@ -443,13 +446,17 @@ class PaperExitManager:
             f"entry={pos.entry_price:.4f} exit={exit_price:.4f} pnl={pnl:+.2f}"
         )
 
-    def _patch_would_buy(self, pos: PaperPosition) -> None:
+    def _patch_would_buy(self, pos: PaperPosition, reason: str = "PROFIT_EXIT") -> None:
         """
         Rewrite the JSONL so the original WOULD_BUY entry for this market shows
-        outcome='SOLD', exit_price, and pnl — making the log self-contained.
+        the exit outcome, exit_price, and pnl — making the log self-contained.
+
+        outcome is set to "STOP_LOSS" for stop-loss exits (blocked on restart) or
+        "SOLD" for profit exits (eligible for re-entry on restart).
         """
         if not self._paper_log.exists():
             return
+        outcome = "STOP_LOSS" if reason == "STOP_LOSS" else "SOLD"
         try:
             lines = self._paper_log.read_text(encoding="utf-8").splitlines()
             patched = []
@@ -467,7 +474,7 @@ class PaperExitManager:
                     and rec.get("market_id") == pos.market_id
                     and rec.get("outcome") is None
                 ):
-                    rec["outcome"]    = "SOLD"
+                    rec["outcome"]    = outcome
                     rec["exit_price"] = pos.exit_price
                     rec["pnl"]        = pos.pnl
                     line = json.dumps(rec)
