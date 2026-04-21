@@ -31,6 +31,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import re
 import statistics
 import sys
@@ -46,7 +47,7 @@ import aiohttp
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
-DEFAULT_TRADES = "/home/angus/polybot/logs/paper_trades.jsonl"
+DEFAULT_TRADES = os.getenv("PAPER_LOG", "/app/logs/paper_trades.jsonl")
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
 
 # Minimum trades per city before we trust the bias estimate
