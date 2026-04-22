@@ -169,7 +169,7 @@ BOND_CHEAP_EXIT_MULTIPLIER = 8.0   # sell CHEAP if price >= cost × this
 BOND_CHEAP_MIN_ABS_GAIN    = 1.00  # AND absolute gain >= this value (USD)
 BOND_GAS_FLOOR_HOURS       = 4     # don't exit within N hours of resolution
 BOND_STOP_LOSS_RATIO              = 0.40  # exit if bid falls to this fraction of entry price
-BOND_STOP_LOSS_HOURS              = 12    # only trigger if >N hours remain until resolution
+BOND_STOP_LOSS_HOURS              = 3     # only trigger if >N hours remain until resolution
 BOND_STOP_LOSS_MIN_FILL_FRACTION  = 0.50  # require ≥50% of shares fillable at stop price (depth guard)
 BOND_STOP_LOSS_CONFIRM_POLLS      = 2     # require condition true in N consecutive 60s polls before firing
 
