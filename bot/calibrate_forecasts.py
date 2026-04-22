@@ -181,14 +181,18 @@ async def fetch_era5_for_cities(
     async with aiohttp.ClientSession(connector=connector) as session:
         tasks = []
         city_list: list[str] = []
+        era5_cutoff = date.today() - timedelta(days=5)
         for city, dates in city_dates.items():
             coords = CITY_COORDS.get(city)
             if not coords:
                 missing.append(city)
                 continue
             lat, lon = coords
-            start = min(dates)
-            end   = max(dates)
+            available = {d for d in dates if d <= era5_cutoff}
+            if not available:
+                continue
+            start = min(available)
+            end   = max(available)
             tasks.append(_fetch_era5(session, lat, lon, start, end))
             city_list.append(city)
 
