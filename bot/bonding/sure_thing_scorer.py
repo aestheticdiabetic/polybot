@@ -207,9 +207,6 @@ def score_certain(
         if opp is not None:
             results.append(opp)
 
-    if not results:
-        return []
-
     results.sort(key=lambda o: o.edge, reverse=True)
     results = _apply_cluster_cap(results)
 

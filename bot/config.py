@@ -218,9 +218,9 @@ ECMWF_ENSEMBLE_MODEL          = "ecmwf_ifs025"  # 50 members, 0.25° global, fre
 ECMWF_DISK_CACHE_PATH         = os.environ.get("ECMWF_CACHE_PATH", "/app/data/ecmwf_cache.json")
 
 # ─── CERTAIN tier ────────────────────────────────────────────────────────────
-CERTAIN_ASK_MIN                  = 0.75   # min YES ask — market sees it as likely
+CERTAIN_ASK_MIN                  = 0.65   # min YES ask — market sees it as likely
 CERTAIN_ASK_MAX                  = 0.95   # max YES ask — still room for edge
-CERTAIN_MIN_SOURCE_PROB          = 0.88   # each source must reach this individually
+CERTAIN_MIN_SOURCE_PROB          = 0.80   # each source must reach this individually
 CERTAIN_MAX_TEMP_DELTA_C         = 2.0    # max °C between source point forecasts
 CERTAIN_MAX_SPREAD_C             = 1.5    # max std dev of all combined ensemble members
 CERTAIN_MIN_CONSENSUS_PROB       = 0.90   # averaged probability floor
