@@ -8,7 +8,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, asdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -167,7 +167,7 @@ class ExitManager:
 
         for pos in open_pos:
             market_data = await self._fetch_market_data(pos.market_id)
-            hours_left  = self._hours_to_resolution(market_data)
+            hours_left  = self._hours_to_resolution(pos.resolution_time)
 
             # Market has already passed its end date — record actual P&L and mark resolved
             if hours_left <= 0:
@@ -438,25 +438,13 @@ class ExitManager:
             log.debug(f"exit_mgr: market data fetch failed for {market_id[:8]}: {exc}")
         return {}
 
-    def _hours_to_resolution(self, market_data: dict) -> float:
-        """Hours until end of the target calendar day (UTC midnight of day+1).
-
-        Gamma's end_date_iso is the date label at midnight start-of-day UTC, not the
-        actual resolution timestamp. We extract the date portion only and compute hours
-        to end-of-day (midnight of the following day UTC).
-        """
-        for key in ("end_date_iso", "endDateIso", "endDate", "end_date"):
-            val = market_data.get(key)
-            if val:
-                try:
-                    date_str = str(val)[:10]  # "2026-04-08"
-                    end_of_day = datetime.fromisoformat(
-                        date_str + "T00:00:00+00:00"
-                    ) + timedelta(days=1)
-                    return max(0.0, (end_of_day - datetime.now(timezone.utc)).total_seconds() / 3600)
-                except ValueError:
-                    continue
-        return 999.0  # unknown — don't gate on gas floor
+    def _hours_to_resolution(self, resolution_time: str) -> float:
+        """Hours until the market's resolution time (ISO8601 string stored at entry)."""
+        try:
+            resolution = datetime.fromisoformat(resolution_time)
+            return max(0.0, (resolution - datetime.now(timezone.utc)).total_seconds() / 3600)
+        except Exception:
+            return 999.0  # unknown — don't gate on gas floor
 
     def _yes_resolution_price(self, market_data: dict) -> float:
         """

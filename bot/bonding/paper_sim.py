@@ -18,7 +18,7 @@ import logging
 import os
 import sys
 from dataclasses import dataclass, asdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -299,25 +299,12 @@ class PaperExitManager:
             self._record_sell(pos, price)
 
     def _has_resolved(self, pos: PaperPosition) -> bool:
-        """Return True if the market's resolution day has fully elapsed (end-of-day UTC).
-
-        resolution_time stores Gamma's end_date_iso — midnight *start* of the resolution
-        day (e.g. "2026-04-16T00:00:00+00:00"), NOT end-of-day.  Checking
-        ``now >= resolution_time`` fires all day on the resolution date, long before the
-        temperature data is published.  We must use the same end-of-day arithmetic as
-        _hours_left: the market is settled only after midnight UTC of the *next* day.
-        """
         return self._hours_left(pos) <= 0.0
 
     def _hours_left(self, pos: PaperPosition) -> float:
-        # resolution_time stores Gamma's end_date_iso — midnight start-of-day UTC, not
-        # actual resolution. Extract the date portion and compute end-of-day instead.
         try:
-            date_str = pos.resolution_time[:10]  # "2026-04-08"
-            end_of_day = datetime.fromisoformat(
-                date_str + "T00:00:00+00:00"
-            ) + timedelta(days=1)
-            return max(0.0, (end_of_day - datetime.now(timezone.utc)).total_seconds() / 3600)
+            resolution = datetime.fromisoformat(pos.resolution_time)
+            return max(0.0, (resolution - datetime.now(timezone.utc)).total_seconds() / 3600)
         except Exception:
             return 999.0
 
