@@ -6,7 +6,7 @@ daily max temperatures from the Open-Meteo archive API.
 
 Model blend:
   - Naïve:        yesterday's observed high (catches current regime)
-  - ARIMA(5,0,0): AR(5) fitted on 2 years of history (captures autocorrelation)
+  - ARIMA(5,0,0): AR(5) fitted on 4 years of history (captures autocorrelation)
   Both models are averaged equally when both are available.
 
 Integration:
@@ -22,8 +22,10 @@ Archive lag:
 Seeding:
   seed_all_cities() is called once at BOND/PAPER startup. It fetches 2 years
   of daily max temps for every city in BOND_CITIES that hasn't been seeded.
-  Already-seeded cities are skipped. Subsequent startups only fetch missing
-  days (update_city), keeping API usage low.
+  Already-seeded cities (with 4+ years of history) are skipped. Subsequent
+  startups only fetch missing days (update_city), keeping API usage low.
+  4 years gives enough monthly data points (≥4 per month) for _monthly_yoy_trend()
+  to produce statistically meaningful year-over-year warming estimates.
 """
 import asyncio
 import json
@@ -41,7 +43,7 @@ if TYPE_CHECKING:
 log = logging.getLogger("bond.statistical")
 
 ARCHIVE_API_URL   = "https://archive-api.open-meteo.com/v1/archive"
-_SEED_YEARS       = 2
+_SEED_YEARS       = 4
 _ARCHIVE_LAG_DAYS = 5    # archive typically lags ~5 days behind today
 _MIN_HISTORY_DAYS = 10   # minimum observations to produce any forecast
 _AR_ORDER         = 5    # ARIMA(5,0,0) — as per the NYC study
