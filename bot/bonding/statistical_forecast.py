@@ -298,16 +298,22 @@ def _arima_pred(city: str, sorted_temps: list[tuple[date, float]]) -> Optional[f
     return pred
 
 
+_YOY_MIN_R2    = 0.7   # minimum R² for the trend to be considered reliable
+_YOY_MAX_CORR  = 2.0   # hard cap: never apply more than ±2°C of YoY correction
+
+
 def _monthly_yoy_trend(sorted_temps: list[tuple[date, float]], target_month: int) -> float:
     """
-    Estimate year-over-year warming trend (°C/year) for a specific calendar month
-    using the multi-year daily max history.
+    Estimate year-over-year warming trend (°C/year) for a specific calendar month.
 
     Groups same-month observations by year, takes each year's mean, then fits
-    a simple linear regression over those annual means. This captures "April is
-    getting consistently warmer year-on-year" without confounding seasonal cycles.
+    a linear regression over those annual means. Returns 0.0 if:
+      - fewer than 3 years of same-month data exist (2 points = 0 dof, not trustworthy)
+      - the regression R² < _YOY_MIN_R2 (trend is inconsistent — city is going against
+        or fluctuating around the trend, applying it would hurt more than help)
 
-    Returns 0.0 if fewer than 2 years of same-month data are available.
+    The slope is capped at ±_YOY_MAX_CORR °C/year to prevent runaway corrections
+    from short windows with anomalous years.
     """
     from collections import defaultdict
     year_temps: dict[int, list[float]] = defaultdict(list)
@@ -316,7 +322,7 @@ def _monthly_yoy_trend(sorted_temps: list[tuple[date, float]], target_month: int
             year_temps[d.year].append(t)
 
     years = sorted(year_temps.keys())
-    if len(years) < 2:
+    if len(years) < 3:
         return 0.0
 
     means = [sum(year_temps[y]) / len(year_temps[y]) for y in years]
@@ -329,8 +335,21 @@ def _monthly_yoy_trend(sorted_temps: list[tuple[date, float]], target_month: int
     denom  = n * sum_xx - sum_x ** 2
     if denom == 0:
         return 0.0
-    slope = (n * sum_xy - sum_x * sum_y) / denom  # °C per year-index step
-    return slope
+    slope = (n * sum_xy - sum_x * sum_y) / denom
+
+    # R² = 1 - SS_res / SS_tot
+    mean_y  = sum_y / n
+    ss_tot  = sum((m - mean_y) ** 2 for m in means)
+    if ss_tot == 0:
+        return 0.0
+    predicted = [mean_y + slope * (i - sum_x / n) for i in idx]
+    ss_res  = sum((m - p) ** 2 for m, p in zip(means, predicted))
+    r2 = 1.0 - ss_res / ss_tot
+
+    if r2 < _YOY_MIN_R2:
+        return 0.0
+
+    return max(-_YOY_MAX_CORR, min(_YOY_MAX_CORR, slope))
 
 
 # ── Public interface ──────────────────────────────────────────────────────────
