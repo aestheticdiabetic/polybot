@@ -843,6 +843,18 @@ def _nearterm_sigma(city: str, target_month: int) -> float:
     return NEARTERM_SIGMA_NEXT_DAY
 
 
+def _city_bias_c(city: str, target_month: int) -> float:
+    """Return total bias correction (°C) for city + month.
+
+    Combines the flat per-city correction (BOND_CITY_BIAS_CORRECTIONS) with an
+    additive monthly adjustment (BOND_CITY_MONTHLY_BIAS_CORRECTIONS) so that
+    seasonal warming patterns can be captured independently from the baseline.
+    """
+    flat = _config.BOND_CITY_BIAS_CORRECTIONS.get(city, 0.0)
+    monthly = _config.BOND_CITY_MONTHLY_BIAS_CORRECTIONS.get(city, {}).get(target_month, 0.0)
+    return flat + monthly
+
+
 def _parse_nearterm_forecast(city: str, target_date: date, raw: dict) -> ForecastResult:
     """
     Parse Open-Meteo hourly forecast for a near-term market (today or tomorrow).
@@ -960,9 +972,8 @@ def _parse_nearterm_forecast(city: str, target_date: date, raw: dict) -> Forecas
         sigma = _nearterm_sigma(city, target_date.month)
         forecast_peak_hour = None
 
-    # Per-city bias correction (°C) derived from ERA5 calibration.
-    # Shifts forecast_max before generating ensemble members.
-    bias_c = _config.BOND_CITY_BIAS_CORRECTIONS.get(city, 0.0)
+    # Per-city bias correction (°C): flat + month-specific additive component.
+    bias_c = _city_bias_c(city, target_date.month)
     if bias_c:
         forecast_max += bias_c
         if running_max is not None:
@@ -1112,8 +1123,8 @@ def _parse_ensemble_from_range(city: str, target_date: date, raw: dict) -> Forec
         log.warning(f"weather: no ensemble members found for {city} {date_str}, using control only")
         members = [daily_max_c]
 
-    # Per-city bias correction (°C) derived from ERA5 calibration.
-    bias_c = _config.BOND_CITY_BIAS_CORRECTIONS.get(city, 0.0)
+    # Per-city bias correction (°C): flat + month-specific additive component.
+    bias_c = _city_bias_c(city, target_date.month)
     if bias_c:
         daily_max_c += bias_c
         members = [m + bias_c for m in members]

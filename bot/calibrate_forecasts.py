@@ -328,6 +328,90 @@ def per_city_bias(
     return stats
 
 
+def per_city_monthly_bias(
+    trades: list[dict],
+    era5: dict[tuple[str, str], float],
+    flat_corrections: dict[str, float],
+) -> dict[str, dict[int, dict]]:
+    """
+    Compute per-city, per-month bias statistics.
+
+    Returns the ADDITIVE monthly correction on top of the existing flat correction,
+    so callers can populate BOND_CITY_MONTHLY_BIAS_CORRECTIONS without double-counting.
+
+    Format: {city: {month_int: {"n": int, "bias_c": float, "additive_c": float}}}
+    """
+    from collections import defaultdict
+    city_month_residuals: dict[str, dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))
+
+    for t in trades:
+        city     = t.get("city", "")
+        date_str = t.get("date", "")
+        question = t.get("question", "")
+
+        actual = era5.get((city, date_str))
+        if actual is None:
+            continue
+
+        temp_range = parse_temp_range_c(question)
+        if temp_range is None:
+            continue
+
+        tmin, tmax = temp_range
+        if tmax > 44 or tmin < -29:
+            continue
+
+        try:
+            month = date.fromisoformat(date_str).month
+        except ValueError:
+            continue
+
+        range_centre = (tmin + tmax) / 2.0
+        residual = actual - range_centre
+        city_month_residuals[city][month].append(residual)
+
+    result: dict[str, dict[int, dict]] = {}
+    for city in sorted(city_month_residuals):
+        flat = flat_corrections.get(city, 0.0)
+        result[city] = {}
+        for month in sorted(city_month_residuals[city]):
+            residuals = city_month_residuals[city][month]
+            n = len(residuals)
+            if n < MIN_TRADES_FOR_BIAS:
+                continue
+            mean_bias = statistics.mean(residuals)
+            additive = round(mean_bias - flat, 1)  # delta beyond the flat correction
+            result[city][month] = {
+                "n":          n,
+                "bias_c":     round(mean_bias, 2),
+                "flat_c":     flat,
+                "additive_c": additive,
+            }
+        if not result[city]:
+            del result[city]
+
+    return result
+
+
+def build_monthly_corrections(
+    monthly_stats: dict[str, dict[int, dict]],
+) -> dict[str, dict[int, float]]:
+    """
+    Build BOND_CITY_MONTHLY_BIAS_CORRECTIONS from per_city_monthly_bias output.
+    Only includes additive corrections ≥ 0.5°C in magnitude.
+    """
+    corrections: dict[str, dict[int, float]] = {}
+    for city, months in monthly_stats.items():
+        city_corr = {
+            m: s["additive_c"]
+            for m, s in months.items()
+            if abs(s["additive_c"]) >= 0.5
+        }
+        if city_corr:
+            corrections[city] = city_corr
+    return corrections
+
+
 # ── Report ────────────────────────────────────────────────────────────────────
 
 def print_report(
@@ -392,12 +476,7 @@ def build_corrections(bias_stats: dict[str, dict]) -> dict[str, float]:
 DEFAULT_OVERRIDE_FILE = "/app/data/config.override.env"
 
 
-def apply_corrections_to_override(override_path: Path, corrections: dict[str, float]) -> bool:
-    """
-    Write BOND_CITY_BIAS_CORRECTIONS_JSON into the persistent override env file.
-    Merges with any existing entries so other overrides are preserved.
-    Returns True if the file was changed, False if already up to date.
-    """
+def _read_override_env(override_path: Path) -> dict[str, str]:
     existing: dict[str, str] = {}
     if override_path.exists():
         for line in override_path.read_text(encoding="utf-8").splitlines():
@@ -405,18 +484,50 @@ def apply_corrections_to_override(override_path: Path, corrections: dict[str, fl
             if "=" in line and not line.startswith("#"):
                 k, _, v = line.partition("=")
                 existing[k.strip()] = v.strip()
+    return existing
 
-    new_json = json.dumps(corrections, sort_keys=True)
-    old_json = existing.get("BOND_CITY_BIAS_CORRECTIONS_JSON", "")
 
-    if new_json == old_json:
-        return False
-
-    existing["BOND_CITY_BIAS_CORRECTIONS_JSON"] = new_json
+def _write_override_env(override_path: Path, data: dict[str, str]) -> None:
     override_path.parent.mkdir(parents=True, exist_ok=True)
     with override_path.open("w", encoding="utf-8") as f:
-        for k, v in existing.items():
+        for k, v in data.items():
             f.write(f"{k}={v}\n")
+
+
+def apply_corrections_to_override(override_path: Path, corrections: dict[str, float]) -> bool:
+    """
+    Write BOND_CITY_BIAS_CORRECTIONS_JSON into the persistent override env file.
+    Merges with any existing entries so other overrides are preserved.
+    Returns True if the file was changed, False if already up to date.
+    """
+    existing = _read_override_env(override_path)
+    new_json = json.dumps(corrections, sort_keys=True)
+    if new_json == existing.get("BOND_CITY_BIAS_CORRECTIONS_JSON", ""):
+        return False
+    existing["BOND_CITY_BIAS_CORRECTIONS_JSON"] = new_json
+    _write_override_env(override_path, existing)
+    return True
+
+
+def apply_monthly_corrections_to_override(
+    override_path: Path,
+    monthly_corrections: dict[str, dict[int, float]],
+) -> bool:
+    """
+    Write BOND_CITY_MONTHLY_BIAS_CORRECTIONS_JSON into the persistent override env file.
+    Month keys are serialised as strings (JSON requirement) and re-parsed as ints on load.
+    Returns True if the file was changed.
+    """
+    existing = _read_override_env(override_path)
+    serialisable = {
+        city: {str(m): c for m, c in months.items()}
+        for city, months in monthly_corrections.items()
+    }
+    new_json = json.dumps(serialisable, sort_keys=True)
+    if new_json == existing.get("BOND_CITY_MONTHLY_BIAS_CORRECTIONS_JSON", ""):
+        return False
+    existing["BOND_CITY_MONTHLY_BIAS_CORRECTIONS_JSON"] = new_json
+    _write_override_env(override_path, existing)
     return True
 
 
@@ -466,6 +577,41 @@ async def main(args: argparse.Namespace) -> None:
         print("No corrections exceed the 0.5°C threshold — model appears unbiased "
               "or insufficient data.")
 
+    # ── Month-specific corrections ────────────────────────────────────────────
+    if args.month_specific:
+        monthly_stats = per_city_monthly_bias(trades, era5, corrections)
+        monthly_corrections = build_monthly_corrections(monthly_stats)
+        monthly_out = Path(args.out).with_name("calibration_monthly_corrections.json")
+        monthly_out.write_text(json.dumps(
+            {city: {str(m): c for m, c in months.items()} for city, months in monthly_corrections.items()},
+            indent=2, sort_keys=True,
+        ))
+
+        if monthly_corrections:
+            print()
+            print(f"Month-specific corrections written to {monthly_out}")
+            print()
+            print("Suggested BOND_CITY_MONTHLY_BIAS_CORRECTIONS (additive on top of flat):")
+            print("  {")
+            for city, months in sorted(monthly_corrections.items()):
+                month_strs = ", ".join(f"{m}: {c:+.1f}" for m, c in sorted(months.items()))
+                print(f'    "{city}": {{{month_strs}}},')
+            print("  }")
+
+            if args.apply:
+                override_path = Path(args.override_file)
+                try:
+                    changed = apply_monthly_corrections_to_override(override_path, monthly_corrections)
+                except Exception as exc:
+                    print(f"ERROR writing monthly override: {exc}", file=sys.stderr)
+                    sys.exit(1)
+                if changed:
+                    print()
+                    print(f"Monthly corrections applied to {override_path}")
+        else:
+            print()
+            print("No monthly corrections exceed the 0.5°C threshold.")
+
     if args.apply:
         override_path = Path(args.override_file)
         try:
@@ -487,6 +633,7 @@ async def main(args: argparse.Namespace) -> None:
 def run_with_apply(
     trades_path: str = DEFAULT_TRADES,
     override_path: str = DEFAULT_OVERRIDE_FILE,
+    month_specific: bool = True,
 ) -> None:
     """Synchronous entry point for scheduled in-process calibration.
     Safe to call from a thread executor — creates its own event loop.
@@ -500,6 +647,7 @@ def run_with_apply(
         days=90,
         out=_out,
         apply=True,
+        month_specific=month_specific,
         override_file=override_path,
     )
     asyncio.run(main(args))
@@ -526,9 +674,15 @@ if __name__ == "__main__":
         help="Write corrections to the override env file so the bot picks them up on next restart",
     )
     parser.add_argument(
+        "--month-specific", action="store_true",
+        help="Also compute and output per-city per-month additive corrections "
+             "(BOND_CITY_MONTHLY_BIAS_CORRECTIONS). Requires enough trades per city/month.",
+    )
+    parser.add_argument(
         "--override-file", default=DEFAULT_OVERRIDE_FILE,
         help="Path to config.override.env (default: %(default)s)",
     )
     args = parser.parse_args()
+    args.month_specific = args.month_specific  # normalise hyphen→underscore (argparse does this)
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
     asyncio.run(main(args))

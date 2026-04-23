@@ -261,6 +261,12 @@ BOND_CITY_BIAS_CORRECTIONS: dict[str, float] = {
     "Wuhan":       -1.1,
 }
 
+# Per-city, per-month additive bias corrections (°C).
+# Applied ON TOP of BOND_CITY_BIAS_CORRECTIONS for the specific target month.
+# Use calibrate_forecasts.py --month-specific to generate these.
+# Format: {city: {month_int: correction_c}}  e.g. {"Munich": {4: 1.5, 5: 2.0}}
+BOND_CITY_MONTHLY_BIAS_CORRECTIONS: dict[str, dict[int, float]] = {}
+
 # ─── Statistical forecast (ARIMA/Naïve 4th source) ───────────────────────────
 # Weight applied to the statistical source in consensus_prob() relative to each
 # meteorological source (GFS, ECMWF, TIO each have weight 1.0).

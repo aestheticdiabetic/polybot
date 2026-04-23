@@ -111,6 +111,20 @@ def load_overrides() -> None:
             except (json.JSONDecodeError, TypeError) as e:
                 log.warning(f"Failed to load BOND_CITY_BIAS_CORRECTIONS_JSON: {e}")
 
+        if "BOND_CITY_MONTHLY_BIAS_CORRECTIONS_JSON" in overrides:
+            try:
+                raw = json.loads(overrides["BOND_CITY_MONTHLY_BIAS_CORRECTIONS_JSON"])
+                # Keys from JSON are always strings; convert month keys back to int.
+                _config.BOND_CITY_MONTHLY_BIAS_CORRECTIONS = {
+                    city: {int(m): v for m, v in months.items()}
+                    for city, months in raw.items()
+                }
+                applied["BOND_CITY_MONTHLY_BIAS_CORRECTIONS"] = (
+                    f"({len(_config.BOND_CITY_MONTHLY_BIAS_CORRECTIONS)} cities)"
+                )
+            except (json.JSONDecodeError, TypeError) as e:
+                log.warning(f"Failed to load BOND_CITY_MONTHLY_BIAS_CORRECTIONS_JSON: {e}")
+
         if applied:
             log.info(f"Loaded config overrides: {applied}")
     except Exception as e:
@@ -143,6 +157,11 @@ def save_overrides(overrides: dict) -> bool:
                 existing["BOND_CITY_ALIASES_JSON"] = json.dumps(v)
             elif k == "BOND_CITY_BIAS_CORRECTIONS":
                 existing["BOND_CITY_BIAS_CORRECTIONS_JSON"] = json.dumps(v, sort_keys=True)
+            elif k == "BOND_CITY_MONTHLY_BIAS_CORRECTIONS":
+                existing["BOND_CITY_MONTHLY_BIAS_CORRECTIONS_JSON"] = json.dumps(
+                    {city: {str(m): c for m, c in months.items()} for city, months in v.items()},
+                    sort_keys=True,
+                )
             elif k in _set_keys:
                 existing[k + "_JSON"] = json.dumps(sorted(v))
             else:

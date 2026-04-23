@@ -116,17 +116,20 @@ async def run_bonding_loop(state: StateManager, exit_mgr, order_tracker, bond_cl
                 forecasts = await get_consensus_forecasts(city_date_pairs)
                 feed.update_markets(markets, forecasts)
 
-            # Fallback REST scoring pass: catches markets with no recent WS events
+            # Fallback REST scoring pass: catches markets with no recent WS events.
+            # Skip CHEAP-tier opportunities here — REST prices are stale (no live
+            # orderbook), and REST CHEAP entries have historically produced 0% win rate.
             from bonding.sure_thing_scorer import score_certain
             opps = score_all(markets, forecasts) + score_certain(markets, forecasts)
             placed = 0
             for opp in opps[:BOND_MAX_MARKETS_PER_RUN]:
                 if not feed.is_on_cooldown(opp.token_id):
-                    await _place_bond_order(
-                        bond_client, exit_mgr, order_tracker, opp, OrderArgs, OrderType
-                    )
-                    feed.mark_cooldown(opp.token_id)
-                    placed += 1
+                    if opp.market.ask_book or opp.tier != "CHEAP":
+                        await _place_bond_order(
+                            bond_client, exit_mgr, order_tracker, opp, OrderArgs, OrderType
+                        )
+                        feed.mark_cooldown(opp.token_id)
+                        placed += 1
 
             state.update_bond_stats({
                 "cycle": cycle,

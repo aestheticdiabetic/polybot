@@ -296,6 +296,41 @@ def _arima_pred(city: str, sorted_temps: list[tuple[date, float]]) -> Optional[f
     return pred
 
 
+def _monthly_yoy_trend(sorted_temps: list[tuple[date, float]], target_month: int) -> float:
+    """
+    Estimate year-over-year warming trend (°C/year) for a specific calendar month
+    using the multi-year daily max history.
+
+    Groups same-month observations by year, takes each year's mean, then fits
+    a simple linear regression over those annual means. This captures "April is
+    getting consistently warmer year-on-year" without confounding seasonal cycles.
+
+    Returns 0.0 if fewer than 2 years of same-month data are available.
+    """
+    from collections import defaultdict
+    year_temps: dict[int, list[float]] = defaultdict(list)
+    for d, t in sorted_temps:
+        if d.month == target_month:
+            year_temps[d.year].append(t)
+
+    years = sorted(year_temps.keys())
+    if len(years) < 2:
+        return 0.0
+
+    means = [sum(year_temps[y]) / len(year_temps[y]) for y in years]
+    n = len(years)
+    idx = list(range(n))
+    sum_x  = sum(idx)
+    sum_y  = sum(means)
+    sum_xy = sum(i * m for i, m in zip(idx, means))
+    sum_xx = sum(i * i for i in idx)
+    denom  = n * sum_xx - sum_x ** 2
+    if denom == 0:
+        return 0.0
+    slope = (n * sum_xy - sum_x * sum_y) / denom  # °C per year-index step
+    return slope
+
+
 # ── Public interface ──────────────────────────────────────────────────────────
 
 def get_statistical_forecast(
@@ -336,6 +371,22 @@ def get_statistical_forecast(
         return None
 
     point_forecast = sum(available) / len(available)
+
+    # Year-over-year trend adjustment: if this month has been warming (or cooling)
+    # consistently year-on-year, project that trend forward from the last available
+    # training year to the current year.
+    yoy_trend = _monthly_yoy_trend(sorted_temps, target_date.month)
+    if yoy_trend != 0.0 and sorted_temps:
+        last_year = sorted_temps[-1][0].year
+        current_year = target_date.year
+        years_ahead = current_year - last_year
+        if years_ahead > 0:
+            trend_correction = yoy_trend * years_ahead
+            point_forecast += trend_correction
+            log.debug(
+                f"statistical: {city} {target_date} month={target_date.month} "
+                f"yoy_trend={yoy_trend:+.2f}°C/yr × {years_ahead}yr = {trend_correction:+.2f}°C applied"
+            )
 
     rng     = np.random.default_rng()
     members = rng.normal(loc=point_forecast, scale=sigma_c, size=n_members).tolist()

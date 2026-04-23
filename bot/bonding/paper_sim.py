@@ -509,6 +509,14 @@ def log_opportunity(opp, seen_ids: set[str]) -> bool:
 
     source = "ws" if opp.market.ask_book else "rest"
 
+    # REST-sourced CHEAP entries use stale prices (no live orderbook) and have
+    # historically produced 0% win rate — skip them entirely.
+    if source == "rest" and opp.tier == "CHEAP":
+        log.debug(
+            f"paper_sim: skip REST CHEAP {opp.market.city} {opp.market.target_date}"
+        )
+        return False
+
     # No profitable depth available — log for stats but don't block re-entry.
     if opp.shares_immediate == 0:
         record = {
