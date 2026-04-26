@@ -57,6 +57,12 @@ def load_overrides() -> None:
             "BOND_GAS_FLOOR_HOURS", "BOND_SHARES_CORE", "BOND_SHARES_CHEAP_MAX",
             "BOND_POLL_INTERVAL_SECS", "BOND_MAX_MARKETS_PER_RUN",
         }
+        _bond_bool = {"BOND_CHEAP_NO_ENABLED", "BOND_CORE_YES_ENABLED"}
+        for key in _bond_bool:
+            if key in overrides:
+                val = overrides[key].lower() not in ("false", "0", "no")
+                setattr(_config, key, val)
+                applied[key] = val
         for key in _bond_float:
             if key in overrides:
                 val = float(overrides[key])

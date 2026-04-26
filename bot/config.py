@@ -194,13 +194,15 @@ BOND_MIN_ENTRY_HOURS      = 10    # FALLBACK ONLY — superseded by dynamic peak
 #   valid bucket labels: "0-10h", "10-20h", "20-30h", "30-48h", "48h+"
 BOND_DISABLED_TIERS:          set = set()
 BOND_DISABLED_SIDES:          set = set()
-BOND_DISABLED_ENTRY_BUCKETS:  set = set()
+# Disable entries made 10+ hours before resolution — data shows negative PnL outside 0-10h window.
+BOND_DISABLED_ENTRY_BUCKETS:  set = {"10-20h", "20-30h", "30-48h", "48h+"}
 
 # ── Targeted NO bet restrictions ───────────────────────────────────────────────
 # Data analysis (2026-04-14) showed CHEAP NO bets have 6.1% WR (-$16.03 total).
 # CORE NO bets below 15¢ have 0% WR (-$22.63 total). CORE NO at 15-20¢ however
 # have 46.7% WR (+$41.94) and are worth keeping.
 BOND_CHEAP_NO_ENABLED:   bool  = False   # disable all CHEAP tier NO bets
+BOND_CORE_YES_ENABLED:   bool  = False   # disable all CORE tier YES bets (11% WR, -$38.61 total)
 BOND_CORE_NO_MIN_ASK:    float = 0.15    # skip CORE NO bets priced below this ask
 
 # Market-implied confidence cap

@@ -117,14 +117,14 @@ async def run_bonding_loop(state: StateManager, exit_mgr, order_tracker, bond_cl
                 feed.update_markets(markets, forecasts)
 
             # Fallback REST scoring pass: catches markets with no recent WS events.
-            # Skip CHEAP-tier opportunities here — REST prices are stale (no live
-            # orderbook), and REST CHEAP entries have historically produced 0% win rate.
+            # Only place orders when a live ask_book is present — REST prices are stale
+            # and have produced negative PnL across all tiers historically.
             from bonding.sure_thing_scorer import score_certain
             opps = score_all(markets, forecasts) + score_certain(markets, forecasts)
             placed = 0
             for opp in opps[:BOND_MAX_MARKETS_PER_RUN]:
                 if not feed.is_on_cooldown(opp.token_id):
-                    if opp.market.ask_book or opp.tier != "CHEAP":
+                    if opp.market.ask_book:
                         await _place_bond_order(
                             bond_client, exit_mgr, order_tracker, opp, OrderArgs, OrderType
                         )
