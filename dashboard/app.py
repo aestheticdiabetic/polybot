@@ -363,6 +363,8 @@ async def create_app(state):
             "BOND_DISABLED_TIERS":          sorted(_config.BOND_DISABLED_TIERS),
             "BOND_DISABLED_SIDES":          sorted(_config.BOND_DISABLED_SIDES),
             "BOND_DISABLED_ENTRY_BUCKETS":  sorted(_config.BOND_DISABLED_ENTRY_BUCKETS),
+            "BOND_CHEAP_NO_ENABLED":        _config.BOND_CHEAP_NO_ENABLED,
+            "BOND_CORE_YES_ENABLED":        _config.BOND_CORE_YES_ENABLED,
         })
 
     @_auth_required
@@ -381,6 +383,7 @@ async def create_app(state):
         _set_keys = {
             "BOND_DISABLED_TIERS", "BOND_DISABLED_SIDES", "BOND_DISABLED_ENTRY_BUCKETS",
         }
+        _bool_keys = {"BOND_CHEAP_NO_ENABLED", "BOND_CORE_YES_ENABLED"}
         updated = {}
         for k, v in data.items():
             if k in _float_keys:
@@ -393,6 +396,10 @@ async def create_app(state):
                 updated[k] = val
             elif k in _set_keys:
                 val = set(v) if isinstance(v, list) else set()
+                setattr(_config, k, val)
+                updated[k] = val
+            elif k in _bool_keys:
+                val = bool(v)
                 setattr(_config, k, val)
                 updated[k] = val
         if updated:
@@ -588,7 +595,7 @@ async def create_app(state):
             _empty_tier_bd = {t: {"count": 0, "avg_conf": None} for t in ("CHEAP", "CORE", "CERTAIN")}
             _empty_et = {lbl: {"count": 0, "resolved": 0, "wins": 0, "win_rate": None,
                                "actual_pnl": 0, "tier_breakdown": _empty_tier_bd}
-                         for lbl in ("0-10h", "10-20h", "20-30h", "30-48h", "48h+")}
+                         for lbl in ("0-12h", "10-20h", "20-30h", "30-48h", "48h+")}
             return web.json_response({
                 "total": 0, "cycles": 0, "tier_stats": {},
                 "total_capital": 0, "total_projected_profit": 0,
@@ -652,8 +659,8 @@ async def create_app(state):
 
         # ── Entry time stats (bucketed by hours before resolution) ─────
         _BUCKETS = [
-            ("0-10h",  0,   10),
-            ("10-20h", 10,  20),
+            ("0-12h",  0,   12),
+            ("10-20h", 12,  20),
             ("20-30h", 20,  30),
             ("30-48h", 30,  48),
             ("48h+",   48,  float("inf")),
@@ -733,6 +740,52 @@ async def create_app(state):
                 "avg_wanted": avg_wanted,
             }
 
+        # ── City stats ───────────────────────────────────────────────
+        from collections import defaultdict as _dd
+        _city_map: dict = _dd(lambda: {"total": 0, "resolved": 0, "wins": 0, "pnl": 0.0,
+                                        "cheap_total": 0, "cheap_wins": 0, "cheap_pnl": 0.0,
+                                        "core_total": 0,  "core_wins": 0,  "core_pnl": 0.0})
+        for r in records:
+            city = r.get("city") or "unknown"
+            tier = r.get("tier", "")
+            is_res = _is_resolved(r)
+            is_win = _is_win(r) if is_res else False
+            pnl_val = float(r.get("pnl") or 0) if r.get("pnl") is not None else 0.0
+            _city_map[city]["total"] += 1
+            if is_res:
+                _city_map[city]["resolved"] += 1
+                _city_map[city]["pnl"] += pnl_val
+                if is_win:
+                    _city_map[city]["wins"] += 1
+            if tier == "CHEAP":
+                _city_map[city]["cheap_total"] += 1
+                if is_res:
+                    _city_map[city]["cheap_pnl"] += pnl_val
+                    if is_win:
+                        _city_map[city]["cheap_wins"] += 1
+            elif tier == "CORE":
+                _city_map[city]["core_total"] += 1
+                if is_res:
+                    _city_map[city]["core_pnl"] += pnl_val
+                    if is_win:
+                        _city_map[city]["core_wins"] += 1
+        city_stats = []
+        for city, s in sorted(_city_map.items(), key=lambda x: x[1]["pnl"]):
+            city_stats.append({
+                "city":        city,
+                "total":       s["total"],
+                "resolved":    s["resolved"],
+                "wins":        s["wins"],
+                "win_rate":    round(s["wins"] / s["resolved"] * 100, 1) if s["resolved"] else None,
+                "pnl":         round(s["pnl"], 4),
+                "cheap_total": s["cheap_total"],
+                "cheap_wins":  s["cheap_wins"],
+                "cheap_pnl":   round(s["cheap_pnl"], 4),
+                "core_total":  s["core_total"],
+                "core_wins":   s["core_wins"],
+                "core_pnl":    round(s["core_pnl"], 4),
+            })
+
         return web.json_response({
             "total":                    len(records),
             "cycles":                   cycles,
@@ -749,6 +802,7 @@ async def create_app(state):
             "entry_time_stats":         entry_time_stats,
             "side_stats":               side_stats,
             "depth_stats":              depth_stats,
+            "city_stats":               city_stats,
         })
 
     @_auth_required
@@ -1096,8 +1150,8 @@ async def create_app(state):
 
         # ── Entry time stats (bucketed by hours before resolution) ─────
         _BUCKETS = [
-            ("0-10h",  0,   10),
-            ("10-20h", 10,  20),
+            ("0-12h",  0,   12),
+            ("10-20h", 12,  20),
             ("20-30h", 20,  30),
             ("30-48h", 30,  48),
             ("48h+",   48,  float("inf")),

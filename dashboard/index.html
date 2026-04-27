@@ -490,7 +490,7 @@
           <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-bottom:6px;">ENTRY TIME (hours to resolution)</div>
           <div style="display:flex;gap:12px;flex-wrap:wrap;">
             <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;">
-              <input type="checkbox" id="btog-entry-0-10h" checked> 0–10h
+              <input type="checkbox" id="btog-entry-0-12h" checked> 0–12h
             </label>
             <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;">
               <input type="checkbox" id="btog-entry-10-20h" checked> 10–20h
@@ -752,6 +752,24 @@
       <span class="tier-header">AVG DEPTH</span>
     </div>
     <div id="depth-stat-rows"></div>
+  </div>
+
+  <!-- City performance table -->
+  <div class="section">
+    <div class="section-title">City Performance</div>
+    <div style="display:grid;grid-template-columns:130px 50px 60px 50px 70px 80px 80px 60px 80px 60px;gap:8px;padding:0 0 8px;border-bottom:1px solid var(--border);">
+      <span class="tier-header">CITY</span>
+      <span class="tier-header">BETS</span>
+      <span class="tier-header">RESOLVED</span>
+      <span class="tier-header">WINS</span>
+      <span class="tier-header">WIN RATE</span>
+      <span class="tier-header">TOTAL PnL</span>
+      <span class="tier-header" style="color:var(--amber)">CHEAP PnL</span>
+      <span class="tier-header" style="color:var(--amber)">CH W</span>
+      <span class="tier-header" style="color:var(--blue)">CORE PnL</span>
+      <span class="tier-header" style="color:var(--blue)">CR W</span>
+    </div>
+    <div id="city-stat-rows"></div>
   </div>
 
   <!-- Recent opportunities table -->
@@ -1149,7 +1167,7 @@ function _fmtConf(avg_conf) {
 
 function _renderEntryTimeRows(containerId, et) {
   const container = document.getElementById(containerId); container.innerHTML = '';
-  for (const label of ['0-10h','10-20h','20-30h','30-48h','48h+']) {
+  for (const label of ['0-12h','10-20h','20-30h','30-48h','48h+']) {
     const b  = et[label] || {count:0,resolved:0,wins:0,win_rate:null,actual_pnl:0,tier_breakdown:{}};
     const td = b.tier_breakdown || {};
     const div = document.createElement('div');
@@ -1280,7 +1298,7 @@ const BOND_CFG_META = {
 
 const _BOND_TIER_IDS    = ['CHEAP', 'CORE', 'CERTAIN'];
 const _BOND_SIDE_IDS    = ['YES', 'NO'];
-const _BOND_ENTRY_IDS   = ['0-10h', '10-20h', '20-30h', '30-48h', '48h+'];
+const _BOND_ENTRY_IDS   = ['0-12h', '10-20h', '20-30h', '30-48h', '48h+'];
 
 function _setToggleStates(disabledTiers, disabledSides, disabledBuckets) {
   _BOND_TIER_IDS.forEach(t => {
@@ -1964,6 +1982,29 @@ function updatePaperStats(s) {
       <span class="${frCls}">${frTxt}</span>
       <span style="color:var(--muted)">${depTxt}</span>`;
     depthRows.appendChild(div);
+  }
+
+  // City stats rows — sorted worst PnL first (sorted by backend)
+  const cityRows = document.getElementById('city-stat-rows'); cityRows.innerHTML = '';
+  for (const c of (s.city_stats || [])) {
+    const div = document.createElement('div');
+    div.style.cssText = 'display:grid;grid-template-columns:130px 50px 60px 50px 70px 80px 80px 60px 80px 60px;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px;';
+    const wr      = c.win_rate != null ? c.win_rate + '%' : '—';
+    const wrCls   = c.win_rate != null ? (c.win_rate >= 30 ? 'green' : c.win_rate >= 15 ? 'amber' : 'red') : '';
+    const totalPnl = parseFloat(c.pnl || 0);
+    const cheapPnl = parseFloat(c.cheap_pnl || 0);
+    const corePnl  = parseFloat(c.core_pnl || 0);
+    div.innerHTML = `<span style="color:var(--text);font-weight:600">${c.city}</span>
+      <span style="color:var(--muted)">${c.total}</span>
+      <span style="color:var(--muted)">${c.resolved}</span>
+      <span>${c.wins}</span>
+      <span class="${wrCls}">${wr}</span>
+      <span class="${totalPnl>0?'green':totalPnl<0?'red':''}">${totalPnl>=0?'+':''}$${totalPnl.toFixed(2)}</span>
+      <span class="amber" style="opacity:0.9">${cheapPnl>=0?'+':''}$${cheapPnl.toFixed(2)}</span>
+      <span class="amber" style="opacity:0.7">${c.cheap_wins}/${c.cheap_total||0}</span>
+      <span class="blue" style="opacity:0.9">${corePnl>=0?'+':''}$${corePnl.toFixed(2)}</span>
+      <span class="blue" style="opacity:0.7">${c.core_wins}/${c.core_total||0}</span>`;
+    cityRows.appendChild(div);
   }
 }
 
