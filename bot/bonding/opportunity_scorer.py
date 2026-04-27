@@ -30,8 +30,8 @@ TIER_CORE  = "CORE"
 
 # Entry-time bucket labels (must match dashboard UI and BOND_DISABLED_ENTRY_BUCKETS values)
 _ENTRY_BUCKETS = [
-    ("0-10h",  0,   10),
-    ("10-20h", 10,  20),
+    ("0-12h",  0,   12),
+    ("10-20h", 12,  20),
     ("20-30h", 20,  30),
     ("30-48h", 30,  48),
     ("48h+",   48,  float("inf")),

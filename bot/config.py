@@ -194,7 +194,7 @@ BOND_MIN_ENTRY_HOURS      = 10    # FALLBACK ONLY — superseded by dynamic peak
 #   valid bucket labels: "0-10h", "10-20h", "20-30h", "30-48h", "48h+"
 BOND_DISABLED_TIERS:          set = set()
 BOND_DISABLED_SIDES:          set = set()
-# Disable entries made 10+ hours before resolution — data shows negative PnL outside 0-10h window.
+# Disable entries made 12+ hours before resolution — data shows negative PnL outside 0-12h window.
 BOND_DISABLED_ENTRY_BUCKETS:  set = {"10-20h", "20-30h", "30-48h", "48h+"}
 
 # ── Targeted NO bet restrictions ───────────────────────────────────────────────
