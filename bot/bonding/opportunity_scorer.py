@@ -364,6 +364,18 @@ def _score_side(
     max_profitable_price = prob - min_edge
     shares_immediate, shares_limit = _compute_fill_split(ask_book, shares, max_profitable_price)
 
+    # Reject if fillable depth is below the $1 minimum order size.
+    # e.g. 3 shares @ 0.063 = $0.189 — Polymarket CLOB rejects orders below $1.
+    # Log as DEPTH_MISS (shares_immediate=0) so the market stays eligible for re-check
+    # next cycle in case more depth appears.
+    if shares_immediate > 0 and round(shares_immediate * ask, 4) < _config.BOND_MIN_GTC_ORDER_USDC:
+        log.debug(
+            f"scorer: {market.city} {market.target_date} {outcome} "
+            f"fillable ${shares_immediate * ask:.4f} < ${_config.BOND_MIN_GTC_ORDER_USDC:.2f} min "
+            f"({shares_immediate} shares @ {ask:.4f}) — depth too thin, depth miss"
+        )
+        shares_immediate = 0
+
     if shares_immediate == 0 and shares_limit == 0:
         return None
 
