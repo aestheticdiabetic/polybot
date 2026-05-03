@@ -819,13 +819,23 @@ async def _fetch_nearterm_hourly(lat: float, lon: float, target_date: date) -> d
 
 
 def _nearterm_sigma(city: str, target_month: int) -> float:
-    """Return per-city/month σ (°C) derived from historical daily max archive.
+    """Return per-city/month σ (°C) for synthetic ensemble generation.
 
-    Uses the last 60 same-month observations (up to ~5 years of Aprils, etc.)
-    so stable climates like Singapore produce a tighter spread than variable
-    ones like Warsaw. Falls back to the global NEARTERM_SIGMA_NEXT_DAY constant
-    if the city isn't seeded yet or has fewer than 10 same-month observations.
+    Priority order:
+    1. ERA5-calibrated table (BOND_NEARTERM_SIGMA_BY_CITY_MONTH) — most accurate,
+       computed by era5_sigma_calibration.py from 2+ years of archive data.
+    2. Empirical stdev from the statistical forecast cache — good once the cache
+       has ≥10 same-month observations (seeded at startup).
+    3. Global constant NEARTERM_SIGMA_NEXT_DAY — safe fallback.
     """
+    # 1. ERA5 calibrated table
+    era5_table = _config.BOND_NEARTERM_SIGMA_BY_CITY_MONTH
+    if era5_table:
+        city_sigmas = era5_table.get(city, {})
+        if target_month in city_sigmas:
+            return max(float(city_sigmas[target_month]), 0.5)
+
+    # 2. Empirical stdev from statistical forecast cache
     try:
         from bonding.statistical_forecast import _history as _stat_history
         city_hist = _stat_history.get(city, {})
@@ -840,6 +850,8 @@ def _nearterm_sigma(city: str, target_month: int) -> float:
             return max(variance ** 0.5, 0.5)
     except Exception:
         pass
+
+    # 3. Global constant
     return NEARTERM_SIGMA_NEXT_DAY
 
 

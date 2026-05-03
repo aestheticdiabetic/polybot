@@ -269,6 +269,33 @@ BOND_CITY_BIAS_CORRECTIONS: dict[str, float] = {
 # Format: {city: {month_int: correction_c}}  e.g. {"Munich": {4: 1.5, 5: 2.0}}
 BOND_CITY_MONTHLY_BIAS_CORRECTIONS: dict[str, dict[int, float]] = {}
 
+# ─── ERA5 sigma calibration ──────────────────────────────────────────────────
+# Per-city/month sigma (°C) for synthetic near-term ensemble generation.
+# Populated by bot/bonding/era5_sigma_calibration.py --apply.
+# Takes precedence over the global NEARTERM_SIGMA_NEXT_DAY constant and the
+# empirical stdev derived from the statistical forecast cache.
+# Format: {city: {month_int: sigma_c}}  e.g. {"Munich": {4: 4.8, 5: 5.1}}
+BOND_NEARTERM_SIGMA_BY_CITY_MONTH: dict[str, dict[int, float]] = {}
+
+# ─── Cross-bucket cluster filter ─────────────────────────────────────────────
+# When multiple markets exist for the same city/date (one per temperature bucket),
+# the cluster's most-favoured YES bucket tells us how concentrated the market is.
+# For NO bets, if the cluster contains a bucket with YES ask ≥ YES_THRESHOLD, the
+# market has strong conviction in one outcome and we apply DISAGREE_RATIO instead of
+# the global BOND_MARKET_DISAGREEMENT_RATIO, making it harder for our model to enter.
+BOND_CROSS_BUCKET_ENABLED: bool = True
+BOND_CROSS_BUCKET_YES_THRESHOLD: float = 0.60   # cluster peak YES ≥ this = concentrated market
+BOND_CROSS_BUCKET_DISAGREE_RATIO: float = 1.8   # tighter cap when cluster is concentrated
+BOND_CROSS_BUCKET_MIN_CLUSTER_SIZE: int = 2     # need ≥N markets in cluster to use signal
+
+# ─── Price momentum filter ────────────────────────────────────────────────────
+# Tracks recent WS price history per token. Vetos new entries when the market has
+# been moving against our direction by more than VETO_THRESHOLD in the lookback window.
+# Prevents entering just as a market is repricing against our position.
+BOND_MOMENTUM_FILTER_ENABLED: bool = True
+BOND_MOMENTUM_VETO_THRESHOLD: float = 0.03  # adverse move (in prob units) to veto entry
+BOND_MOMENTUM_LOOKBACK_SECS: int = 3600     # 1-hour lookback window
+
 # ─── Statistical forecast (ARIMA/Naïve 4th source) ───────────────────────────
 # Weight applied to the statistical source in consensus_prob() relative to each
 # meteorological source (GFS, ECMWF, TIO each have weight 1.0).

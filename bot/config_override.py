@@ -131,6 +131,20 @@ def load_overrides() -> None:
             except (json.JSONDecodeError, TypeError) as e:
                 log.warning(f"Failed to load BOND_CITY_MONTHLY_BIAS_CORRECTIONS_JSON: {e}")
 
+        if "BOND_NEARTERM_SIGMA_BY_CITY_MONTH_JSON" in overrides:
+            try:
+                raw = json.loads(overrides["BOND_NEARTERM_SIGMA_BY_CITY_MONTH_JSON"])
+                # JSON month keys are strings; convert back to int.
+                _config.BOND_NEARTERM_SIGMA_BY_CITY_MONTH = {
+                    city: {int(m): float(s) for m, s in months.items()}
+                    for city, months in raw.items()
+                }
+                applied["BOND_NEARTERM_SIGMA_BY_CITY_MONTH"] = (
+                    f"({len(_config.BOND_NEARTERM_SIGMA_BY_CITY_MONTH)} cities)"
+                )
+            except (json.JSONDecodeError, TypeError) as e:
+                log.warning(f"Failed to load BOND_NEARTERM_SIGMA_BY_CITY_MONTH_JSON: {e}")
+
         if applied:
             log.info(f"Loaded config overrides: {applied}")
     except Exception as e:
@@ -166,6 +180,11 @@ def save_overrides(overrides: dict) -> bool:
             elif k == "BOND_CITY_MONTHLY_BIAS_CORRECTIONS":
                 existing["BOND_CITY_MONTHLY_BIAS_CORRECTIONS_JSON"] = json.dumps(
                     {city: {str(m): c for m, c in months.items()} for city, months in v.items()},
+                    sort_keys=True,
+                )
+            elif k == "BOND_NEARTERM_SIGMA_BY_CITY_MONTH":
+                existing["BOND_NEARTERM_SIGMA_BY_CITY_MONTH_JSON"] = json.dumps(
+                    {city: {str(m): s for m, s in months.items()} for city, months in v.items()},
                     sort_keys=True,
                 )
             elif k in _set_keys:

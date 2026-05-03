@@ -24,7 +24,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from bonding.market_scanner import scan_weather_markets
-from bonding.opportunity_scorer import score_all, ScoredOpportunity, TIER_CHEAP, TIER_CORE
+from bonding.opportunity_scorer import score_all, ScoredOpportunity, TIER_CHEAP, TIER_CORE, record_price_tick
 from bonding.weather_client import get_consensus_forecasts
 import config as _config
 from config import LOG_LEVEL
@@ -291,6 +291,9 @@ class PaperExitManager:
 
     async def on_price_tick(self, token_id: str, price: float) -> None:
         """Called by BondPriceFeed on every WS price event for a tracked token."""
+        # Feed the price history used by the momentum filter.
+        record_price_tick(token_id, price)
+
         pos = self._positions.get(token_id)
         if pos is None or pos.status != "OPEN":
             return
@@ -558,9 +561,10 @@ def log_opportunity(opp, seen_ids: set[str]) -> bool:
         "ev":              round(opp.ev, 4),
         "edge":            round(opp.edge, 4),
         "capital":         fillable_capital,       # cost basis for shares_immediate only
-        "outcome":         None,  # filled post-resolution by analysis script
-        "pnl":             None,
-        "source":          source,
+        "outcome":                  None,  # filled post-resolution by analysis script
+        "pnl":                      None,
+        "source":                   source,
+        "cluster_dominant_yes_ask": round(opp.cluster_dominant_yes_ask, 3),
     }
     _append_record(record)
     depth_note = f"depth={opp.shares_immediate}/{opp.shares}" if opp.shares_limit > 0 else f"shares={opp.shares_immediate}"

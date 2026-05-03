@@ -4,10 +4,11 @@ opportunity_scorer.py — Join forecast data with market data.
 Computes expected value per share for each market candidate, assigns a
 position tier (CHEAP / CORE), and enforces per-cluster capital caps.
 """
+import collections
 import logging
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Optional
@@ -20,7 +21,40 @@ from bonding.weather_client import _peak_hour_stats as _loaded_stats
 
 log = logging.getLogger("bond.scorer")
 
-# REST-scan suppression cache: (city, target_date) → suppressed_until (Unix timestamp).
+# ── Price-history cache (momentum filter) ────────────────────────────────────
+# Maps token_id → deque of (unix_timestamp, ask) ticks recorded from WS feed.
+# Kept as a module-level singleton so price_feed.py and paper_sim.py both write
+# to the same store that score_market() reads from.
+_PRICE_HISTORY_MAX_TICKS = 120  # per token
+_price_history: dict[str, collections.deque] = {}
+
+
+def record_price_tick(token_id: str, ask: float) -> None:
+    """Record a live price tick for a token. Called from price_feed and paper_sim."""
+    if token_id not in _price_history:
+        _price_history[token_id] = collections.deque(maxlen=_PRICE_HISTORY_MAX_TICKS)
+    _price_history[token_id].append((time.time(), ask))
+
+
+def get_momentum(token_id: str, lookback_secs: Optional[int] = None) -> Optional[float]:
+    """
+    Price change of this token over the lookback window (default from config).
+    Positive = price rising (market buying this token = good for our same-side bet).
+    Returns None if fewer than 2 ticks exist in the window.
+    """
+    if lookback_secs is None:
+        lookback_secs = _config.BOND_MOMENTUM_LOOKBACK_SECS
+    history = _price_history.get(token_id)
+    if not history or len(history) < 2:
+        return None
+    cutoff = time.time() - lookback_secs
+    window = [(ts, ask) for ts, ask in history if ts >= cutoff]
+    if len(window) < 2:
+        return None
+    return window[-1][1] - window[0][1]
+
+
+# ── REST-scan suppression cache: (city, target_date) → suppressed_until (Unix timestamp).
 # Set when score_market skips a market due to the time gate, so the REST scan avoids
 # re-evaluating the same market every 60 s until local midnight passes.
 _scan_suppressions: dict[tuple, float] = {}
@@ -69,6 +103,7 @@ class ScoredOpportunity:
     outcome: str           # "YES" or "NO" — which token to trade
     token_id: str          # token ID for CLOB orders (YES or NO token)
     side_ask: float        # best ask for the chosen side
+    cluster_dominant_yes_ask: float = field(default=0.0)  # highest YES ask in city/date cluster
 
 
 def passes_time_gate(market: "MarketCandidate", forecast_peak_hour: Optional[int]) -> bool:
@@ -136,6 +171,15 @@ def score_all(
     Returns list of ScoredOpportunity sorted by EV descending,
     with per-cluster capital caps applied.
     """
+    # Build cross-bucket cluster map: highest YES ask and market count per city/date.
+    # Used by the cross-bucket filter inside _score_side() to detect concentrated markets.
+    cluster_max_yes: dict[tuple, float] = {}
+    cluster_size: dict[tuple, int] = {}
+    for m in markets:
+        key = (m.city, m.target_date)
+        cluster_max_yes[key] = max(cluster_max_yes.get(key, 0.0), m.best_ask)
+        cluster_size[key] = cluster_size.get(key, 0) + 1
+
     scored: list[ScoredOpportunity] = []
 
     for market in markets:
@@ -144,7 +188,12 @@ def score_all(
             log.debug(f"scorer: no forecast for {market.city} {market.target_date}, skipping")
             continue
 
-        opp = score_market(market, forecast)
+        key = (market.city, market.target_date)
+        opp = score_market(
+            market, forecast,
+            cluster_dominant_yes_ask=cluster_max_yes.get(key, 0.0),
+            cluster_size=cluster_size.get(key, 1),
+        )
         if opp is not None:
             scored.append(opp)
 
@@ -167,10 +216,15 @@ def score_all(
 def score_market(
     market: MarketCandidate,
     forecast: SourceConsensus,
+    cluster_dominant_yes_ask: float = 0.0,
+    cluster_size: int = 1,
 ) -> Optional[ScoredOpportunity]:
     """
     Score YES and NO sides of a market. Returns the higher-EV side, or None if
     neither meets tier criteria. Never returns both sides (prevents same-market hedging).
+
+    cluster_dominant_yes_ask: highest YES ask in the city/date cluster (cross-bucket signal).
+    cluster_size: number of markets in the same city/date cluster.
     """
     if not _config.BOND_CITY_TIMEZONES.get(market.city):
         log.warning(
@@ -209,6 +263,8 @@ def score_market(
             market=market, forecast=forecast,
             prob=prob_yes, ask=market.best_ask, ask_book=market.ask_book,
             token_id=market.token_id, outcome="YES",
+            cluster_dominant_yes_ask=cluster_dominant_yes_ask,
+            cluster_size=cluster_size,
         )
     no_opp: Optional[ScoredOpportunity] = None
     if market.no_token_id and market.no_best_ask is not None and "NO" not in disabled_sides:
@@ -216,6 +272,8 @@ def score_market(
             market=market, forecast=forecast,
             prob=prob_no, ask=market.no_best_ask, ask_book=market.no_ask_book,
             token_id=market.no_token_id, outcome="NO",
+            cluster_dominant_yes_ask=cluster_dominant_yes_ask,
+            cluster_size=cluster_size,
         )
 
     if yes_opp is None and no_opp is None:
@@ -286,6 +344,8 @@ def _score_side(
     ask_book: list,
     token_id: str,
     outcome: str,
+    cluster_dominant_yes_ask: float = 0.0,
+    cluster_size: int = 1,
 ) -> Optional[ScoredOpportunity]:
     """
     Score a single side (YES or NO) of a market.
@@ -308,6 +368,27 @@ def _score_side(
             f"(ratio={prob/ask:.1f}x > {_config.BOND_MARKET_DISAGREEMENT_RATIO}x)"
         )
         prob = market_cap
+
+    # ── Cross-bucket cluster filter ───────────────────────────────────────────
+    # If the city/date cluster has a dominant YES bucket (another market priced at
+    # a high YES ask), the market has strong directional conviction. Apply a tighter
+    # disagreement ratio for NO bets to avoid fighting a well-informed consensus.
+    if (
+        outcome == "NO"
+        and _config.BOND_CROSS_BUCKET_ENABLED
+        and cluster_size >= _config.BOND_CROSS_BUCKET_MIN_CLUSTER_SIZE
+        and cluster_dominant_yes_ask >= _config.BOND_CROSS_BUCKET_YES_THRESHOLD
+    ):
+        tight_cap = ask * _config.BOND_CROSS_BUCKET_DISAGREE_RATIO
+        if prob > tight_cap:
+            log.debug(
+                f"scorer: {market.city} {market.target_date} NO "
+                f"cross-bucket veto: cluster_top_yes={cluster_dominant_yes_ask:.2f} "
+                f"≥ {_config.BOND_CROSS_BUCKET_YES_THRESHOLD} threshold, "
+                f"prob={prob:.3f} > tight_cap={tight_cap:.3f} "
+                f"(ratio={_config.BOND_CROSS_BUCKET_DISAGREE_RATIO}x)"
+            )
+            return None
 
     ev   = prob - ask
     edge = ev
@@ -359,6 +440,22 @@ def _score_side(
         )
         return None
 
+    # ── Price momentum filter ─────────────────────────────────────────────────
+    # Veto if the market has been moving against our direction within the lookback
+    # window. We read the momentum of our specific token (YES or NO), so negative
+    # momentum means the token we want to buy is falling in price — the market is
+    # selling it. Only fires once enough tick history exists (at least 2 ticks).
+    if _config.BOND_MOMENTUM_FILTER_ENABLED:
+        momentum = get_momentum(token_id)
+        if momentum is not None and momentum < -_config.BOND_MOMENTUM_VETO_THRESHOLD:
+            log.debug(
+                f"scorer: {market.city} {market.target_date} {outcome} "
+                f"momentum veto: {momentum:+.4f} over "
+                f"{_config.BOND_MOMENTUM_LOOKBACK_SECS}s "
+                f"< -{_config.BOND_MOMENTUM_VETO_THRESHOLD}"
+            )
+            return None
+
     shares = _shares_for_tier(tier, ask)
     # Only fill at prices that maintain the tier's minimum edge requirement.
     max_profitable_price = prob - min_edge
@@ -396,6 +493,7 @@ def _score_side(
         outcome=outcome,
         token_id=token_id,
         side_ask=ask,
+        cluster_dominant_yes_ask=cluster_dominant_yes_ask,
     )
 
 

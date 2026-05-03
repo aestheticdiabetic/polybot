@@ -22,7 +22,7 @@ import websockets
 
 from bonding import peak_hour_stats as _peak_stats
 from bonding.market_scanner import MarketCandidate
-from bonding.opportunity_scorer import score_market
+from bonding.opportunity_scorer import score_market, record_price_tick
 from bonding.weather_client import ForecastResult, SourceConsensus, _peak_hour_stats as _loaded_stats
 from config import CLOB_WS
 
@@ -45,9 +45,11 @@ class BondPriceFeed:
     def __init__(self, on_opportunity, on_price_tick=None):
         self._on_opportunity = on_opportunity
         self._on_price_tick = on_price_tick  # async cb(token_id, price) fired on every WS tick
-        self._markets: dict[str, MarketCandidate] = {}        # token_id → candidate
-        self._forecasts: dict[tuple, SourceConsensus] = {}     # (city, date) → consensus
-        self._cooldowns: dict[str, float] = {}                # token_id → last_order_ts
+        self._markets: dict[str, MarketCandidate] = {}           # token_id → candidate
+        self._forecasts: dict[tuple, SourceConsensus] = {}      # (city, date) → consensus
+        self._cooldowns: dict[str, float] = {}                  # token_id → last_order_ts
+        self._cluster_max_yes: dict[tuple, float] = {}          # (city, date) → max YES ask
+        self._cluster_size: dict[tuple, int] = {}               # (city, date) → market count
         self._ws = None
         self._running = False
         self._last_msg_at: float = 0.0
@@ -70,6 +72,16 @@ class BondPriceFeed:
         """
         new_ids: set[str] = set()
         old_ids = set(self._markets.keys())
+
+        # Rebuild cross-bucket cluster map for the new candidate set.
+        new_cluster_max_yes: dict[tuple, float] = {}
+        new_cluster_size: dict[tuple, int] = {}
+        for m in candidates:
+            key = (m.city, m.target_date)
+            new_cluster_max_yes[key] = max(new_cluster_max_yes.get(key, 0.0), m.best_ask)
+            new_cluster_size[key] = new_cluster_size.get(key, 0) + 1
+        self._cluster_max_yes = new_cluster_max_yes
+        self._cluster_size    = new_cluster_size
 
         updated: dict[str, MarketCandidate] = {}
         for m in candidates:
@@ -228,6 +240,9 @@ class BondPriceFeed:
         if updated_ask is None or not (0.0 < updated_ask < 1.0):
             return
 
+        # Record tick for momentum filter before anything else.
+        record_price_tick(asset_id, updated_ask)
+
         # Notify price-tick subscribers (e.g. paper exit manager) before cooldown gate.
         if self._on_price_tick is not None:
             await self._on_price_tick(asset_id, updated_ask)
@@ -283,7 +298,12 @@ class BondPriceFeed:
                 )
                 return
 
-        opp = score_market(market, forecast)
+        key = (market.city, market.target_date)
+        opp = score_market(
+            market, forecast,
+            cluster_dominant_yes_ask=self._cluster_max_yes.get(key, 0.0),
+            cluster_size=self._cluster_size.get(key, 1),
+        )
         # Always cooldown after scoring — prevents re-evaluating the same token on every tick.
         self.mark_cooldown(asset_id)
         # Only fire if scored side matches the token that triggered this event.
