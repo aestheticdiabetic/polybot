@@ -182,7 +182,7 @@ def _auth_required(handler):
             # No WWW-Authenticate header on API endpoints — that header triggers
             # Chrome's native auth dialog on every failed fetch(), causing the
             # entire browser UI to flash. Only the HTML page needs that header.
-            return web.Response(status=401, text="Unauthorised")
+            return web.json_response({"ok": False, "error": "Unauthorised"}, status=401)
         return await handler(request)
     return wrapper
 
