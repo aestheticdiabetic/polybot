@@ -309,12 +309,13 @@ DEFAULT_OVERRIDE_FILE = "/app/data/config.override.env"
 
 
 async def main(args: argparse.Namespace) -> None:
-    # Load config for city coords and global default
+    # Load config for city coords and global default sigma
     try:
         sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
         import config as _config
+        from bonding.weather_client import NEARTERM_SIGMA_NEXT_DAY
         city_coords    = dict(_config.BOND_CITIES)
-        global_default = float(_config.NEARTERM_SIGMA_NEXT_DAY)
+        global_default = float(NEARTERM_SIGMA_NEXT_DAY)
     except Exception as exc:
         print(f"ERROR: could not load config: {exc}", file=sys.stderr)
         sys.exit(1)
