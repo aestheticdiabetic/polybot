@@ -512,7 +512,7 @@ async def create_app(state):
         # preserving all original fields (prob, ev, capital, etc.) for display.
         records = []
         for r in all_records:
-            if r.get("event") == "WOULD_SELL":
+            if r.get("event") != "WOULD_BUY":
                 continue
             mid = r.get("market_id")
             if mid and mid in sell_map:
