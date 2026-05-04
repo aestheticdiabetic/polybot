@@ -283,7 +283,7 @@ BOND_NEARTERM_SIGMA_BY_CITY_MONTH: dict[str, dict[int, float]] = {}
 # For NO bets, if the cluster contains a bucket with YES ask ≥ YES_THRESHOLD, the
 # market has strong conviction in one outcome and we apply DISAGREE_RATIO instead of
 # the global BOND_MARKET_DISAGREEMENT_RATIO, making it harder for our model to enter.
-BOND_CROSS_BUCKET_ENABLED: bool = True
+BOND_CROSS_BUCKET_ENABLED: bool = False  # disabled: empirical data shows filter selects worse bets
 BOND_CROSS_BUCKET_YES_THRESHOLD: float = 0.60   # cluster peak YES ≥ this = concentrated market
 BOND_CROSS_BUCKET_DISAGREE_RATIO: float = 1.8   # tighter cap when cluster is concentrated
 BOND_CROSS_BUCKET_MIN_CLUSTER_SIZE: int = 2     # need ≥N markets in cluster to use signal

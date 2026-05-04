@@ -517,16 +517,21 @@ async def get_consensus_forecasts(
 
     # tomorrow.io — one batched call per city (reduces calls from N pairs to N cities)
     # Filter to free-tier forecast horizon only: dates beyond this return 403 and waste credits.
-    from bonding.tomorrow_client import TOMORROW_IO_MAX_FORECAST_DAYS
+    # City order is randomised each cycle so the hourly budget is distributed across all cities
+    # rather than always starving cities at the end of a fixed iteration order.
+    from bonding.tomorrow_client import TOMORROW_IO_MAX_FORECAST_DAYS, has_rate_limit_budget as _tio_has_budget
     tio_horizon = today_d + timedelta(days=TOMORROW_IO_MAX_FORECAST_DAYS)
     tio_results: dict[tuple[str, date], ForecastResult] = {}
-    n_tio_cities = len(city_groups)
-    for i, (canonical, lat, lon, dates) in enumerate(city_groups.values()):
-        if i % 10 == 0 and i > 0:
-            log.info(f"TIO fetch: {i}/{n_tio_cities} cities done")
+    tio_cities = list(city_groups.values())
+    random.shuffle(tio_cities)
+    n_tio_cities = len(tio_cities)
+    for i, (canonical, lat, lon, dates) in enumerate(tio_cities):
         tio_dates = sorted(d for d in dates if d <= tio_horizon)
         if not tio_dates:
             continue
+        if not _tio_has_budget():
+            log.info(f"TIO hourly budget exhausted — {n_tio_cities - i} cities deferred to next cycle")
+            break
         batch = await _tio_get_forecasts_batch(canonical, lat, lon, tio_dates)
         for d, result in batch.items():
             tio_results[(canonical, d)] = result

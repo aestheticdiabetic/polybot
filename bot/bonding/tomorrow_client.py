@@ -143,6 +143,11 @@ def _check_rate_limit() -> bool:
     return len(_call_times) < _config.TOMORROW_IO_MAX_REQ_PER_HOUR
 
 
+def has_rate_limit_budget() -> bool:
+    """Returns True if at least one more request is allowed this hour."""
+    return _check_rate_limit()
+
+
 def _record_call() -> None:
     _call_times.append(time.time())
     _save_call_times()
